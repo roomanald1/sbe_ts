@@ -26,6 +26,9 @@ tower = { version = "0.5.3", features = ["util"] }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time", "process"] }
 sbe_schema = { package = "example", path = "../feed_handlers/src/sbe/sbe_out/example" }
 
+[dev-dependencies]
+auto_trader = { path = "../auto_trader", features = ["benchmark-support"] }
+
 [[bench]]
 name = "calculations"
 harness = false

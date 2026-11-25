@@ -65,6 +65,20 @@ struct LearningOutcome {
     net_return_percent: f64,
     #[serde(default)]
     evidence_group_id: Option<String>,
+    /// UTC 4-hour clustering block assigned at outcome ingestion. It groups
+    /// correlated observations; it is not a claim that adjacent blocks are
+    /// statistically independent. Inference uses a serial-dependence-aware
+    /// stationary bootstrap over these clusters.
+    #[serde(default)]
+    independence_block_id: Option<u64>,
+    /// Stable baseline-profile plus tested-parameter family identity.
+    #[serde(default)]
+    candidate_family_id: Option<String>,
+    /// Number of candidate combinations in the bounded parameter grid. The
+    /// value is fixed for the family so online alpha spending remains valid
+    /// as additional candidates are observed.
+    #[serde(default)]
+    candidate_family_size: Option<usize>,
     #[serde(default)]
     learning_context: Option<String>,
     #[serde(default)]
@@ -150,8 +164,20 @@ struct LearningState {
     missed_opportunity_jobs: BTreeMap<String, MissedOpportunityJob>,
     #[serde(default)]
     scout_replay_runs: BTreeMap<String, serde_json::Value>,
+    /// Durable online-look ledger for paired Scout promotion. Overflow fails
+    /// closed rather than dropping older look or candidate-family counts.
+    #[serde(default)]
+    scout_promotion_look_history: BTreeMap<String, ScoutPromotionLookHistory>,
+    #[serde(default)]
+    scout_promotion_look_history_overflowed: bool,
     #[serde(default)]
     evidence_requests: BTreeMap<String, EvidenceRequest>,
+    /// Bounded, restart-safe exploration evidence accounting. These records
+    /// are telemetry only and are never read by selection or promotion.
+    #[serde(default)]
+    evidence_gain_records: BTreeMap<String, EvidenceGainRecord>,
+    #[serde(default)]
+    evidence_gain_records_overflowed: bool,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
     #[serde(skip)]
@@ -163,6 +189,20 @@ struct LearningState {
     #[serde(skip)]
     state_updates: Option<Arc<tokio::sync::Notify>>,
 }
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct ScoutPromotionLookHistory {
+    look_count: u64,
+    candidate_hypotheses: BTreeSet<String>,
+    family_hypothesis_count: Option<usize>,
+    last_look_block_id: Option<u64>,
+    last_look_id: Option<String>,
+    overflowed: bool,
+}
+
+const MAX_SCOUT_PROMOTION_FAMILIES: usize = 1_024;
+const MAX_SCOUT_PROMOTION_HYPOTHESES_PER_FAMILY: usize = 256;
 
 fn default_live_scout_parameter_samples() -> usize {
     MINIMUM_SCOUT_PARAMETER_SAMPLES
@@ -185,6 +225,109 @@ mod scout_sample_defaults_tests {
 #[cfg(test)]
 mod evidence_request_tests {
     use super::*;
+
+    #[test]
+    fn evidence_request_direction_scope_is_optional_and_part_of_identity() {
+        let mut state = LearningState::default();
+        let long_id = schedule_evidence_request_with_direction(
+            &mut state,
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "5m",
+            Some("long"),
+            "missing",
+            1_000,
+        )
+        .unwrap();
+        let short_id = schedule_evidence_request_with_direction(
+            &mut state,
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "5m",
+            Some("short"),
+            "missing",
+            1_000,
+        )
+        .unwrap();
+        assert_ne!(long_id, short_id);
+        assert_eq!(
+            state.evidence_requests[&long_id].direction_scope.as_deref(),
+            Some("long")
+        );
+        assert_eq!(
+            state.evidence_requests[&short_id]
+                .direction_scope
+                .as_deref(),
+            Some("short")
+        );
+        assert!(
+            schedule_evidence_request_with_direction(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "trend",
+                "5m",
+                Some("long"),
+                "stale",
+                1_001,
+            )
+            .is_none()
+        );
+        assert!(
+            schedule_evidence_request_with_direction(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "trend",
+                "5m",
+                Some("long"),
+                "fresh",
+                1_002,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            state.evidence_requests[&long_id].status,
+            EvidenceRequestStatus::Completed
+        );
+        assert_eq!(
+            state.evidence_requests[&short_id].status,
+            EvidenceRequestStatus::Pending
+        );
+
+        let unscoped =
+            evidence_request_key("BTC-USDT", "live-momentum", "profile-1", "trend", "5m");
+        assert_eq!(
+            unscoped,
+            "8:BTC-USDT|13:live-momentum|9:profile-1|5:trend|2:5m"
+        );
+        let unscoped_id = schedule_evidence_request(
+            &mut state,
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "5m",
+            "missing",
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(unscoped_id, unscoped);
+        assert_eq!(state.evidence_requests[&unscoped_id].direction_scope, None);
+        let mut old_record = serde_json::to_value(&state.evidence_requests[&unscoped_id]).unwrap();
+        old_record
+            .as_object_mut()
+            .unwrap()
+            .remove("direction_scope");
+        let recovered: EvidenceRequest = serde_json::from_value(old_record).unwrap();
+        assert_eq!(recovered.direction_scope, None);
+    }
 
     #[test]
     fn equivalent_gaps_deduplicate_and_freshness_completes_them() {
@@ -407,7 +550,11 @@ impl Default for LearningState {
             strategy_replay_jobs: BTreeMap::new(),
             missed_opportunity_jobs: BTreeMap::new(),
             scout_replay_runs: BTreeMap::new(),
+            scout_promotion_look_history: BTreeMap::new(),
+            scout_promotion_look_history_overflowed: false,
             evidence_requests: BTreeMap::new(),
+            evidence_gain_records: BTreeMap::new(),
+            evidence_gain_records_overflowed: false,
             seen_event_ids: BTreeSet::new(),
             accepted_events: 0,
             outcome_history_truncated: false,
@@ -419,6 +566,7 @@ impl Default for LearningState {
 }
 
 const MAX_EVIDENCE_REQUESTS: usize = 10_000;
+const MAX_EVIDENCE_GAIN_RECORDS: usize = 10_000;
 const EVIDENCE_REQUEST_MAX_ATTEMPTS: u32 = 5;
 const EVIDENCE_REQUEST_RETRY_BASE_MS: u64 = 5_000;
 const EVIDENCE_REQUEST_RETRY_MAX_MS: u64 = 60 * 60 * 1_000;
@@ -431,12 +579,58 @@ struct EvidenceRequest {
     profile_id: String,
     regime: String,
     horizon: String,
+    /// Optional trading-side scope. Missing on legacy durable requests, which
+    /// remain explicitly unscoped and keep their original identity key.
+    #[serde(default)]
+    direction_scope: Option<String>,
     status: EvidenceRequestStatus,
     attempts: u32,
     created_at_ms: u64,
     updated_at_ms: u64,
     next_attempt_at_ms: u64,
     reason: Option<String>,
+    /// Freshness observed before this acquisition attempt. Legacy requests
+    /// remain unknown until a new attempt records it.
+    #[serde(default)]
+    coverage_before_status: Option<String>,
+    /// Exact source linked when this request closes after observed fresh
+    /// coverage. Missing values remain missing rather than inferred.
+    #[serde(default)]
+    completion_source_event_id: Option<String>,
+    #[serde(default)]
+    completion_trade_id: Option<String>,
+    #[serde(default)]
+    completion_episode_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+struct EvidenceGainRecord {
+    schema_version: u16,
+    record_id: String,
+    outcome_event_id: String,
+    source_event_id: Option<String>,
+    trade_id: Option<String>,
+    episode_id: Option<String>,
+    profile_id: Option<String>,
+    profile_hash: Option<String>,
+    profile_version: Option<u64>,
+    execution_mode: Option<String>,
+    evidence_cohort_id: Option<String>,
+    evidence_request_id: Option<String>,
+    evidence_request_attempt: Option<u32>,
+    observed_at_ms: u64,
+    coverage_before_status: String,
+    coverage_after_status: String,
+    sample_count_before: Option<usize>,
+    sample_count_after: Option<usize>,
+    last_sample_before_ms: Option<u64>,
+    last_sample_after_ms: Option<u64>,
+    new_coverage_observed: bool,
+    request_closed_at_ms: Option<u64>,
+    cost_status: String,
+    reconciliation_status: String,
+    eligibility_status: String,
+    blocked_reasons: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -449,6 +643,7 @@ enum EvidenceRequestStatus {
     Failed,
 }
 
+#[cfg(test)]
 fn evidence_request_key(
     symbol: &str,
     strategy: &str,
@@ -456,11 +651,26 @@ fn evidence_request_key(
     regime: &str,
     horizon: &str,
 ) -> String {
-    [symbol, strategy, profile_id, regime, horizon]
+    evidence_request_key_with_direction(symbol, strategy, profile_id, regime, horizon, None)
+}
+
+fn evidence_request_key_with_direction(
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    regime: &str,
+    horizon: &str,
+    direction_scope: Option<&str>,
+) -> String {
+    let base = [symbol, strategy, profile_id, regime, horizon]
         .iter()
         .map(|part| format!("{}:{part}", part.len()))
         .collect::<Vec<_>>()
-        .join("|")
+        .join("|");
+    match direction_scope {
+        Some(direction) => format!("{base}|direction:{}:{direction}", direction.len()),
+        None => base,
+    }
 }
 
 fn evidence_request_retry_delay_ms(attempts: u32) -> u64 {
@@ -469,6 +679,7 @@ fn evidence_request_retry_delay_ms(attempts: u32) -> u64 {
         .min(EVIDENCE_REQUEST_RETRY_MAX_MS)
 }
 
+#[cfg(test)]
 fn schedule_evidence_request(
     state: &mut LearningState,
     symbol: &str,
@@ -479,7 +690,30 @@ fn schedule_evidence_request(
     freshness: &str,
     now_ms: u64,
 ) -> Option<String> {
-    let id = evidence_request_key(symbol, strategy, profile_id, regime, horizon);
+    schedule_evidence_request_with_direction(
+        state, symbol, strategy, profile_id, regime, horizon, None, freshness, now_ms,
+    )
+}
+
+fn schedule_evidence_request_with_direction(
+    state: &mut LearningState,
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    regime: &str,
+    horizon: &str,
+    direction_scope: Option<&str>,
+    freshness: &str,
+    now_ms: u64,
+) -> Option<String> {
+    let id = evidence_request_key_with_direction(
+        symbol,
+        strategy,
+        profile_id,
+        regime,
+        horizon,
+        direction_scope,
+    );
     let gap = matches!(freshness, "missing" | "stale");
     if !gap {
         if let Some(request) = state.evidence_requests.get_mut(&id)
@@ -512,10 +746,16 @@ fn schedule_evidence_request(
         if request.status == EvidenceRequestStatus::Completed {
             request.attempts = 0;
             request.next_attempt_at_ms = now_ms;
+            request.coverage_before_status = Some(freshness.to_owned());
+            request.completion_source_event_id = None;
+            request.completion_trade_id = None;
+            request.completion_episode_id = None;
         } else if request.attempts >= EVIDENCE_REQUEST_MAX_ATTEMPTS
             || now_ms < request.next_attempt_at_ms
         {
             return None;
+        } else {
+            request.coverage_before_status = Some(freshness.to_owned());
         }
         request.status = EvidenceRequestStatus::Pending;
         request.updated_at_ms = now_ms;
@@ -544,12 +784,17 @@ fn schedule_evidence_request(
             profile_id: profile_id.into(),
             regime: regime.into(),
             horizon: horizon.into(),
+            direction_scope: direction_scope.map(str::to_owned),
             status: EvidenceRequestStatus::Pending,
             attempts: 0,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
             next_attempt_at_ms: now_ms,
             reason: None,
+            coverage_before_status: Some(freshness.to_owned()),
+            completion_source_event_id: None,
+            completion_trade_id: None,
+            completion_episode_id: None,
         },
     );
     Some(id)
@@ -1011,6 +1256,7 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
              CREATE TABLE IF NOT EXISTS learning_scout_replay_runs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_evidence_requests (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_evidence_gain_records (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_bands (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);",
         )
         .map_err(|error| {
@@ -1063,7 +1309,9 @@ fn load_recent_map<T: for<'de> Deserialize<'de>>(
 ) -> Result<(), String> {
     let updated_at = match table {
         "learning_context_stats" | "learning_execution_stats" => "$.updated_at_ms",
-        "learning_exit_timing_observations" => "$.observed_at_ms",
+        "learning_exit_timing_observations" | "learning_evidence_gain_records" => {
+            "$.observed_at_ms"
+        }
         _ => return Err(format!("unsupported bounded Learning table {table}")),
     };
     let mut statement = connection
@@ -1577,6 +1825,18 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             .map_err(|error| format!("could not read Learning execution event-ID retention marker: {error}"))?
             .unwrap_or_default()
             != 0;
+        state.evidence_gain_records_overflowed = connection
+            .query_row(
+                "SELECT value FROM learning_config WHERE key = 'evidence_gain_records_overflowed'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                format!("could not read Learning evidence-gain overflow marker: {error}")
+            })?
+            .unwrap_or_default()
+            != 0;
         let active_profile_rows: i64 = connection
             .query_row("SELECT COUNT(*) FROM learning_active_profiles", [], |row| {
                 row.get(0)
@@ -1651,6 +1911,12 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             &connection,
             "learning_evidence_requests",
             &mut state.evidence_requests,
+        )?;
+        load_recent_map(
+            &connection,
+            "learning_evidence_gain_records",
+            MAX_EVIDENCE_GAIN_RECORDS,
+            &mut state.evidence_gain_records,
         )?;
         state.missed_opportunity_bands =
             load_recent_rows(&connection, "learning_missed_opportunity_bands", 2_000)?;
@@ -1760,6 +2026,15 @@ pub(crate) fn persist_normalized(
          ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
         [if state.seen_execution_event_ids_overflowed { 1_i64 } else { 0_i64 }],
     )?;
+    transaction.execute(
+        "INSERT INTO learning_config (key, value) VALUES ('evidence_gain_records_overflowed', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        [if state.evidence_gain_records_overflowed {
+            1_i64
+        } else {
+            0_i64
+        }],
+    )?;
     write_map_preserving_history(&transaction, "learning_variants", &state.variants)?;
     {
         let last_seen_ms = now_ms() as i64;
@@ -1824,6 +2099,11 @@ pub(crate) fn persist_normalized(
         &transaction,
         "learning_evidence_requests",
         &state.evidence_requests,
+    )?;
+    write_map(
+        &transaction,
+        "learning_evidence_gain_records",
+        &state.evidence_gain_records,
     )?;
     let bands = state
         .missed_opportunity_bands
@@ -2458,6 +2738,9 @@ mod tests {
                 observed_at_ms: event_observed_at(&event),
                 net_return_percent: event_net_return_percent(&event),
                 evidence_group_id: None,
+                independence_block_id: None,
+                candidate_family_id: None,
+                candidate_family_size: None,
                 learning_context: None,
                 market_regime: Some("trend".into()),
                 horizon_seconds: Some(300),
@@ -2753,6 +3036,7 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
 
+        let promotion_start_ms = now_ms().saturating_sub(9 * 4 * 60 * 60 * 1_000);
         for (symbol_index, symbol) in ["BTC-USDT", "ETH-USDT"].into_iter().enumerate() {
             let parameters = BTreeMap::from([("threshold".into(), 0.4)]);
             let profile_id = format!("{symbol}-candidate");
@@ -2760,7 +3044,9 @@ mod tests {
                 for horizon in [60, 300, 900, 3_600] {
                     let event = FeedbackEvent::ScoutOutcome {
                         event_id: format!("fixture-event-{symbol}-{sample}-{horizon}"),
-                        observed_at_ms: now_ms() + symbol_index as u64 * 10 + sample,
+                        observed_at_ms: promotion_start_ms
+                            + sample * 4 * 60 * 60 * 1_000
+                            + symbol_index as u64,
                         learning_context: None,
                         market_regime: Some(
                             if symbol_index == 0 { "trend" } else { "range" }.into(),
@@ -2817,7 +3103,7 @@ mod tests {
         for sample in 9..10 {
             let event = FeedbackEvent::ScoutOutcome {
                 event_id: format!("fixture-event-BTC-USDT-extra-{sample}"),
-                observed_at_ms: now_ms() + 100 + sample,
+                observed_at_ms: promotion_start_ms + sample * 4 * 60 * 60 * 1_000,
                 learning_context: None,
                 market_regime: Some("trend".into()),
                 symbol: "BTC-USDT".into(),

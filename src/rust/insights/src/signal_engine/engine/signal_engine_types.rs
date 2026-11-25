@@ -56,6 +56,17 @@ struct ScoutPathAccumulator {
     source_timestamps_monotonic: bool,
     maximum_favorable_excursion_percent: Option<f64>,
     maximum_adverse_excursion_percent: Option<f64>,
+    /// The path was re-registered after its originating signal predates this
+    /// SignalEngine process; observations across that unknown downtime cannot
+    /// be treated as continuous evidence.
+    interrupted_by_process_restart: bool,
+    capture_failed: bool,
+    path_epoch: u64,
+    last_sequence: u64,
+    latest_freshness_ms: Option<u64>,
+    truncated: bool,
+    retained_samples: VecDeque<ScoutPathSample>,
+    latest_sample: Option<ScoutPathSample>,
 }
 #[derive(Default)]
 struct PerformanceTotals {

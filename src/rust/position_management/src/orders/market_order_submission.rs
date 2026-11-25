@@ -101,6 +101,7 @@ async fn submit_order_inner(
         None => prepare_market_match(&symbol, &request, &options).await?,
     };
     let mut matched = prepared.matched;
+    let matcher_requested_quantity = request.quantity;
     let decision_timestamp = prepared.decision_timestamp;
     let decision_price = prepared.decision_price;
     let decision_mid_price = prepared.decision_mid_price;
@@ -229,10 +230,16 @@ async fn submit_order_inner(
     } else {
         reference_price.unwrap_or(0.0)
     };
+    let source_evidence = paper_exchange_fill_evidence(
+        &matched,
+        request.client_order_id.as_deref(),
+        matcher_requested_quantity,
+    );
     let fills = matched
         .fills
         .into_iter()
-        .map(|fill| (fill.quantity, fill.price))
+        .zip(source_evidence)
+        .map(|(fill, evidence)| (fill.quantity, fill.price, evidence))
         .collect::<Vec<_>>();
     let capacity_started = Instant::now();
     if !request.reduce_only {
@@ -256,11 +263,19 @@ async fn submit_order_inner(
         capacity_started.elapsed().as_secs_f64() * 1_000.0,
     );
     let start = ledger.trades.len();
-    for (index, (quantity, execution_price)) in fills.into_iter().enumerate() {
+    for (index, (quantity, execution_price, source_evidence)) in fills.into_iter().enumerate() {
         let fill_id = allocate_fill_id(&mut ledger, timestamp);
         ledger.trades.push(PositionTrade {
             id: format!("{timestamp}-{index}-{}", start),
             fill_id: Some(fill_id),
+            paper_exchange_schema_version: source_evidence.schema_version,
+            paper_exchange_source_epoch: source_evidence.source_epoch,
+            paper_exchange_source_cursor: source_evidence.source_cursor,
+            paper_exchange_request_fingerprint: source_evidence.request_fingerprint,
+            paper_exchange_execution_id: source_evidence.execution_id,
+            paper_exchange_source_quantity: source_evidence.source_quantity,
+            paper_exchange_source_price: source_evidence.source_price,
+            paper_exchange_source_complete: source_evidence.complete,
             symbol: symbol.clone(),
             side: request.side.clone(),
             quantity,
@@ -588,6 +603,142 @@ mod order_ledger_contention_tests {
         assert_eq!(json["unknown_fee_fills"], 1);
     }
 
+    fn complete_paper_match_fixture() -> MatcherResponse {
+        MatcherResponse {
+            schema_version: Some("paper_exchange_match:v1".into()),
+            capture_complete: Some(true),
+            order_id: Some("order-1".into()),
+            request_fingerprint: Some("sha256:request-1".into()),
+            recorded_at_utc_ms: Some(1),
+            source_cursor: Some(10),
+            source_cursor_kind: Some("match_request".into()),
+            source_epoch: Some("epoch-1".into()),
+            reference_price: Some(100.0),
+            best_bid: Some(99.0),
+            best_ask: Some(101.0),
+            worst_ask: Some(101.0),
+            book_updated_at_ms: 1,
+            fills: vec![MatcherFill {
+                quantity: 0.5,
+                price: 100.0,
+                source_execution_id: Some("exec-1".into()),
+                source_cursor: Some(11),
+                source_cursor_kind: Some("match_fill".into()),
+                recorded_at_utc_ms: Some(1),
+                source_price: Some(100.0),
+                source_quantity: Some(0.5),
+            }],
+            remaining_quantity: 0.0,
+            filled_quantity: 0.5,
+            average_execution_price: Some(100.0),
+            source_reported_filled_quantity: Some(0.5),
+        }
+    }
+
+    #[test]
+    fn match_evidence_requires_exact_order_fill_and_unclipped_quantity_linkage() {
+        let complete = complete_paper_match_fixture();
+        assert!(source_match_is_complete(&complete, Some("order-1"), 0.5));
+        assert!(!source_match_is_complete(
+            &complete,
+            Some("different-order"),
+            0.5
+        ));
+
+        let mut missing_fingerprint = complete.clone();
+        missing_fingerprint.request_fingerprint = None;
+        assert!(!source_match_is_complete(
+            &missing_fingerprint,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut missing_source_epoch = complete.clone();
+        missing_source_epoch.source_epoch = None;
+        assert!(!source_match_is_complete(
+            &missing_source_epoch,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut failed_capture = complete.clone();
+        failed_capture.capture_complete = Some(false);
+        assert!(!source_match_is_complete(
+            &failed_capture,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut missing_execution_id = complete.clone();
+        missing_execution_id.fills[0].source_execution_id = None;
+        assert!(!source_match_is_complete(
+            &missing_execution_id,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut missing_fill_cursor = complete.clone();
+        missing_fill_cursor.fills[0].source_cursor = None;
+        assert!(!source_match_is_complete(
+            &missing_fill_cursor,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut wrong_fill_cursor_kind = complete.clone();
+        wrong_fill_cursor_kind.fills[0].source_cursor_kind = Some("match_request".into());
+        assert!(!source_match_is_complete(
+            &wrong_fill_cursor_kind,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut wrong_source_price = complete.clone();
+        wrong_source_price.fills[0].price = 99.0;
+        assert!(!source_match_is_complete(
+            &wrong_source_price,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut wrong_request_cursor_kind = complete.clone();
+        wrong_request_cursor_kind.source_cursor_kind = Some("match_fill".into());
+        assert!(!source_match_is_complete(
+            &wrong_request_cursor_kind,
+            Some("order-1"),
+            0.5
+        ));
+
+        let mut clipped = complete;
+        limit_match_quantity(&mut clipped, 0.25);
+        assert_eq!(clipped.fills[0].quantity, 0.25);
+        assert_eq!(clipped.fills[0].source_quantity, Some(0.5));
+        assert!(!source_match_is_complete(&clipped, Some("order-1"), 0.5));
+    }
+
+    #[test]
+    fn legacy_match_response_deserializes_without_source_evidence() {
+        let legacy: MatcherResponse = serde_json::from_value(serde_json::json!({
+            "reference_price":100.0,
+            "best_bid":99.0,
+            "best_ask":101.0,
+            "worst_ask":101.0,
+            "book_updated_at_ms":1,
+            "fills":[{"quantity":0.5,"price":100.0}],
+            "remaining_quantity":0.0,
+            "filled_quantity":0.5,
+            "average_execution_price":100.0
+        }))
+        .unwrap();
+        assert_eq!(legacy.schema_version, None);
+        assert_eq!(legacy.capture_complete, None);
+        assert_eq!(legacy.order_id, None);
+        assert_eq!(legacy.source_cursor, None);
+        assert_eq!(legacy.fills[0].source_execution_id, None);
+        assert_eq!(legacy.fills[0].source_cursor, None);
+        assert!(!source_match_is_complete(&legacy, Some("order-1"), 0.5));
+    }
+
     #[tokio::test]
     async fn submission_waits_for_a_busy_ledger() {
         let ledger = Arc::new(Mutex::new(Ledger::default()));
@@ -645,6 +796,14 @@ mod order_ledger_contention_tests {
         let store = Arc::new(response_store(ledger, path.clone()));
         let prepared = PreparedMarketMatch {
             matched: MatcherResponse {
+                schema_version: Some("paper_exchange_match:v1".into()),
+                capture_complete: Some(true),
+                order_id: Some("auto-close-v35-42".into()),
+                request_fingerprint: Some("sha256:test-request".into()),
+                recorded_at_utc_ms: Some(2),
+                source_cursor: Some(1),
+                source_cursor_kind: Some("match_request".into()),
+                source_epoch: Some("test-epoch".into()),
                 reference_price: Some(110.0),
                 best_bid: Some(109.0),
                 best_ask: Some(111.0),
@@ -653,10 +812,17 @@ mod order_ledger_contention_tests {
                 fills: vec![MatcherFill {
                     quantity: 0.25,
                     price: 110.0,
+                    source_execution_id: Some("paper-exec:test-1".into()),
+                    source_cursor: Some(2),
+                    source_cursor_kind: Some("match_fill".into()),
+                    recorded_at_utc_ms: Some(2),
+                    source_price: Some(110.0),
+                    source_quantity: Some(0.25),
                 }],
                 remaining_quantity: 0.0,
                 filled_quantity: 0.25,
                 average_execution_price: Some(110.0),
+                source_reported_filled_quantity: Some(0.25),
             },
             decision_timestamp: None,
             decision_price: None,
@@ -703,6 +869,26 @@ mod order_ledger_contention_tests {
             submitted.lifecycle.as_ref().unwrap().trade_id,
             "trade-v35-42"
         );
+        assert_eq!(
+            submitted.paper_exchange_schema_version.as_deref(),
+            Some("paper_exchange_match:v1")
+        );
+        assert_eq!(
+            submitted.paper_exchange_source_epoch.as_deref(),
+            Some("test-epoch")
+        );
+        assert_eq!(submitted.paper_exchange_source_cursor, Some(2));
+        assert_eq!(
+            submitted.paper_exchange_request_fingerprint.as_deref(),
+            Some("sha256:test-request")
+        );
+        assert_eq!(
+            submitted.paper_exchange_execution_id.as_deref(),
+            Some("paper-exec:test-1")
+        );
+        assert_eq!(submitted.paper_exchange_source_quantity, Some(0.25));
+        assert_eq!(submitted.paper_exchange_source_price, Some(110.0));
+        assert_eq!(submitted.paper_exchange_source_complete, Some(true));
         drop(before_restart);
 
         let restored = load_sqlite_ledger(&path).unwrap();
@@ -726,6 +912,23 @@ mod order_ledger_contention_tests {
             .expect("restarted PM trade-history projection includes the submitted fill");
         assert_eq!(recovered["fill_id"], stable_fill_id);
         assert_eq!(recovered["lifecycle"], lifecycle);
+        assert_eq!(
+            recovered["paper_exchange_schema_version"],
+            "paper_exchange_match:v1"
+        );
+        assert_eq!(recovered["paper_exchange_source_epoch"], "test-epoch");
+        assert_eq!(recovered["paper_exchange_source_cursor"], 2);
+        assert_eq!(
+            recovered["paper_exchange_request_fingerprint"],
+            "sha256:test-request"
+        );
+        assert_eq!(
+            recovered["paper_exchange_execution_id"],
+            "paper-exec:test-1"
+        );
+        assert_eq!(recovered["paper_exchange_source_quantity"], 0.25);
+        assert_eq!(recovered["paper_exchange_source_price"], 110.0);
+        assert_eq!(recovered["paper_exchange_source_complete"], true);
 
         let legacy_projection = trades
             .iter()

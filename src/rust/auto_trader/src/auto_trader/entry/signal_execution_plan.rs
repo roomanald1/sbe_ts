@@ -84,6 +84,43 @@ fn signal_confidence_size_multiplier(signal: &Signal) -> f64 {
             * confidence
 }
 
+fn directional_budget_confidence(signal: &Signal) -> f64 {
+    let strength = if signal.strength.is_finite() {
+        signal.strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let directionally_aligned_score = if signal.score.is_finite()
+        && ((signal.direction == "bullish" && signal.score > 0.0)
+            || (signal.direction == "bearish" && signal.score < 0.0))
+    {
+        signal.score.abs().clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let setup_confidence = (strength * directionally_aligned_score).sqrt();
+    if setup_confidence <= 0.0 {
+        return 0.0;
+    }
+    let confidence = signal
+        .market_state
+        .as_ref()
+        .map(|state| {
+            let state_confidence = if state.confidence.is_finite() {
+                state.confidence.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            0.75 * setup_confidence + 0.25 * state_confidence
+        })
+        .unwrap_or(setup_confidence);
+    if confidence.is_finite() {
+        confidence.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 fn strategy_learning_stats_across_symbols(
     settings: &Settings,
     strategy: Strategy,
@@ -179,6 +216,14 @@ fn learned_pause_block_reason(
 }
 
 fn validated_strategy_entry_edge(signal: &Signal, strategy: Strategy) -> Result<f64, String> {
+    validated_strategy_entry_edge_at(signal, strategy, current_time_ms())
+}
+
+fn validated_strategy_entry_edge_at(
+    signal: &Signal,
+    strategy: Strategy,
+    now_ms: u64,
+) -> Result<f64, String> {
     let parameters = signal_strategy_parameters(signal);
     let input = StrategySignal::entry(signal, &parameters);
     let (minimum, maximum_age_seconds) = strategy_scout_entry_limits(&parameters, strategy)?;
@@ -201,17 +246,25 @@ fn validated_strategy_entry_edge(signal: &Signal, strategy: Strategy) -> Result<
         );
         "walk_forward_missing: no prior Scout outcomes match this strategy, symbol, and parameter profile".to_owned()
     })?;
+    if signal.timestamp > now_ms {
+        return Err(format!(
+            "walk_forward_signal_in_future: signal {} is after current time {}",
+            signal.timestamp, now_ms
+        ));
+    }
     if evidence.last_sample_timestamp_ms >= signal.timestamp {
         return Err(format!(
             "walk_forward_not_point_in_time: latest evidence {} is not before signal {}",
             evidence.last_sample_timestamp_ms, signal.timestamp
         ));
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let age_ms = now_ms.saturating_sub(evidence.last_sample_timestamp_ms);
+    if evidence.last_sample_timestamp_ms > now_ms {
+        return Err(format!(
+            "walk_forward_evidence_in_future: evidence {} is after current time {}",
+            evidence.last_sample_timestamp_ms, now_ms
+        ));
+    }
+    let age_ms = now_ms - evidence.last_sample_timestamp_ms;
     if age_ms > maximum_age_seconds.saturating_mul(1_000) {
         return Err(format!(
             "walk_forward_stale: evidence is {}s old; maximum is {}s",
@@ -444,7 +497,8 @@ fn signal_weighted_strategy_budget(
         signal.strategy_candidate
             && !signal.stale
             && matches!(signal.direction.as_str(), "bullish" | "bearish")
-            && now_ms.saturating_sub(signal.timestamp) <= signal_max_age_seconds(signal) * 1_000
+            && signal.timestamp <= now_ms
+            && now_ms - signal.timestamp <= signal_max_age_seconds(signal) * 1_000
     }) {
         let Some(kind) = signal
             .strategy
@@ -455,6 +509,12 @@ fn signal_weighted_strategy_budget(
             continue;
         };
         active.insert(kind.as_str().to_owned(), ());
+        let Ok(edge_lower_bound) = validated_strategy_entry_edge_at(signal, kind, now_ms) else {
+            continue;
+        };
+        if !edge_lower_bound.is_finite() || edge_lower_bound <= 0.0 {
+            continue;
+        }
         let learning = match category {
             StrategyCategory::Daily => settings
                 .learned_strategy_size_multipliers
@@ -463,37 +523,21 @@ fn signal_weighted_strategy_budget(
                 .unwrap_or(1.0),
             StrategyCategory::Intraday => intraday_strategy_size_multiplier(settings, kind, now_ms),
         };
-        let confidence = if signal.strength.is_finite() {
-            signal.strength.clamp(0.0, 1.0)
+        let confidence = directional_budget_confidence(signal);
+        let normalized_edge = edge_lower_bound / (1.0 + edge_lower_bound);
+        let bounded_learning = if learning.is_finite() {
+            learning.clamp(0.0, MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER)
         } else {
             0.0
         };
-        let weight = confidence * learning;
+        let weight = normalized_edge * confidence * bounded_learning;
         if weight.is_finite() && weight > 0.0 {
-            *weights.entry(kind.as_str().to_owned()).or_default() += weight;
+            weights
+                .entry(kind.as_str().to_owned())
+                .and_modify(|existing| *existing = (*existing).max(weight))
+                .or_insert(weight);
         }
     }
-    // sqrt(count) in the aggregate gives genuinely frequent strategies more
-    // room while keeping a broad signal universe from overwhelming the floor.
-    let weights = weights
-        .into_iter()
-        .map(|(kind, sum)| {
-            let count = dashboard
-                .best
-                .iter()
-                .filter(|signal| {
-                    signal.strategy.as_deref() == Some(kind.as_str())
-                        && signal.strategy_candidate
-                        && !signal.stale
-                        && matches!(signal.direction.as_str(), "bullish" | "bearish")
-                        && now_ms.saturating_sub(signal.timestamp)
-                            <= signal_max_age_seconds(signal) * 1_000
-                })
-                .count()
-                .max(1) as f64;
-            (kind, sum / count.sqrt())
-        })
-        .collect::<BTreeMap<_, _>>();
     let active_count = active.len();
     if active_count == 0 {
         return 0.0;
@@ -1225,6 +1269,32 @@ mod signal_execution_budget_tests {
         }
     }
 
+    fn signal_with_edge(
+        strategy: &str,
+        strength: f64,
+        timestamp: u64,
+        lower_bound_percent: Option<serde_json::Value>,
+        sample_timestamp_ms: u64,
+    ) -> Signal {
+        let mut signal = signal(strategy, strength, timestamp);
+        let mut decision = serde_json::json!({
+            "strategy_parameters": {
+                "scout_minimum_walk_forward_samples": 3.0,
+                "scout_maximum_evidence_age_seconds": 86400.0
+            }
+        });
+        if let Some(lower_bound) = lower_bound_percent {
+            decision["strategy_walk_forward"] = serde_json::json!({
+                "sampleCount": 3,
+                "effectiveSampleSize": 3.0,
+                "expectancyCiLowPercent": lower_bound,
+                "lastSampleTimestampMs": sample_timestamp_ms
+            });
+        }
+        signal.strategy_decision = Some(decision);
+        signal
+    }
+
     #[test]
     fn case_confidence_scales_size_and_respects_score_direction() {
         let weak = signal("live-momentum", 0.2, 1);
@@ -1291,7 +1361,7 @@ mod signal_execution_budget_tests {
     }
 
     #[test]
-    fn signal_weighted_daily_budget_recycles_inactive_strategy_floor() {
+    fn signal_weighted_daily_budget_leaves_unproven_variable_share_unused() {
         let mut settings = Settings::default();
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
         settings.daily_notional_limit = 500.0;
@@ -1327,7 +1397,8 @@ mod signal_execution_budget_tests {
         );
         assert!(favored > other);
         assert_eq!(other, 0.0);
-        assert!((favored + other - 500.0).abs() < 1e-9);
+        assert_eq!(favored, 250.0);
+        assert!(favored + other < 500.0);
 
         let stale = dashboard(vec![signal("donchian-20-btc200", 1.0, 1)]);
         assert_eq!(
@@ -1343,7 +1414,7 @@ mod signal_execution_budget_tests {
     }
 
     #[test]
-    fn simultaneous_fresh_candidates_share_pool_and_zero_weight_gets_no_variable_share() {
+    fn candidates_without_validated_edge_receive_only_the_exploration_floor() {
         let mut settings = Settings::default();
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
         settings.daily_notional_limit = 500.0;
@@ -1369,8 +1440,301 @@ mod signal_execution_budget_tests {
             100_000,
         );
         assert_eq!(zero, 125.0);
-        assert_eq!(positive, 375.0);
-        assert!((positive + zero - 500.0).abs() < 1e-9);
+        assert_eq!(positive, 125.0);
+        assert_eq!(positive + zero, 250.0);
+    }
+
+    #[test]
+    fn validated_positive_edge_and_directional_confidence_weight_variable_budget() {
+        let now_ms = 100_000;
+        let first = Strategy::Donchian20Btc200;
+        let second = Strategy::Donchian55Btc200;
+        let mut settings = Settings::default();
+        settings.strategies = vec![first, second];
+        settings.daily_notional_limit = 600.0;
+        settings.daily_strategy_notional_limit = 600.0;
+        settings
+            .learned_strategy_size_multipliers
+            .insert(first.as_str().into(), 1.2);
+
+        let long = signal_with_edge(
+            first.as_str(),
+            1.0,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let mut short = signal_with_edge(
+            second.as_str(),
+            0.25,
+            now_ms,
+            Some(serde_json::json!(2.0)),
+            now_ms - 1_000,
+        );
+        short.direction = "bearish".into();
+        short.score = -0.25;
+
+        let candidates = dashboard(vec![long.clone(), short.clone()]);
+        let first_budget = signal_weighted_strategy_budget(
+            &settings,
+            &candidates,
+            first,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        let second_budget = signal_weighted_strategy_budget(
+            &settings,
+            &candidates,
+            second,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        assert!(first_budget > second_budget);
+        assert!(first_budget > 150.0 && second_budget > 150.0);
+        assert!((first_budget + second_budget - 600.0).abs() < 1e-9);
+
+        let mut contradictory = short;
+        contradictory.score = 0.25;
+        let mixed = dashboard(vec![long, contradictory]);
+        let first_with_mixed = signal_weighted_strategy_budget(
+            &settings,
+            &mixed,
+            first,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        let second_with_mixed = signal_weighted_strategy_budget(
+            &settings,
+            &mixed,
+            second,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        assert_eq!(second_with_mixed, 150.0);
+        assert_eq!(first_with_mixed, 450.0);
+    }
+
+    #[test]
+    fn variable_share_is_monotone_in_edge_and_directional_confidence() {
+        let now_ms = 100_000;
+        let first = Strategy::Donchian20Btc200;
+        let second = Strategy::Donchian55Btc200;
+        let mut settings = Settings::default();
+        settings.strategies = vec![first, second];
+        settings.daily_notional_limit = 600.0;
+        settings.daily_strategy_notional_limit = 600.0;
+
+        let lower_edge = signal_with_edge(
+            first.as_str(),
+            0.5,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let higher_edge = signal_with_edge(
+            second.as_str(),
+            0.5,
+            now_ms,
+            Some(serde_json::json!(2.0)),
+            now_ms - 1_000,
+        );
+        let edge_dashboard = dashboard(vec![lower_edge, higher_edge]);
+        let lower_edge_budget = signal_weighted_strategy_budget(
+            &settings,
+            &edge_dashboard,
+            first,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        let higher_edge_budget = signal_weighted_strategy_budget(
+            &settings,
+            &edge_dashboard,
+            second,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        assert!(higher_edge_budget > lower_edge_budget);
+
+        let lower_confidence = signal_with_edge(
+            first.as_str(),
+            0.25,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let higher_confidence = signal_with_edge(
+            second.as_str(),
+            1.0,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let confidence_dashboard = dashboard(vec![lower_confidence, higher_confidence]);
+        let lower_confidence_budget = signal_weighted_strategy_budget(
+            &settings,
+            &confidence_dashboard,
+            first,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        let higher_confidence_budget = signal_weighted_strategy_budget(
+            &settings,
+            &confidence_dashboard,
+            second,
+            StrategyCategory::Daily,
+            now_ms,
+        );
+        assert!(higher_confidence_budget > lower_confidence_budget);
+    }
+
+    #[test]
+    fn missing_stale_future_negative_and_malformed_edges_never_get_variable_share() {
+        let now_ms = 200_000_000;
+        let first = Strategy::Donchian20Btc200;
+        let second = Strategy::Donchian55Btc200;
+        let mut settings = Settings::default();
+        settings.strategies = vec![first, second];
+        settings.daily_notional_limit = 600.0;
+        settings.daily_strategy_notional_limit = 600.0;
+        let proven = signal_with_edge(
+            first.as_str(),
+            1.0,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let unproven = [
+            signal_with_edge(second.as_str(), 1.0, now_ms, None, now_ms - 1_000),
+            signal_with_edge(
+                second.as_str(),
+                1.0,
+                now_ms,
+                Some(serde_json::json!(1.0)),
+                now_ms - 86_401_000,
+            ),
+            signal_with_edge(
+                second.as_str(),
+                1.0,
+                now_ms,
+                Some(serde_json::json!(-0.1)),
+                now_ms - 1_000,
+            ),
+            signal_with_edge(
+                second.as_str(),
+                1.0,
+                now_ms,
+                Some(serde_json::json!("not-a-number")),
+                now_ms - 1_000,
+            ),
+            signal_with_edge(
+                second.as_str(),
+                1.0,
+                now_ms,
+                Some(serde_json::json!(1.0)),
+                now_ms + 1,
+            ),
+        ];
+        for candidate in unproven {
+            let candidates = dashboard(vec![proven.clone(), candidate]);
+            let first_budget = signal_weighted_strategy_budget(
+                &settings,
+                &candidates,
+                first,
+                StrategyCategory::Daily,
+                now_ms,
+            );
+            let second_budget = signal_weighted_strategy_budget(
+                &settings,
+                &candidates,
+                second,
+                StrategyCategory::Daily,
+                now_ms,
+            );
+            assert_eq!(second_budget, 150.0);
+            assert_eq!(first_budget, 450.0);
+            assert!((first_budget + second_budget - 600.0).abs() < 1e-9);
+        }
+
+        let mut future_signal = signal_with_edge(
+            second.as_str(),
+            1.0,
+            now_ms + 1,
+            Some(serde_json::json!(2.0)),
+            now_ms - 1_000,
+        );
+        future_signal.score = 1.0;
+        let future_candidates = dashboard(vec![proven.clone(), future_signal]);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &future_candidates,
+                second,
+                StrategyCategory::Daily,
+                now_ms,
+            ),
+            0.0
+        );
+
+        let no_edge = dashboard(vec![
+            signal_with_edge(first.as_str(), 1.0, now_ms, None, now_ms - 1_000),
+            signal_with_edge(second.as_str(), 1.0, now_ms, None, now_ms - 1_000),
+        ]);
+        let no_edge_total = [first, second]
+            .into_iter()
+            .map(|kind| {
+                signal_weighted_strategy_budget(
+                    &settings,
+                    &no_edge,
+                    kind,
+                    StrategyCategory::Daily,
+                    now_ms,
+                )
+            })
+            .sum::<f64>();
+        assert_eq!(no_edge_total, 300.0);
+    }
+
+    #[test]
+    fn same_strategy_multiple_signals_do_not_multiply_its_edge_weight() {
+        let now_ms = 100_000;
+        let first = Strategy::Donchian20Btc200;
+        let second = Strategy::Donchian55Btc200;
+        let mut settings = Settings::default();
+        settings.strategies = vec![first, second];
+        settings.daily_notional_limit = 600.0;
+        settings.daily_strategy_notional_limit = 600.0;
+        let candidate = signal_with_edge(
+            first.as_str(),
+            0.8,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let other = signal_with_edge(
+            second.as_str(),
+            0.5,
+            now_ms,
+            Some(serde_json::json!(1.0)),
+            now_ms - 1_000,
+        );
+        let one_signal = dashboard(vec![candidate.clone(), other.clone()]);
+        let multiple_signals = dashboard(vec![candidate.clone(), candidate, other]);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &one_signal,
+                first,
+                StrategyCategory::Daily,
+                now_ms,
+            ),
+            signal_weighted_strategy_budget(
+                &settings,
+                &multiple_signals,
+                first,
+                StrategyCategory::Daily,
+                now_ms,
+            )
+        );
     }
 
     #[test]
@@ -1608,7 +1972,7 @@ mod signal_execution_budget_tests {
             }
         });
         candidate.strategy_decision = Some(decision.clone());
-        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+        assert!(validated_strategy_entry_edge_at(&candidate, strategy, now_ms).is_err());
         decision["strategy_walk_forward"] = serde_json::json!({
             "sampleCount": 3, "effectiveSampleSize": 3.0,
             "positiveNetRate": 0.99, "averageNetReturnPercent": 0.5,
@@ -1616,16 +1980,18 @@ mod signal_execution_budget_tests {
             "lastSampleTimestampMs": now_ms - 1_000
         });
         candidate.strategy_decision = Some(decision.clone());
-        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+        assert!(validated_strategy_entry_edge_at(&candidate, strategy, now_ms).is_err());
         decision["strategy_walk_forward"]["expectancyCiLowPercent"] = serde_json::json!(0.1);
         candidate.strategy_decision = Some(decision.clone());
         assert_eq!(
-            validated_strategy_entry_edge(&candidate, strategy).unwrap(),
+            validated_strategy_entry_edge_at(&candidate, strategy, now_ms).unwrap(),
             0.1,
         );
         decision["strategy_walk_forward"]["lastSampleTimestampMs"] = serde_json::json!(now_ms);
         candidate.strategy_decision = Some(decision);
-        assert!(validated_strategy_entry_edge(&candidate, strategy).is_err());
+        assert!(validated_strategy_entry_edge_at(&candidate, strategy, now_ms).is_err());
+        candidate.timestamp = now_ms + 1;
+        assert!(validated_strategy_entry_edge_at(&candidate, strategy, now_ms).is_err());
     }
 
     #[test]

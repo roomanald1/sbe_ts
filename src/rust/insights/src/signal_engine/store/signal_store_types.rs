@@ -112,6 +112,19 @@ struct WriteRequest {
 
 enum WriteOperation {
     Records(Vec<StoredSignalRecord>),
+    ScoutRegistration {
+        decision_id: String,
+        symbol: String,
+        signal_timestamp: u64,
+        direction: String,
+        entry_price: f64,
+        entry_bid: Option<f64>,
+        entry_ask: Option<f64>,
+        entry_quote_timestamp: Option<u64>,
+    },
+    ScoutPathSamples(Vec<ScoutPathSample>),
+    ScoutPathFailure(Vec<String>),
+    ScoutPathComplete(String),
     Audit {
         decision_id: String,
         stage: String,

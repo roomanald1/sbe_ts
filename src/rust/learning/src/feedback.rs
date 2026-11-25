@@ -176,12 +176,18 @@ pub(super) async fn accept_feedback(
     // transaction fails, so a same-process retry cannot be mistaken for a
     // durable duplicate.
     let before_feedback = state.clone();
+    let evidence_gain_now_ms = now_ms();
+    let evidence_gain_cohort_id = evidence_gain_scope(&state, &event).0;
+    let evidence_gain_before = evidence_gain_coverage_snapshot(
+        &state,
+        evidence_gain_cohort_id.as_deref(),
+        evidence_gain_now_ms,
+    );
     let profile_key = key(symbol, strategy);
     retention::ensure_active_profile_room(&state, &profile_key)?;
     if let Some(context) = event_context(&event) {
         retention::ensure_context_room(&state, &context)?;
     }
-    let minimum_parameter_samples = state.minimum_live_scout_parameter_samples;
     let source_profile = StrategyProfile {
         profile_id: profile_id.clone(),
         version: 0,
@@ -199,25 +205,34 @@ pub(super) async fn accept_feedback(
     register_scout_baseline_if_missing(&mut state, &event, symbol, strategy);
     let (update, outcome_history_compacted) =
         append_profile_outcome(&mut state, &event, symbol, strategy, parameters)?;
-    update_active_profile(
+    update_active_profile(&mut state, &event, &profile_key, &update);
+    if matches!(&event, FeedbackEvent::ScoutOutcome { .. }) {
+        let minimum_parameter_samples = state.minimum_live_scout_parameter_samples;
+        let candidate_family_id = event_candidate_family_id(&event);
+        let triggering_block_id = event_independence_block_id(&event);
+        promote_qualified_scout_candidates(
         &mut state,
-        &event,
         symbol,
         strategy,
-        parameters,
         minimum_parameter_samples,
-        &profile_key,
-        &update,
+            Some(event_id),
+            candidate_family_id.as_deref(),
+            triggering_block_id,
     );
-    if matches!(&event, FeedbackEvent::ScoutOutcome { .. }) {
-        promote_qualified_scout_candidates(&mut state, symbol, strategy, minimum_parameter_samples);
     }
     train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
     enqueue_strategy_replay(&mut state, &event);
     finalize_feedback(&mut state, &event, event_id);
+    let evidence_gain_changed = record_evidence_gain_event(
+        &mut state,
+        &event,
+        evidence_gain_before,
+        evidence_gain_now_ms,
+    );
     let persistence = if matches!(&event, FeedbackEvent::ScoutOutcome { .. })
         && !full_persist_required
         && !outcome_history_compacted
+        && !evidence_gain_changed
     {
         super::persist_scout_outcome_delta(&service.path, &state, &event)
     } else {
@@ -532,8 +547,13 @@ fn promote_qualified_scout_candidates(
     symbol: &str,
     strategy: &str,
     minimum_parameter_samples: usize,
+    triggering_event_id: Option<&str>,
+    triggering_family_id: Option<&str>,
+    triggering_block_id: Option<u64>,
 ) {
     let mut candidates = BTreeMap::new();
+    let mut family_hypotheses = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut family_sizes = BTreeMap::<String, Option<usize>>::new();
     for variant in state
         .variants
         .values()
@@ -544,6 +564,9 @@ fn promote_qualified_scout_candidates(
                 && outcome.paired_comparison
                 && !outcome.baseline_parameters.is_empty()
                 && !outcome.tested_parameter_keys.is_empty()
+                && outcome.candidate_family_id.is_some()
+                && outcome.candidate_family_size.is_some()
+                && outcome.independence_block_id.is_some()
         }) {
             let specs = variant
                 .specs
@@ -562,14 +585,58 @@ fn promote_qualified_scout_candidates(
             else {
                 continue;
             };
-            candidates
-                .entry(signature)
-                .or_insert((candidate_parameters, baseline, specs));
+            let Some(family_id) = outcome.candidate_family_id.clone() else {
+                continue;
+            };
+            family_hypotheses
+                .entry(family_id.clone())
+                .or_default()
+                .insert(signature.clone());
+            let family_size = outcome.candidate_family_size.unwrap();
+            let stored_family_size = family_sizes
+                .entry(family_id.clone())
+                .or_insert(Some(family_size));
+            if *stored_family_size != Some(family_size) {
+                *stored_family_size = None;
+            }
+            candidates.entry((family_id.clone(), signature)).or_insert((
+                candidate_parameters,
+                baseline,
+                specs,
+                family_id,
+            ));
+        }
+    }
+
+    let mut family_corrections = BTreeMap::new();
+    for (family_id, hypotheses) in family_hypotheses {
+        let is_triggering_family = triggering_family_id == Some(family_id.as_str());
+        if let Some(correction) = record_scout_promotion_look(
+            state,
+            &family_id,
+            &hypotheses,
+            family_sizes.get(&family_id).copied().flatten(),
+            if is_triggering_family {
+                triggering_event_id
+            } else {
+                None
+            },
+            if is_triggering_family {
+                triggering_block_id
+            } else {
+                None
+            },
+        ) {
+            family_corrections.insert(family_id, correction);
         }
     }
 
     let profile_key = key(symbol, strategy);
-    for (_, (candidate_parameters, baseline, specs)) in candidates {
+    for (_, (candidate_parameters, baseline, specs, family_id)) in candidates {
+        let Some((look_count, candidate_count)) = family_corrections.get(&family_id).copied()
+        else {
+            continue;
+        };
         let active_matches_baseline =
             state
                 .active_profiles
@@ -589,18 +656,36 @@ fn promote_qualified_scout_candidates(
         if !active_matches_baseline {
             continue;
         }
-        let paired = paired_parameter_outcomes(
+        let paired = paired_parameter_time_blocks(
             &state.variants,
             symbol,
             strategy,
             &candidate_parameters,
             &specs,
             &baseline,
+            &family_id,
         );
-        if paired.len() < minimum_parameter_samples
-            || !paired_candidate_promotion_lower_bound(&paired, &specs)
-                .is_some_and(|bound| bound > 0.0)
-        {
+        let base_alpha = if specs.iter().any(|spec| spec.key == "stop_loss_percent") {
+            0.2
+        } else {
+            0.1
+        };
+        let Some(alpha) = scout_promotion_alpha(base_alpha, look_count, candidate_count) else {
+            continue;
+        };
+        let bootstrap_replicates = promotion_bootstrap_replicates(alpha);
+        let lower_bound = (paired.len() >= minimum_parameter_samples)
+            .then_some(bootstrap_replicates)
+            .flatten()
+            .and_then(|replicates| {
+                stationary_bootstrap_lower_bound(
+                    &paired,
+                    alpha,
+                    MEAN_BLOCK_LENGTH_ONLINE_WINDOWS,
+                    replicates,
+                )
+            });
+        if !lower_bound.is_some_and(|bound| bound > 0.0) {
             continue;
         }
         promote_paired_parameters(
@@ -612,6 +697,92 @@ fn promote_qualified_scout_candidates(
             &candidate_parameters,
         );
     }
+}
+
+pub(super) fn scout_promotion_alpha(
+    base_alpha: f64,
+    look_count: u64,
+    candidate_count: usize,
+) -> Option<f64> {
+    if !base_alpha.is_finite() || !(0.0..0.5).contains(&base_alpha) || look_count == 0 {
+        return None;
+    }
+    let candidate_count = candidate_count.max(1) as f64;
+    let looks = look_count as f64;
+    let alpha = base_alpha / (candidate_count * looks * (looks + 1.0));
+    (alpha.is_finite() && alpha > 0.0).then_some(alpha)
+}
+
+fn record_scout_promotion_look(
+    state: &mut LearningState,
+    family_id: &str,
+    candidate_hypotheses: &BTreeSet<String>,
+    family_hypothesis_count: Option<usize>,
+    event_id: Option<&str>,
+    look_block_id: Option<u64>,
+) -> Option<(u64, usize)> {
+    if !state.scout_promotion_look_history.contains_key(family_id)
+        && state.scout_promotion_look_history.len() >= MAX_SCOUT_PROMOTION_FAMILIES
+    {
+        state.scout_promotion_look_history_overflowed = true;
+        return None;
+    }
+    let history = state
+        .scout_promotion_look_history
+        .entry(family_id.to_owned())
+        .or_default();
+    if family_hypothesis_count.is_none_or(|count| {
+        count == 0
+            || count > MAX_SCOUT_PROMOTION_HYPOTHESES_PER_FAMILY
+            || count < candidate_hypotheses.len()
+    }) {
+        history.overflowed = true;
+    } else if history
+        .family_hypothesis_count
+        .is_some_and(|count| Some(count) != family_hypothesis_count)
+    {
+        history.overflowed = true;
+    } else {
+        history.family_hypothesis_count = family_hypothesis_count;
+    }
+    for hypothesis in candidate_hypotheses {
+        if !history.candidate_hypotheses.contains(hypothesis)
+            && history.candidate_hypotheses.len() >= MAX_SCOUT_PROMOTION_HYPOTHESES_PER_FAMILY
+        {
+            history.overflowed = true;
+            break;
+        }
+        history.candidate_hypotheses.insert(hypothesis.clone());
+    }
+    if let Some(block_id) = look_block_id {
+        let new_look = match history.last_look_block_id {
+            None => {
+                history.look_count = 1;
+                history.last_look_block_id = Some(block_id);
+                true
+            }
+            Some(last) if block_id > last => {
+                history.look_count = history.look_count.saturating_add(1);
+                history.last_look_block_id = Some(block_id);
+                true
+            }
+            Some(last) if block_id == last => false,
+            Some(_) => {
+                history.overflowed = true;
+                false
+            }
+        };
+        if new_look && let Some(event_id) = event_id {
+            history.last_look_id = Some(format!(
+                "scout-promotion-look:v1:{}:{}:{block_id}:{event_id}",
+                family_id, history.look_count,
+            ));
+        }
+    }
+    (!history.overflowed && history.look_count > 0).then_some((
+        history.look_count,
+        history.family_hypothesis_count.unwrap_or_default(),
+    ))
 }
 
 pub(super) fn reconcile_scout_profiles(state: &mut LearningState) {
@@ -688,6 +859,9 @@ pub(super) fn reconcile_scout_profiles(state: &mut LearningState) {
             &symbol,
             &strategy,
             state.minimum_live_scout_parameter_samples,
+            None,
+            None,
+            None,
         );
     }
 }
@@ -847,7 +1021,13 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
         observed_at_ms: event_observed_at(event),
         net_return_percent: event_net_return_percent(event),
         evidence_group_id: event_evidence_group_id(event),
+        independence_block_id: event_independence_block_id(event),
+        candidate_family_id: event_candidate_family_id(event),
+        candidate_family_size: event_candidate_family_size(event),
         learning_context: match event {
+            FeedbackEvent::ScoutOutcome {
+                learning_context, ..
+            } => learning_context.clone(),
             FeedbackEvent::TradeOutcome { scout: false, .. } => event_context(event)
                 .and_then(|context| context.strip_suffix(":trade").map(str::to_owned)),
             _ => None,
@@ -898,6 +1078,359 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
     }
 }
 
+fn evidence_gain_scope(
+    state: &LearningState,
+    event: &FeedbackEvent,
+) -> (Option<String>, Option<String>, Option<u32>) {
+    let (symbol, strategy, profile_id) = match event {
+        FeedbackEvent::MissedOpportunityCandidate {
+            symbol,
+            strategy,
+            profile_id,
+            ..
+        }
+        | FeedbackEvent::ScoutOutcome {
+            symbol,
+            strategy,
+            profile_id,
+            ..
+        }
+        | FeedbackEvent::TradeOutcome {
+            symbol,
+            strategy,
+            profile_id,
+            ..
+        } => (symbol, strategy, profile_id),
+    };
+    let request_id = match event {
+        FeedbackEvent::ScoutOutcome {
+            market_regime: Some(regime),
+            comparison:
+                ScoutComparisonMetadata::Paired {
+                    horizon_seconds: Some(horizon),
+                    ..
+                },
+            learning_context: Some(context),
+            ..
+        } => scout_context_direction(context, symbol, strategy, regime).map(|direction| {
+            evidence_request_key_with_direction(
+                symbol,
+                strategy,
+                profile_id,
+                regime,
+                &horizon.to_string(),
+                Some(direction),
+            )
+        }),
+        FeedbackEvent::TradeOutcome {
+            replay_context: Some(context),
+            ..
+        } => context
+            .lineage
+            .as_ref()
+            .and_then(|lineage| lineage.evidence_gain_correlation.as_deref())
+            .filter(|id| state.evidence_requests.contains_key(*id))
+            .map(str::to_owned),
+        _ => None,
+    }
+    .filter(|id| state.evidence_requests.contains_key(id));
+    let cohort_id = request_id.as_ref().and_then(|id| {
+        state
+            .evidence_requests
+            .get(id)
+            .map(evidence_request_cohort_id)
+    });
+    let attempt = request_id
+        .as_ref()
+        .and_then(|id| state.evidence_requests.get(id))
+        .map(|request| request.attempts);
+    (cohort_id, request_id, attempt)
+}
+
+fn record_evidence_gain_event(
+    state: &mut LearningState,
+    event: &FeedbackEvent,
+    before: EvidenceGainCoverageSnapshot,
+    now_ms: u64,
+) -> bool {
+    let (event_id, symbol, strategy, _, profile_id) = event_parts(event);
+    let (cohort_id, request_id, request_attempt) = evidence_gain_scope(state, event);
+    let targeted_exploratory_trade = match event {
+        FeedbackEvent::TradeOutcome {
+            scout,
+            entry_policy,
+            ..
+        } => *scout || entry_policy.as_deref() == Some("exploratory"),
+        _ => false,
+    };
+    if request_id.is_none() && !targeted_exploratory_trade {
+        return false;
+    }
+    let after = evidence_gain_coverage_snapshot(state, cohort_id.as_deref(), now_ms);
+    let (
+        outcome_event_id,
+        source_event_id,
+        trade_id,
+        episode_id,
+        profile_hash,
+        profile_version,
+        execution_mode,
+        cost_status,
+        lineage_complete,
+    ) = match event {
+        FeedbackEvent::TradeOutcome {
+            event_id,
+            trade_id,
+            replay_context,
+            ..
+        } => {
+            let lineage = replay_context
+                .as_ref()
+                .and_then(|context| context.lineage.as_ref());
+            let context = replay_context.as_ref();
+            let cost_status = match (context, lineage) {
+                (Some(context), Some(lineage))
+                    if context.execution_costs_complete
+                        && lineage.fees_complete
+                        && lineage
+                            .fee_currency
+                            .as_deref()
+                            .is_some_and(|currency| !currency.trim().is_empty()) =>
+                {
+                    "complete"
+                }
+                (Some(_), Some(_)) => "incomplete",
+                _ => "unknown",
+            };
+            (
+                lineage
+                    .map(|lineage| lineage.outcome_event_id.clone())
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| event_id.clone()),
+                lineage.and_then(|lineage| lineage.source_event_id.clone()),
+                lineage
+                    .and_then(|lineage| lineage.trade_id.clone())
+                    .or_else(|| trade_id.clone()),
+                lineage.and_then(|lineage| lineage.episode_id.clone()),
+                lineage.and_then(|lineage| lineage.profile_hash.clone()),
+                lineage.and_then(|lineage| lineage.profile_version),
+                lineage.and_then(|lineage| lineage.execution_mode.clone()),
+                cost_status,
+                lineage.is_some(),
+            )
+        }
+        FeedbackEvent::ScoutOutcome { event_id, .. } => (
+            event_id.clone(),
+            Some(event_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "unknown",
+            false,
+        ),
+        FeedbackEvent::MissedOpportunityCandidate { event_id, .. } => (
+            event_id.clone(),
+            Some(event_id.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "unknown",
+            false,
+        ),
+    };
+    let new_coverage_observed = matches!(before.status.as_str(), "missing" | "stale")
+        && after.status == "fresh"
+        && after.sample_count.unwrap_or_default() > before.sample_count.unwrap_or_default()
+        && after.last_sample_timestamp_ms > before.last_sample_timestamp_ms
+        && source_event_id.is_some();
+    let mut blocked_reasons = Vec::new();
+    if cohort_id.is_none() {
+        blocked_reasons.push("exact_evidence_cohort_unknown".to_owned());
+    }
+    if request_id.is_none() {
+        blocked_reasons.push("exact_evidence_request_unknown".to_owned());
+    }
+    if source_event_id.is_none() {
+        blocked_reasons.push("authoritative_source_event_missing".to_owned());
+    }
+    if matches!(event, FeedbackEvent::TradeOutcome { .. }) && !lineage_complete {
+        blocked_reasons.push("authoritative_trade_lineage_missing".to_owned());
+    }
+    if cost_status != "complete" {
+        blocked_reasons.push(format!("execution_costs_{cost_status}"));
+    }
+    // No Learning input currently carries independent ledger reconciliation
+    // for this transition, so this remains a durable blocker.
+    let reconciliation_status = "unknown";
+    blocked_reasons.push("reconciliation_unknown".to_owned());
+    if !new_coverage_observed {
+        blocked_reasons.push("no_observed_fresh_coverage_transition".to_owned());
+    }
+    let key_parts = [
+        event_id.to_owned(),
+        source_event_id.clone().unwrap_or_default(),
+        trade_id.clone().unwrap_or_default(),
+        episode_id.clone().unwrap_or_default(),
+        profile_id.to_owned(),
+        execution_mode.clone().unwrap_or_default(),
+        cohort_id.clone().unwrap_or_default(),
+        request_id.clone().unwrap_or_default(),
+    ];
+    let record_id = format!(
+        "evidence-gain:v1:{}",
+        key_parts
+            .iter()
+            .map(|part| format!("{}:{part}", part.len()))
+            .collect::<Vec<_>>()
+            .join("|")
+    );
+    if state.evidence_gain_records.contains_key(&record_id) {
+        return false;
+    }
+    let record = EvidenceGainRecord {
+        schema_version: 1,
+        record_id: record_id.clone(),
+        outcome_event_id,
+        source_event_id,
+        trade_id,
+        episode_id,
+        profile_id: Some(profile_id.to_owned()),
+        profile_hash,
+        profile_version,
+        execution_mode,
+        evidence_cohort_id: cohort_id,
+        evidence_request_id: request_id,
+        evidence_request_attempt: request_attempt,
+        observed_at_ms: now_ms,
+        coverage_before_status: before.status,
+        coverage_after_status: after.status,
+        sample_count_before: before.sample_count,
+        sample_count_after: after.sample_count,
+        last_sample_before_ms: before.last_sample_timestamp_ms,
+        last_sample_after_ms: after.last_sample_timestamp_ms,
+        new_coverage_observed,
+        request_closed_at_ms: None,
+        cost_status: cost_status.to_owned(),
+        reconciliation_status: reconciliation_status.to_owned(),
+        eligibility_status: "blocked".to_owned(),
+        blocked_reasons,
+    };
+    if state.evidence_gain_records.len() >= MAX_EVIDENCE_GAIN_RECORDS {
+        let oldest_terminal = state
+            .evidence_gain_records
+            .iter()
+            .filter(|(_, record)| {
+                record.request_closed_at_ms.is_some() || record.evidence_request_id.is_none()
+            })
+            .min_by_key(|(_, record)| (record.observed_at_ms, record.record_id.clone()))
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest_terminal {
+            state.evidence_gain_records.remove(&oldest);
+        } else {
+            let changed = !state.evidence_gain_records_overflowed;
+            state.evidence_gain_records_overflowed = true;
+            return changed;
+        }
+    }
+    state.evidence_gain_records.insert(record_id, record);
+    true
+}
+
+fn event_independence_block_id(event: &FeedbackEvent) -> Option<u64> {
+    let FeedbackEvent::ScoutOutcome {
+        comparison: ScoutComparisonMetadata::Paired { .. },
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(event_observed_at(event) / SCOUT_PROMOTION_BLOCK_MS)
+}
+
+const SCOUT_PROMOTION_BLOCK_MS: u64 = 4 * 60 * 60 * 1_000;
+
+fn event_candidate_family_id(event: &FeedbackEvent) -> Option<String> {
+    let FeedbackEvent::ScoutOutcome {
+        symbol,
+        strategy,
+        parameters: _,
+        baseline_parameters,
+        comparison: ScoutComparisonMetadata::Paired { .. },
+        specs,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if baseline_parameters.is_empty() || specs.is_empty() {
+        return None;
+    }
+    let tested_keys = specs
+        .iter()
+        .map(|spec| spec.key.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if tested_keys.len() != specs.len()
+        || tested_keys
+            .iter()
+            .any(|key| !baseline_parameters.contains_key(*key))
+    {
+        return None;
+    }
+    let baseline_profile_id = strategy::profile_id(symbol, strategy, baseline_parameters);
+    Some(format!(
+        "scout-promotion-family:v1:{baseline_profile_id}:{}",
+        tested_keys.join(",")
+    ))
+}
+
+fn event_candidate_family_size(event: &FeedbackEvent) -> Option<usize> {
+    let FeedbackEvent::ScoutOutcome {
+        baseline_parameters,
+        comparison: ScoutComparisonMetadata::Paired { .. },
+        specs,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if baseline_parameters.is_empty() || specs.is_empty() {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    let mut combinations = 1usize;
+    for spec in specs {
+        if !seen.insert(spec.key.as_str())
+            || !baseline_parameters.contains_key(&spec.key)
+            || !spec.min.is_finite()
+            || !spec.max.is_finite()
+            || !spec.step.is_finite()
+            || spec.max < spec.min
+            || spec.step <= 0.0
+        {
+            return None;
+        }
+        let step_count = (spec.max - spec.min) / spec.step;
+        let rounded_step_count = step_count.round();
+        if !step_count.is_finite()
+            || (step_count - rounded_step_count).abs() > 1.0e-6 * step_count.abs().max(1.0)
+        {
+            return None;
+        }
+        let values = (rounded_step_count as usize).saturating_add(1);
+        combinations = combinations.checked_mul(values)?;
+        if combinations > MAX_SCOUT_PROMOTION_HYPOTHESES_PER_FAMILY {
+            return None;
+        }
+    }
+    Some(combinations)
+}
+
 fn refresh_profile_statistics(registered: &mut RegisteredProfile) {
     // Profile gates and statistics use actual closed-trade evidence only.
     registered.samples = registered
@@ -921,66 +1454,10 @@ fn refresh_profile_statistics(registered: &mut RegisteredProfile) {
 fn update_active_profile(
     state: &mut LearningState,
     event: &FeedbackEvent,
-    symbol: &str,
-    strategy: &str,
-    parameters: &BTreeMap<String, f64>,
-    minimum_parameter_samples: usize,
     profile_key: &str,
     update: &ProfileOutcomeUpdate,
 ) {
-    let specs = match event {
-        FeedbackEvent::ScoutOutcome { specs, .. } => specs.as_slice(),
-        _ => &[],
-    };
-    let empty_baseline = BTreeMap::new();
-    let baseline = match event {
-        FeedbackEvent::ScoutOutcome {
-            baseline_parameters,
-            ..
-        } => baseline_parameters,
-        _ => &empty_baseline,
-    };
-    let active_matches_baseline = state
-        .active_profiles
-        .get(profile_key)
-        .is_some_and(|active| {
-            active.parameters.len() == parameters.len()
-                && parameters.iter().all(|(key, value)| {
-                    if specs.iter().any(|spec| &spec.key == key) {
-                        baseline
-                            .get(key)
-                            .is_some_and(|base| active.parameters.get(key) == Some(base))
-                    } else {
-                        active.parameters.get(key) == Some(value)
-                    }
-                })
-        });
-    let paired = if specs.is_empty() || !active_matches_baseline {
-        Vec::new()
-    } else {
-        paired_parameter_outcomes(
-            &state.variants,
-            symbol,
-            strategy,
-            parameters,
-            specs,
-            baseline,
-        )
-    };
-    let promote_candidate = matches!(event, FeedbackEvent::ScoutOutcome { .. })
-        && !specs.is_empty()
-        && paired.len() >= minimum_parameter_samples
-        && paired_candidate_promotion_lower_bound(&paired, specs).is_some_and(|bound| bound > 0.0);
-    if promote_candidate {
-        promote_paired_parameters(
-            &state.variants,
-            &mut state.active_profiles,
-            symbol,
-            strategy,
-            specs,
-            parameters,
-        );
-    } else if matches!(event, FeedbackEvent::TradeOutcome { .. })
+    if matches!(event, FeedbackEvent::TradeOutcome { .. })
         && should_publish_trade_profile(update.samples, update.positive, update.realized_pnl)
     {
         let active = state
@@ -1152,6 +1629,7 @@ fn tuning_delta_is_effective(step: f64, base: f64, tuned: f64) -> bool {
     (tuned - base).abs() >= step * PARAMETER_STEP_RELATIVE_TOLERANCE
 }
 
+#[cfg(test)]
 fn paired_parameter_outcomes(
     variants: &BTreeMap<String, RegisteredProfile>,
     symbol: &str,
@@ -1193,6 +1671,62 @@ fn paired_parameter_outcomes(
         .collect()
 }
 
+fn paired_parameter_time_blocks(
+    variants: &BTreeMap<String, RegisteredProfile>,
+    symbol: &str,
+    strategy: &str,
+    candidate_parameters: &BTreeMap<String, f64>,
+    specs: &[ParameterSpec],
+    baseline_parameters: &BTreeMap<String, f64>,
+    candidate_family_id: &str,
+) -> Vec<(u64, f64)> {
+    let mut grouped = BTreeMap::<String, (u64, Vec<f64>)>::new();
+    for variant in variants.values().filter(|variant| {
+        variant.profile.symbol == symbol
+            && variant.profile.strategy == strategy
+            && variant.profile.parameters == *candidate_parameters
+    }) {
+        for outcome in variant.outcomes.iter().filter(|outcome| {
+            outcome.source == LearningOutcomeSource::Scout
+                && outcome.paired_comparison
+                && outcome.baseline_parameters == *baseline_parameters
+                && outcome.candidate_family_id.as_deref() == Some(candidate_family_id)
+                && outcome.independence_block_id.is_some()
+                && specs
+                    .iter()
+                    .all(|spec| outcome.tested_parameter_keys.contains(&spec.key))
+        }) {
+            let Some(group_id) = outcome.evidence_group_id.as_ref() else {
+                continue;
+            };
+            let block_id = outcome.independence_block_id.unwrap();
+            let entry = grouped
+                .entry(group_id.clone())
+                .or_insert_with(|| (block_id, Vec::new()));
+            // Horizon arms for one comparison group share one UTC block. If
+            // late arms cross a block boundary, attach the group to its first
+            // observed block so it remains one sample.
+            entry.0 = entry.0.min(block_id);
+            entry.1.push(outcome.net_return_percent);
+        }
+    }
+    let mut by_block = BTreeMap::<u64, Vec<f64>>::new();
+    for (_, (block_id, returns)) in grouped {
+        if returns.is_empty() || returns.iter().any(|value| !value.is_finite()) {
+            continue;
+        }
+        by_block
+            .entry(block_id)
+            .or_default()
+            .push(returns.iter().sum::<f64>() / returns.len() as f64);
+    }
+    by_block
+        .into_iter()
+        .map(|(block, values)| (block, values.iter().sum::<f64>() / values.len() as f64))
+        .collect()
+}
+
+#[cfg(test)]
 fn paired_candidate_promotion_lower_bound(
     outcomes: &[f64],
     specs: &[ParameterSpec],
@@ -1254,6 +1788,7 @@ fn promote_paired_parameters(
 }
 
 //TODO comment this - lots of random numbers!!
+#[cfg(test)]
 pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
     let degrees = sample_count.checked_sub(1)? as f64;
     if degrees < 1.0 {
@@ -1279,6 +1814,7 @@ pub(super) fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
 }
 
 //TODO comment this - what is it really doing
+#[cfg(test)]
 fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
     if outcomes.len() < 2 || outcomes.iter().any(|value| !value.is_finite()) {
         return None;
@@ -1294,6 +1830,7 @@ fn one_sided_90_lower_bound(outcomes: &[f64]) -> Option<f64> {
     Some(mean - critical * (variance / sample_count as f64).sqrt())
 }
 
+#[cfg(test)]
 fn one_sided_80_lower_bound(outcomes: &[f64]) -> Option<f64> {
     if outcomes.len() < 2 || outcomes.iter().any(|value| !value.is_finite()) {
         return None;
@@ -1309,6 +1846,7 @@ fn one_sided_80_lower_bound(outcomes: &[f64]) -> Option<f64> {
     Some(mean - critical * (variance / sample_count as f64).sqrt())
 }
 
+#[cfg(test)]
 fn one_sided_80_t_critical(sample_count: usize) -> Option<f64> {
     let degrees = sample_count.checked_sub(1)? as f64;
     if degrees < 1.0 {
@@ -1665,6 +2203,270 @@ mod tests {
                 .unwrap_err()
                 .0,
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    fn scoped_scout_event(event_id: &str, observed_at_ms: u64) -> FeedbackEvent {
+        FeedbackEvent::ScoutOutcome {
+            event_id: event_id.into(),
+            observed_at_ms,
+            learning_context: Some("scout:v1:long:trend:BTC-USDT:live-momentum:trade".into()),
+            market_regime: Some("trend".into()),
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile-1".into(),
+            parameters: BTreeMap::new(),
+            baseline_parameters: BTreeMap::new(),
+            comparison: ScoutComparisonMetadata::Paired {
+                group_id: format!("group-{event_id}"),
+                horizon_seconds: Some(300),
+            },
+            specs: vec![],
+            net_return_percent: 0.1,
+        }
+    }
+
+    fn pending_evidence_request(now: u64) -> (String, EvidenceRequest) {
+        let request_id = evidence_request_key_with_direction(
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "300",
+            Some("long"),
+        );
+        (
+            request_id,
+            EvidenceRequest {
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                profile_id: "profile-1".into(),
+                regime: "trend".into(),
+                horizon: "300".into(),
+                direction_scope: Some("long".into()),
+                status: EvidenceRequestStatus::Running,
+                attempts: 1,
+                created_at_ms: now - 2_000,
+                updated_at_ms: now - 1_000,
+                next_attempt_at_ms: now,
+                reason: None,
+                coverage_before_status: Some("missing".into()),
+                completion_source_event_id: None,
+                completion_trade_id: None,
+                completion_episode_id: None,
+            },
+        )
+    }
+
+    fn add_scout_outcome(state: &mut LearningState, event: &FeedbackEvent) {
+        let (_, symbol, strategy, parameters, profile_id) = event_parts(event);
+        let profile = StrategyProfile {
+            profile_id: profile_id.clone(),
+            version: 1,
+            symbol: symbol.into(),
+            strategy: strategy.into(),
+            parameters: parameters.clone(),
+            learning_samples: 1,
+            positive_samples: 1,
+            realized_pnl: 0.0,
+        };
+        let variant = RegisteredProfile {
+            profile: profile.clone(),
+            specs: vec![],
+            samples: 1,
+            positive: 1,
+            realized_pnl: 0.0,
+            outcomes: vec![learning_outcome(event)],
+        };
+        state.variants.insert(variant_key(&profile), variant);
+    }
+
+    #[test]
+    fn evidence_gain_event_is_idempotent_across_sqlite_restart_and_closes_exact_request() {
+        let now = 3 * 86_400_000;
+        let event = scoped_scout_event("scout-event-1", now - 1_000);
+        let (request_id, request) = pending_evidence_request(now);
+        let mut state = LearningState::default();
+        state.evidence_requests.insert(request_id.clone(), request);
+        let before = evidence_gain_coverage_snapshot(
+            &state,
+            Some(
+                "BTC-USDT|live-momentum|profile:profile-1|regime:trend|horizon:300|direction:long",
+            ),
+            now,
+        );
+        assert_eq!(before.status, "missing");
+        add_scout_outcome(&mut state, &event);
+        assert!(record_evidence_gain_event(
+            &mut state,
+            &event,
+            before.clone(),
+            now
+        ));
+        let record = state.evidence_gain_records.values().next().unwrap();
+        assert!(record.new_coverage_observed);
+        assert_eq!(record.sample_count_before, Some(0));
+        assert_eq!(record.sample_count_after, Some(1));
+        assert_eq!(record.eligibility_status, "blocked");
+        assert_eq!(record.cost_status, "unknown");
+        assert_eq!(record.reconciliation_status, "unknown");
+
+        let path = std::env::temp_dir().join(format!(
+            "learning-evidence-gain-restart-{}-{now}.sqlite",
+            std::process::id()
+        ));
+        persist(&path, &state).unwrap();
+        let mut restarted = super::super::load_state(&path).unwrap();
+        assert_eq!(restarted.evidence_gain_records.len(), 1);
+        assert!(!record_evidence_gain_event(
+            &mut restarted,
+            &event,
+            before,
+            now
+        ));
+        assert_eq!(restarted.evidence_gain_records.len(), 1);
+
+        restarted
+            .evidence_requests
+            .get_mut(&request_id)
+            .unwrap()
+            .status = EvidenceRequestStatus::Completed;
+        assert!(record_evidence_gain_request_completion(
+            &mut restarted,
+            &request_id,
+            now + 1
+        ));
+        let linked = &restarted.evidence_requests[&request_id];
+        assert_eq!(
+            linked.completion_source_event_id.as_deref(),
+            Some("scout-event-1")
+        );
+        assert!(!record_evidence_gain_request_completion(
+            &mut restarted,
+            &request_id,
+            now + 2
+        ));
+        persist(&path, &restarted).unwrap();
+        let recovered = super::super::load_state(&path).unwrap();
+        assert_eq!(recovered.evidence_gain_records.len(), 1);
+        assert_eq!(
+            recovered.evidence_requests[&request_id]
+                .completion_source_event_id
+                .as_deref(),
+            Some("scout-event-1")
+        );
+    }
+
+    #[test]
+    fn same_episode_trade_events_keep_distinct_blocked_gain_records() {
+        let now = 4 * 86_400_000;
+        let request_id = "gain-group-11".to_owned();
+        let mut state = LearningState::default();
+        let (_, mut request) = pending_evidence_request(now);
+        request.status = EvidenceRequestStatus::Running;
+        request.attempts = 1;
+        state.evidence_requests.insert(request_id.clone(), request);
+        let before = EvidenceGainCoverageSnapshot {
+            status: "missing".into(),
+            sample_count: Some(0),
+            last_sample_timestamp_ms: None,
+        };
+        for (event_id, source_event_id, trade_id) in [
+            ("trade:event-1", "source-event-1", "trade-1"),
+            ("trade:event-2", "source-event-2", "trade-2"),
+        ] {
+            let mut event = versioned_exploratory_trade(event_id, source_event_id, true);
+            if let FeedbackEvent::TradeOutcome {
+                trade_id: event_trade,
+                replay_context: Some(context),
+                ..
+            } = &mut event
+            {
+                *event_trade = Some(trade_id.into());
+                let lineage = context.lineage.as_mut().unwrap();
+                lineage.trade_id = Some(trade_id.into());
+                lineage.episode_id = Some("episode:shared".into());
+                lineage.evidence_gain_correlation = Some(request_id.clone());
+            }
+            assert!(record_evidence_gain_event(
+                &mut state,
+                &event,
+                before.clone(),
+                now
+            ));
+        }
+        assert_eq!(state.evidence_gain_records.len(), 2);
+        let records = state.evidence_gain_records.values().collect::<Vec<_>>();
+        assert_eq!(records[0].episode_id.as_deref(), Some("episode:shared"));
+        assert_eq!(records[1].episode_id.as_deref(), Some("episode:shared"));
+        assert_ne!(records[0].source_event_id, records[1].source_event_id);
+        assert_ne!(records[0].trade_id, records[1].trade_id);
+        assert!(records.iter().all(|record| {
+            record.eligibility_status == "blocked"
+                && record.reconciliation_status == "unknown"
+                && !record.new_coverage_observed
+        }));
+    }
+
+    #[test]
+    fn missing_lineage_or_incomplete_fees_remains_blocked_without_numeric_gain() {
+        let now = 5 * 86_400_000;
+        let mut state = LearningState::default();
+        let mut missing = versioned_exploratory_trade("trade:missing", "source:missing", false);
+        if let FeedbackEvent::TradeOutcome { schema_version, .. } = &mut missing {
+            *schema_version = None;
+        }
+        assert!(record_evidence_gain_event(
+            &mut state,
+            &missing,
+            EvidenceGainCoverageSnapshot {
+                status: "unknown".into(),
+                sample_count: None,
+                last_sample_timestamp_ms: None,
+            },
+            now
+        ));
+        let missing_record = state.evidence_gain_records.values().next().unwrap();
+        assert_eq!(missing_record.eligibility_status, "blocked");
+        assert_eq!(missing_record.cost_status, "unknown");
+        assert!(
+            missing_record
+                .blocked_reasons
+                .contains(&"authoritative_trade_lineage_missing".to_owned())
+        );
+        assert!(!missing_record.new_coverage_observed);
+
+        let mut incomplete = versioned_exploratory_trade("trade:fees", "source:fees", true);
+        if let FeedbackEvent::TradeOutcome {
+            replay_context: Some(context),
+            ..
+        } = &mut incomplete
+        {
+            context.execution_costs_complete = false;
+            context.lineage.as_mut().unwrap().fees_complete = false;
+            context.lineage.as_mut().unwrap().evidence_gain_correlation = None;
+        }
+        assert!(record_evidence_gain_event(
+            &mut state,
+            &incomplete,
+            EvidenceGainCoverageSnapshot {
+                status: "stale".into(),
+                sample_count: Some(1),
+                last_sample_timestamp_ms: Some(now - 100_000),
+            },
+            now
+        ));
+        let incomplete_record = state
+            .evidence_gain_records
+            .values()
+            .find(|record| record.outcome_event_id == "trade:fees")
+            .unwrap();
+        assert_eq!(incomplete_record.cost_status, "incomplete");
+        assert_eq!(incomplete_record.eligibility_status, "blocked");
+        assert!(
+            incomplete_record
+                .blocked_reasons
+                .contains(&"reconciliation_unknown".to_owned())
         );
     }
 
@@ -2283,6 +3085,247 @@ mod tests {
     }
 
     #[test]
+    fn paired_scout_outcomes_get_versioned_block_and_candidate_family_metadata() {
+        let mut event = scout_event();
+        if let FeedbackEvent::ScoutOutcome {
+            observed_at_ms,
+            learning_context,
+            parameters,
+            baseline_parameters,
+            comparison,
+            ..
+        } = &mut event
+        {
+            *observed_at_ms = 12 * 86_400_000 + 10;
+            *learning_context = Some("scout:v1:long:trend:BTC-USDT:momentum:trade".into());
+            parameters.insert("threshold".into(), 0.4);
+            baseline_parameters.insert("threshold".into(), 0.5);
+            *comparison = ScoutComparisonMetadata::Paired {
+                group_id: "comparison-1".into(),
+                horizon_seconds: Some(300),
+            };
+        }
+        assert_eq!(event_independence_block_id(&event), Some(72));
+        let family = event_candidate_family_id(&event).unwrap();
+        assert!(family.starts_with("scout-promotion-family:v1:"));
+        let outcome = learning_outcome(&event);
+        assert_eq!(outcome.independence_block_id, Some(72));
+        assert_eq!(
+            outcome.candidate_family_id.as_deref(),
+            Some(family.as_str())
+        );
+        assert_eq!(outcome.candidate_family_size, Some(11));
+        assert_eq!(
+            outcome.learning_context.as_deref(),
+            Some("scout:v1:long:trend:BTC-USDT:momentum:trade")
+        );
+        let mut alternate_candidate = event.clone();
+        if let FeedbackEvent::ScoutOutcome { parameters, .. } = &mut alternate_candidate {
+            parameters.insert("threshold".into(), 0.3);
+        }
+        assert_eq!(
+            event_candidate_family_id(&alternate_candidate),
+            Some(family)
+        );
+    }
+
+    #[test]
+    fn oversized_candidate_grid_has_no_promotable_family_size() {
+        let mut event = scout_event();
+        if let FeedbackEvent::ScoutOutcome {
+            baseline_parameters,
+            comparison,
+            specs,
+            ..
+        } = &mut event
+        {
+            baseline_parameters.insert("threshold".into(), 0.5);
+            *comparison = ScoutComparisonMetadata::Paired {
+                group_id: "oversized-family".into(),
+                horizon_seconds: Some(60),
+            };
+            specs[0].min = 0.0;
+            specs[0].max = 1.0;
+            specs[0].step = 0.001;
+        }
+        assert_eq!(event_candidate_family_size(&event), None);
+        assert!(event_candidate_family_id(&event).is_some());
+    }
+
+    #[test]
+    fn paired_scout_comparisons_collapse_horizons_and_same_block_groups() {
+        let candidate_parameters = BTreeMap::from([("threshold".into(), 0.4)]);
+        let baseline = BTreeMap::from([("threshold".into(), 0.5)]);
+        let family = "family-v1";
+        let outcome = |group: &str, block: u64, value: f64| LearningOutcome {
+            observed_at_ms: block * 86_400_000,
+            net_return_percent: value,
+            evidence_group_id: Some(group.into()),
+            independence_block_id: Some(block),
+            candidate_family_id: Some(family.into()),
+            candidate_family_size: Some(11),
+            learning_context: None,
+            market_regime: None,
+            horizon_seconds: Some(300),
+            source: LearningOutcomeSource::Scout,
+            realized_pnl_usd: None,
+            paired_comparison: true,
+            tested_parameter_keys: vec!["threshold".into()],
+            baseline_parameters: baseline.clone(),
+            lineage: None,
+        };
+        let variant = RegisteredProfile {
+            profile: StrategyProfile {
+                profile_id: "candidate-profile".into(),
+                version: 0,
+                symbol: "BTC-USDT".into(),
+                strategy: "momentum".into(),
+                parameters: candidate_parameters.clone(),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            },
+            specs: vec![spec()],
+            samples: 0,
+            positive: 0,
+            realized_pnl: 0.0,
+            outcomes: vec![
+                outcome("comparison-a", 10, 0.1),
+                outcome("comparison-a", 11, 0.3),
+                outcome("comparison-b", 10, 0.5),
+                outcome("comparison-c", 12, 0.4),
+                LearningOutcome {
+                    independence_block_id: None,
+                    candidate_family_id: None,
+                    ..outcome("legacy", 12, 10.0)
+                },
+            ],
+        };
+        let variants = BTreeMap::from([("candidate".into(), variant)]);
+        let blocks = paired_parameter_time_blocks(
+            &variants,
+            "BTC-USDT",
+            "momentum",
+            &candidate_parameters,
+            &[spec()],
+            &baseline,
+            family,
+        );
+        assert_eq!(blocks, vec![(10, 0.35), (12, 0.4)]);
+    }
+
+    #[test]
+    fn promotion_look_history_is_durable_bounded_and_more_conservative_over_time() {
+        let mut state = LearningState::default();
+        let hypotheses = BTreeSet::from(["candidate-a".into(), "candidate-b".into()]);
+        assert_eq!(
+            record_scout_promotion_look(
+                &mut state,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("event-1"),
+                Some(10),
+            ),
+            Some((1, 4))
+        );
+        assert_eq!(
+            record_scout_promotion_look(
+                &mut state,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("event-2"),
+                Some(11),
+            ),
+            Some((2, 4))
+        );
+        assert_eq!(
+            record_scout_promotion_look(
+                &mut state,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("same-block-other-horizon"),
+                Some(11),
+            ),
+            Some((2, 4))
+        );
+        let first_alpha = scout_promotion_alpha(0.1, 1, 4).unwrap();
+        let later_alpha = scout_promotion_alpha(0.1, 2, 4).unwrap();
+        assert!(later_alpha < first_alpha);
+        let saved = serde_json::to_vec(&state).unwrap();
+        let restored: LearningState = serde_json::from_slice(&saved).unwrap();
+        let history = &restored.scout_promotion_look_history["family"];
+        assert_eq!(history.look_count, 2);
+        assert_eq!(history.last_look_block_id, Some(11));
+        assert_eq!(history.family_hypothesis_count, Some(4));
+        assert_eq!(history.candidate_hypotheses.len(), 2);
+        assert!(history.last_look_id.as_deref().unwrap().contains("event-2"));
+        let legacy: ScoutPromotionLookHistory = serde_json::from_value(serde_json::json!({
+            "look_count": 2,
+            "candidate_hypotheses": ["candidate-a"],
+            "last_look_id": "legacy-look",
+            "overflowed": false
+        }))
+        .unwrap();
+        assert_eq!(legacy.family_hypothesis_count, None);
+        assert_eq!(legacy.last_look_block_id, None);
+    }
+
+    #[test]
+    fn promotion_look_history_fails_closed_on_reordered_blocks_or_changed_family_size() {
+        let hypotheses = BTreeSet::from(["candidate-a".into()]);
+        let mut reordered = LearningState::default();
+        assert!(
+            record_scout_promotion_look(
+                &mut reordered,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("later"),
+                Some(11),
+            )
+            .is_some()
+        );
+        assert!(
+            record_scout_promotion_look(
+                &mut reordered,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("late-arrival"),
+                Some(10),
+            )
+            .is_none()
+        );
+
+        let mut changed_size = LearningState::default();
+        assert!(
+            record_scout_promotion_look(
+                &mut changed_size,
+                "family",
+                &hypotheses,
+                Some(4),
+                Some("look-1"),
+                Some(10),
+            )
+            .is_some()
+        );
+        assert!(
+            record_scout_promotion_look(
+                &mut changed_size,
+                "family",
+                &hypotheses,
+                Some(5),
+                Some("look-2"),
+                Some(11),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn paired_evidence_does_not_mix_baselines_or_surrounding_profiles() {
         let candidate = BTreeMap::from([("threshold".into(), 0.4), ("stop".into(), 0.5)]);
         let baseline = BTreeMap::from([("threshold".into(), 0.5)]);
@@ -2291,6 +3334,9 @@ mod tests {
                 observed_at_ms: 100,
                 net_return_percent: value,
                 evidence_group_id: group.map(str::to_owned),
+                independence_block_id: None,
+                candidate_family_id: None,
+                candidate_family_size: None,
                 learning_context: None,
                 market_regime: None,
                 horizon_seconds: None,
@@ -2360,8 +3406,8 @@ mod tests {
                 key: "stop_loss_percent".into(),
                 label: "Stop loss".into(),
                 default: 0.5,
-                min: 0.1,
-                max: 1.5,
+                min: 0.5,
+                max: 0.6,
                 step: 0.05,
                 unit: "%".into(),
                 learning_direction: -1.0,
@@ -2370,9 +3416,9 @@ mod tests {
                 key: "take_profit_percent".into(),
                 label: "Take profit".into(),
                 default: 0.8,
-                min: 0.2,
-                max: 3.0,
-                step: 0.05,
+                min: 0.8,
+                max: 1.0,
+                step: 0.1,
                 unit: "%".into(),
                 learning_direction: 1.0,
             },
@@ -2400,6 +3446,9 @@ mod tests {
                 observed_at_ms: index as u64 + 1,
                 net_return_percent: 0.1,
                 evidence_group_id: Some(format!("risk-probe-{index}")),
+                independence_block_id: Some(index as u64),
+                candidate_family_id: Some("family-risk".into()),
+                candidate_family_size: Some(9),
                 learning_context: None,
                 market_regime: None,
                 horizon_seconds: None,
@@ -2446,6 +3495,9 @@ mod tests {
             symbol,
             strategy_name,
             MINIMUM_SCOUT_PARAMETER_SAMPLES,
+            Some("scout-promotion-event"),
+            Some("family-risk"),
+            Some(9),
         );
         let promoted = &state.active_profiles["ETH-USDT:live-momentum"];
         assert_eq!(promoted.parameters["stop_loss_percent"], 0.6);

@@ -647,6 +647,40 @@ fn strategy_rejection_audit_payload(
     payload
 }
 
+fn daily_execution_blocker_audit_payload(
+    signal: &Signal,
+    strategy: &str,
+    reason: &str,
+    result_status: &str,
+    timestamp_ms: u64,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    exploratory: bool,
+) -> serde_json::Value {
+    let mut payload = strategy_rejection_audit_payload(
+        signal,
+        strategy,
+        reason,
+        timestamp_ms,
+        stop_loss_percent,
+        take_profit_percent,
+        "daily_execution",
+    );
+    payload["exploratory"] = serde_json::json!(exploratory);
+    payload["actual_order_path_status"] = serde_json::json!(result_status);
+    payload["execution_gate"]["result_status"] = serde_json::json!(result_status);
+    payload["gate_path"][1]["result_status"] = serde_json::json!(result_status);
+    let mut entry_gate = signal
+        .entry_gate
+        .clone()
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    entry_gate["rejection_reasons"] = serde_json::json!([reason]);
+    entry_gate["execution_result_status"] = serde_json::json!(result_status);
+    payload["entry_gate"] = entry_gate;
+    payload
+}
+
 fn queue_strategy_rejection_audit(
     state: &AutoTraderState,
     signal: &Signal,

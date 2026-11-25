@@ -112,11 +112,17 @@ impl PositionStore {
                 &order.side,
                 match_quantity,
                 Some(order.limit_price),
+                order.client_order_id.as_deref(),
             )
             .await
             .map_err(|(status, message)| {
                 anyhow::anyhow!("paper exchange returned {status}: {message}")
             })?;
+            response.source_reported_filled_quantity = Some(response.filled_quantity);
+            for fill in &mut response.fills {
+                fill.source_quantity = Some(fill.quantity);
+                fill.source_price = Some(fill.price);
+            }
             // This order was already resting: its maker fills execute at
             // its own limit, even if the next observed book gaps through it.
             for fill in &mut response.fills {
@@ -124,7 +130,7 @@ impl PositionStore {
             }
             response.average_execution_price =
                 (response.filled_quantity > EPSILON).then_some(order.limit_price);
-            matches.push((order.id, response));
+            matches.push((order.id, match_quantity, response));
         }
         let mut ledger = self.ledger.lock().await;
         let original_order_count = ledger.orders.len();
@@ -134,7 +140,7 @@ impl PositionStore {
             }
         }
         let mut fills = Vec::new();
-        for (id, result) in matches {
+        for (id, requested_quantity, result) in matches {
             let reduce_allowance = ledger
                 .orders
                 .iter()
@@ -170,19 +176,31 @@ impl PositionStore {
                 } else {
                     order.maker_fee_rate
                 };
-                fills.extend(result.fills.into_iter().map(|fill| {
-                    (
-                        order.id.clone(),
-                        order.side.clone(),
-                        fill.quantity,
-                        fill.price,
-                        fee_rate,
-                        order.source.clone(),
-                        order.parent_order_id.clone(),
-                        order.client_order_id.clone(),
-                        order.lifecycle.clone(),
-                    )
-                }));
+                let source_evidence = paper_exchange_fill_evidence(
+                    &result,
+                    order.client_order_id.as_deref(),
+                    requested_quantity,
+                );
+                fills.extend(
+                    result
+                        .fills
+                        .into_iter()
+                        .zip(source_evidence)
+                        .map(|(fill, evidence)| {
+                            (
+                                order.id.clone(),
+                                order.side.clone(),
+                                fill.quantity,
+                                fill.price,
+                                fee_rate,
+                                order.source.clone(),
+                                order.parent_order_id.clone(),
+                                order.client_order_id.clone(),
+                                order.lifecycle.clone(),
+                                evidence,
+                            )
+                        }),
+                );
             }
         }
         ledger
@@ -204,6 +222,7 @@ impl PositionStore {
                     parent_order_id,
                     client_order_id,
                     lifecycle,
+                    source_evidence,
                 ),
             ) in fills.into_iter().enumerate()
             {
@@ -212,6 +231,14 @@ impl PositionStore {
                 ledger.trades.push(PositionTrade {
                     id: format!("{timestamp}-{index}-{offset}"),
                     fill_id: Some(fill_id),
+                    paper_exchange_schema_version: source_evidence.schema_version,
+                    paper_exchange_source_epoch: source_evidence.source_epoch,
+                    paper_exchange_source_cursor: source_evidence.source_cursor,
+                    paper_exchange_request_fingerprint: source_evidence.request_fingerprint,
+                    paper_exchange_execution_id: source_evidence.execution_id,
+                    paper_exchange_source_quantity: source_evidence.source_quantity,
+                    paper_exchange_source_price: source_evidence.source_price,
+                    paper_exchange_source_complete: source_evidence.complete,
                     symbol: symbol.to_owned(),
                     side,
                     quantity,

@@ -9,6 +9,29 @@ fn outcome_decay_weight(observed_at_ms: u64, now_ms: u64) -> f64 {
     0.5_f64.powf(age_ms as f64 / OUTCOME_HALF_LIFE_MS as f64)
 }
 
+fn scout_context_direction<'a>(
+    learning_context: &'a str,
+    symbol: &str,
+    strategy: &str,
+    regime: &str,
+) -> Option<&'a str> {
+    let context = learning_context
+        .strip_prefix("scout:")?
+        .strip_suffix(":trade")?;
+    let mut parts = context.split(':');
+    let first = parts.next()?;
+    let (direction, context_regime, context_symbol, context_strategy) = if first == "v1" {
+        (parts.next()?, parts.next()?, parts.next()?, parts.next()?)
+    } else {
+        (first, parts.next()?, parts.next()?, parts.next()?)
+    };
+    (matches!(direction, "long" | "short")
+        && context_regime == regime
+        && context_symbol == symbol
+        && context_strategy == strategy)
+        .then_some(direction)
+}
+
 /// Compact Scout evidence for workers that need to schedule additional
 /// observations. Keys include symbol/strategy aggregates and exact profiles.
 pub(crate) fn walk_forward_priority_snapshot(
@@ -46,6 +69,49 @@ pub(crate) fn walk_forward_priority_snapshot(
         );
         cohorts.entry(exact_profile.clone()).or_default();
         max_age_ms_by_cohort.insert(exact_profile, profile_max_age_ms(profile));
+    }
+    // Preserve queued direction-specific acquisition as an explicit gap even
+    // before its first paired outcome arrives.
+    for request in state.evidence_requests.values() {
+        let Some(direction) = request
+            .direction_scope
+            .as_deref()
+            .filter(|direction| matches!(*direction, "long" | "short"))
+        else {
+            continue;
+        };
+        if !walk_forward_identity_allowed(&request.symbol, &request.strategy) {
+            continue;
+        }
+        let key = format!(
+            "{}|{}|profile:{}|regime:{}|horizon:{}|direction:{}",
+            request.symbol,
+            request.strategy,
+            request.profile_id,
+            request.regime,
+            request.horizon,
+            direction,
+        );
+        cohorts.entry(key.clone()).or_default();
+        let matching_profile = state
+            .active_profiles
+            .values()
+            .find(|profile| {
+                profile.symbol == request.symbol
+                    && profile.strategy == request.strategy
+                    && profile.profile_id == request.profile_id
+            })
+            .or_else(|| {
+                state.variants.values().find_map(|variant| {
+                    (variant.profile.symbol == request.symbol
+                        && variant.profile.strategy == request.strategy
+                        && variant.profile.profile_id == request.profile_id)
+                        .then_some(&variant.profile)
+                })
+            });
+        if let Some(profile) = matching_profile {
+            max_age_ms_by_cohort.insert(key, profile_max_age_ms(profile));
+        }
     }
     for variant in state.variants.values() {
         let symbol = &variant.profile.symbol;
@@ -87,7 +153,7 @@ pub(crate) fn walk_forward_priority_snapshot(
             let horizon_profile = format!("{exact_profile}|horizon:{horizon}");
             let exact_case_cohort = format!("{cohort}|regime:{regime}|horizon:{horizon}");
             let exact_case_profile = format!("{exact_profile}|regime:{regime}|horizon:{horizon}");
-            let keys = [
+            let mut keys = vec![
                 cohort.clone(),
                 exact_profile.clone(),
                 regime_cohort,
@@ -97,6 +163,15 @@ pub(crate) fn walk_forward_priority_snapshot(
                 exact_case_cohort,
                 exact_case_profile,
             ];
+            if let Some(direction) = outcome
+                .learning_context
+                .as_deref()
+                .and_then(|context| scout_context_direction(context, symbol, strategy_name, regime))
+            {
+                keys.push(format!(
+                    "{exact_profile}|regime:{regime}|horizon:{horizon}|direction:{direction}"
+                ));
+            }
             for key in &keys {
                 max_age_ms_by_cohort
                     .entry(key.clone())
@@ -156,6 +231,97 @@ pub(crate) fn walk_forward_priority_snapshot(
             )
         })
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct EvidenceGainCoverageSnapshot {
+    pub(super) status: String,
+    pub(super) sample_count: Option<usize>,
+    pub(super) last_sample_timestamp_ms: Option<u64>,
+}
+
+pub(super) fn evidence_gain_coverage_snapshot(
+    state: &LearningState,
+    cohort_id: Option<&str>,
+    now_ms: u64,
+) -> EvidenceGainCoverageSnapshot {
+    let coverage =
+        cohort_id.and_then(|key| walk_forward_priority_snapshot(state, now_ms).remove(key));
+    EvidenceGainCoverageSnapshot {
+        status: coverage
+            .as_ref()
+            .and_then(|value| value["freshnessStatus"].as_str())
+            .unwrap_or("unknown")
+            .to_owned(),
+        sample_count: coverage
+            .as_ref()
+            .and_then(|value| value["sampleCount"].as_u64())
+            .map(|value| value as usize),
+        last_sample_timestamp_ms: coverage
+            .as_ref()
+            .and_then(|value| value["lastSampleTimestampMs"].as_u64())
+            .filter(|timestamp| *timestamp > 0),
+    }
+}
+
+/// Links a request completion only to the unique event that observed the
+/// exact request cohort transition from missing/stale to fresh in this attempt.
+/// It is telemetry only and does not alter evidence or promotion calculations.
+pub(super) fn record_evidence_gain_request_completion(
+    state: &mut LearningState,
+    request_id: &str,
+    now_ms: u64,
+) -> bool {
+    let Some(request) = state.evidence_requests.get(request_id).cloned() else {
+        return false;
+    };
+    if request.status != EvidenceRequestStatus::Completed
+        || request.completion_source_event_id.is_some()
+    {
+        return false;
+    }
+    let cohort_id = evidence_request_cohort_id(&request);
+    let matching = state
+        .evidence_gain_records
+        .iter()
+        .filter(|(_, record)| {
+            record.evidence_request_id.as_deref() == Some(request_id)
+                && record.evidence_request_attempt == Some(request.attempts)
+                && record.evidence_cohort_id.as_deref() == Some(cohort_id.as_str())
+                && record.new_coverage_observed
+                && record.coverage_after_status == "fresh"
+                && record.request_closed_at_ms.is_none()
+        })
+        .map(|(record_id, _)| record_id.clone())
+        .collect::<Vec<_>>();
+    let [record_id] = matching.as_slice() else {
+        return false;
+    };
+    let Some(record) = state.evidence_gain_records.get_mut(record_id) else {
+        return false;
+    };
+    record.request_closed_at_ms = Some(now_ms);
+    if record.source_event_id.is_some() {
+        if let Some(request) = state.evidence_requests.get_mut(request_id) {
+            request.completion_source_event_id = record.source_event_id.clone();
+            request.completion_trade_id = record.trade_id.clone();
+            request.completion_episode_id = record.episode_id.clone();
+        }
+    }
+    true
+}
+
+pub(super) fn evidence_request_cohort_id(request: &EvidenceRequest) -> String {
+    match request.direction_scope.as_deref() {
+        Some(direction) => format!(
+            "{}|{}|profile:{}|regime:{}|horizon:{}|direction:{direction}",
+            request.symbol, request.strategy, request.profile_id, request.regime, request.horizon
+        ),
+        None => format!(
+            "{}|{}|profile:{}|regime:{}|horizon:{}",
+            request.symbol, request.strategy, request.profile_id, request.regime, request.horizon
+        ),
+    }
 }
 
 fn decayed_profile(
@@ -983,16 +1149,22 @@ pub(super) fn scout_parameter_variant_snapshots(
     state: &LearningState,
 ) -> Vec<strategy::ScoutParameterVariant> {
     type CandidateKey = (String, String, String, String, Option<String>, String);
-    let mut outcomes = BTreeMap::<CandidateKey, BTreeMap<String, Vec<f64>>>::new();
+    let mut outcomes = BTreeMap::<CandidateKey, BTreeMap<String, (u64, Vec<f64>)>>::new();
+    let mut candidate_families = BTreeMap::<CandidateKey, String>::new();
     let mut baseline_directions = BTreeMap::<CandidateKey, [usize; 4]>::new();
     let mut baseline_deltas = BTreeMap::<CandidateKey, (f64, usize)>::new();
     let mut direction_groups = BTreeSet::<(CandidateKey, String)>::new();
     let mut delta_groups = BTreeSet::<(CandidateKey, String)>::new();
-    for (profile_id, variant) in &state.variants {
-        for (outcome_index, outcome) in variant.outcomes.iter().enumerate() {
+    for variant in state.variants.values() {
+        for outcome in &variant.outcomes {
             // Multi-parameter comparisons are promoted as a tested group, so
             // don't present their returns as isolated single-parameter tests.
-            if outcome.tested_parameter_keys.len() != 1 {
+            if outcome.tested_parameter_keys.len() != 1
+                || !outcome.paired_comparison
+                || outcome.independence_block_id.is_none()
+                || outcome.candidate_family_id.is_none()
+                || outcome.evidence_group_id.is_none()
+            {
                 continue;
             }
             let parameter = &outcome.tested_parameter_keys[0];
@@ -1019,21 +1191,18 @@ pub(super) fn scout_parameter_variant_snapshots(
                     )
                 },
             );
-            outcomes
+            let group_id = outcome.evidence_group_id.clone().unwrap();
+            let block_id = outcome.independence_block_id.unwrap();
+            let grouped = outcomes
                 .entry(key.clone())
                 .or_default()
-                .entry(
-                    outcome
-                        .evidence_group_id
-                        .clone()
-                        .unwrap_or_else(|| format!("{profile_id}:{outcome_index}")),
-                )
-                .or_default()
-                .push(outcome.net_return_percent);
-            let group_id = outcome
-                .evidence_group_id
-                .clone()
-                .unwrap_or_else(|| format!("{profile_id}:{outcome_index}"));
+                .entry(group_id.clone())
+                .or_insert_with(|| (block_id, Vec::new()));
+            grouped.0 = grouped.0.min(block_id);
+            grouped.1.push(outcome.net_return_percent);
+            candidate_families
+                .entry(key.clone())
+                .or_insert_with(|| outcome.candidate_family_id.clone().unwrap());
             let direction_counts = baseline_directions.entry(key.clone()).or_default();
             let baseline = outcome.baseline_parameters.get(parameter).copied();
             let step = variant
@@ -1060,20 +1229,34 @@ pub(super) fn scout_parameter_variant_snapshots(
     }
 
     let mut snapshots = Vec::new();
-    for (key, grouped_observations) in outcomes {
+    for (key, grouped_comparisons) in outcomes {
         let (symbol, strategy, parameter, value_string, market_regime, baseline_profile_id) =
             key.clone();
         let Ok(candidate_value) = value_string.parse::<f64>() else {
             continue;
         };
-        if grouped_observations.is_empty() {
+        if grouped_comparisons.is_empty() {
             continue;
         }
-        let returns = grouped_observations
-            .values()
-            .map(|observations| observations.iter().sum::<f64>() / observations.len() as f64)
+        let mut day_comparisons = BTreeMap::<u64, Vec<f64>>::new();
+        for (_, (day, observations)) in grouped_comparisons {
+            if observations.iter().any(|value| !value.is_finite()) {
+                continue;
+            }
+            day_comparisons
+                .entry(day)
+                .or_default()
+                .push(observations.iter().sum::<f64>() / observations.len() as f64);
+        }
+        let blocks = day_comparisons
+            .into_iter()
+            .map(|(day, values)| (day, values.iter().sum::<f64>() / values.len() as f64))
             .collect::<Vec<_>>();
-        let sample_count = returns.len();
+        let returns = blocks.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+        let sample_count = blocks.len();
+        if sample_count == 0 {
+            continue;
+        }
         let direction_counts = baseline_directions.get(&key).copied().unwrap_or_default();
         let (paired_delta_sum, paired_delta_samples) =
             baseline_deltas.get(&key).copied().unwrap_or_default();
@@ -1081,17 +1264,40 @@ pub(super) fn scout_parameter_variant_snapshots(
             (paired_delta_samples > 0).then_some(paired_delta_sum / paired_delta_samples as f64);
         let minimum_samples = state.minimum_live_scout_parameter_samples;
         let mean = returns.iter().sum::<f64>() / sample_count as f64;
-        let (lower_bound, upper_bound) = if sample_count >= minimum_samples && sample_count > 1 {
-            let variance = returns
-                .iter()
-                .map(|value| (value - mean).powi(2))
-                .sum::<f64>()
-                / (sample_count - 1) as f64;
-            let interval = one_sided_90_t_critical(sample_count).map(|critical| {
-                let margin = critical * (variance / sample_count as f64).sqrt();
-                (mean - margin, mean + margin)
+        let family_id = candidate_families.get(&key).map(String::as_str);
+        let history = family_id.and_then(|family| state.scout_promotion_look_history.get(family));
+        let alpha = history
+            .filter(|history| !history.overflowed)
+            .and_then(|history| {
+                super::feedback::scout_promotion_alpha(
+                    0.1,
+                    history.look_count,
+                    history.family_hypothesis_count.unwrap_or_default(),
+                )
             });
-            interval.map_or((None, None), |(lower, upper)| (Some(lower), Some(upper)))
+        let bootstrap_replicates = alpha.and_then(promotion_bootstrap_replicates);
+        let (lower_bound, upper_bound) = if sample_count >= minimum_samples {
+            bootstrap_replicates.map_or((None, None), |replicates| {
+                let alpha = alpha.unwrap();
+                let lower = stationary_bootstrap_lower_bound(
+                    &blocks,
+                    alpha,
+                    MEAN_BLOCK_LENGTH_ONLINE_WINDOWS,
+                    replicates,
+                );
+                let negated = blocks
+                    .iter()
+                    .map(|(day, value)| (*day, -*value))
+                    .collect::<Vec<_>>();
+                let upper = stationary_bootstrap_lower_bound(
+                    &negated,
+                    alpha,
+                    MEAN_BLOCK_LENGTH_ONLINE_WINDOWS,
+                    replicates,
+                )
+                .map(|bound| -bound);
+                (lower, upper)
+            })
         } else {
             (None, None)
         };
@@ -1437,6 +1643,88 @@ mod tests {
     }
 
     #[test]
+    fn walk_forward_priority_keeps_directional_scout_history_separate() {
+        let now = now_ms();
+        let mut variant = scout_variant("BTC-USDT", &[0.2]);
+        variant.profile.strategy = "live-momentum".into();
+        variant.outcomes[0].observed_at_ms = now.saturating_sub(1_000);
+        variant.outcomes[0].learning_context =
+            Some("scout:v1:long:trend:BTC-USDT:live-momentum:trade".into());
+        variant.outcomes[0].market_regime = Some("trend".into());
+        variant.outcomes[0].horizon_seconds = Some(60);
+        let profile_id = variant.profile.profile_id.clone();
+        let state = LearningState {
+            variants: BTreeMap::from([("candidate".into(), variant)]),
+            ..LearningState::default()
+        };
+
+        let snapshot = walk_forward_priority_snapshot(&state, now);
+        let directional_key = format!(
+            "BTC-USDT|live-momentum|profile:{profile_id}|regime:trend|horizon:60|direction:long"
+        );
+        assert_eq!(snapshot[&directional_key]["sampleCount"], 1);
+        assert_eq!(snapshot[&directional_key]["freshnessStatus"], "fresh");
+        assert!(
+            !snapshot.contains_key(&directional_key.replace("direction:long", "direction:short"))
+        );
+    }
+
+    #[test]
+    fn walk_forward_priority_seeds_unobserved_direction_scoped_requests_as_missing() {
+        let now = now_ms();
+        let active = StrategyProfile {
+            profile_id: "momentum-v1".into(),
+            version: 1,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::new(),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        };
+        let request_id = evidence_request_key_with_direction(
+            "BTC-USDT",
+            "live-momentum",
+            "momentum-v1",
+            "trend",
+            "60",
+            Some("short"),
+        );
+        let state = LearningState {
+            active_profiles: BTreeMap::from([("active".into(), active)]),
+            evidence_requests: BTreeMap::from([(
+                request_id,
+                EvidenceRequest {
+                    symbol: "BTC-USDT".into(),
+                    strategy: "live-momentum".into(),
+                    profile_id: "momentum-v1".into(),
+                    regime: "trend".into(),
+                    horizon: "60".into(),
+                    direction_scope: Some("short".into()),
+                    status: EvidenceRequestStatus::Pending,
+                    attempts: 0,
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                    next_attempt_at_ms: now,
+                    reason: None,
+                    coverage_before_status: Some("missing".into()),
+                    completion_source_event_id: None,
+                    completion_trade_id: None,
+                    completion_episode_id: None,
+                },
+            )]),
+            ..LearningState::default()
+        };
+
+        let snapshot = walk_forward_priority_snapshot(&state, now);
+        let key =
+            "BTC-USDT|live-momentum|profile:momentum-v1|regime:trend|horizon:60|direction:short";
+        assert_eq!(snapshot[key]["sampleCount"], 0);
+        assert_eq!(snapshot[key]["effectiveSampleSize"], 0.0);
+        assert_eq!(snapshot[key]["freshnessStatus"], "missing");
+    }
+
+    #[test]
     fn stale_profile_parameters_decay_toward_catalog_defaults() {
         let now = now_ms();
         let mut variant = scout_variant("BTC-USDT", &[0.01]);
@@ -1484,13 +1772,23 @@ mod tests {
                 .map(|(index, value)| LearningOutcome {
                     observed_at_ms: index as u64,
                     net_return_percent: *value,
-                    evidence_group_id: None,
+                    evidence_group_id: Some(format!("{symbol}-comparison-{index}")),
+                    independence_block_id: Some(index as u64),
+                    candidate_family_id: Some(format!(
+                        "scout-promotion-family:v1:{}:threshold",
+                        strategy::profile_id(
+                            symbol,
+                            "example-strategy",
+                            &BTreeMap::from([("threshold".into(), 0.5)]),
+                        )
+                    )),
+                    candidate_family_size: Some(11),
                     learning_context: None,
                     market_regime: None,
                     horizon_seconds: None,
                     source: LearningOutcomeSource::Scout,
                     realized_pnl_usd: None,
-                    paired_comparison: false,
+                    paired_comparison: true,
                     tested_parameter_keys: vec!["threshold".into()],
                     baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
                     lineage: None,
@@ -1585,6 +1883,7 @@ mod tests {
 
         let mut scout = scout_variant("ETH-USDT", &[0.4]);
         scout.profile.strategy = "example-strategy".into();
+        scout.outcomes[0].paired_comparison = false;
         scout.outcomes[0].baseline_parameters.clear();
         scout.outcomes[0].observed_at_ms = now_ms();
         state.variants.insert("scout".into(), scout);
@@ -1599,6 +1898,7 @@ mod tests {
         paper_scout.profile.strategy = "example-strategy".into();
         paper_scout.outcomes[0].source = LearningOutcomeSource::Scout;
         paper_scout.outcomes[0].realized_pnl_usd = Some(0.25);
+        paper_scout.outcomes[0].paired_comparison = false;
         paper_scout.outcomes[0].baseline_parameters.clear();
         paper_scout.outcomes[0].tested_parameter_keys.clear();
         paper_scout.outcomes[0].observed_at_ms = now_ms();
@@ -1710,6 +2010,101 @@ mod tests {
         assert_eq!(active.positive_samples, 1);
         assert_eq!(active.realized_pnl, 12.0);
         assert_eq!(active.version, 5);
+    }
+
+    #[test]
+    fn evidence_gain_completion_uses_exact_request_cohort_and_attempt() {
+        let now = 9_000_000;
+        let request_id = evidence_request_key_with_direction(
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "300",
+            Some("long"),
+        );
+        let cohort_id =
+            "BTC-USDT|live-momentum|profile:profile-1|regime:trend|horizon:300|direction:long";
+        let request = EvidenceRequest {
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile-1".into(),
+            regime: "trend".into(),
+            horizon: "300".into(),
+            direction_scope: Some("long".into()),
+            status: EvidenceRequestStatus::Completed,
+            attempts: 2,
+            created_at_ms: now - 10_000,
+            updated_at_ms: now,
+            next_attempt_at_ms: now,
+            reason: None,
+            coverage_before_status: Some("stale".into()),
+            completion_source_event_id: None,
+            completion_trade_id: None,
+            completion_episode_id: None,
+        };
+        let mut state = LearningState::default();
+        state.evidence_requests.insert(request_id.clone(), request);
+        state.evidence_gain_records.insert(
+            "gain-transition-1".into(),
+            EvidenceGainRecord {
+                schema_version: 1,
+                record_id: "gain-transition-1".into(),
+                outcome_event_id: "scout-event-3".into(),
+                source_event_id: Some("scout-event-3".into()),
+                trade_id: Some("trade-3".into()),
+                episode_id: Some("episode-1".into()),
+                profile_id: Some("profile-1".into()),
+                profile_hash: Some("hash-1".into()),
+                profile_version: Some(4),
+                execution_mode: Some("paper".into()),
+                evidence_cohort_id: Some(cohort_id.into()),
+                evidence_request_id: Some(request_id.clone()),
+                evidence_request_attempt: Some(2),
+                observed_at_ms: now - 1,
+                coverage_before_status: "stale".into(),
+                coverage_after_status: "fresh".into(),
+                sample_count_before: Some(1),
+                sample_count_after: Some(2),
+                last_sample_before_ms: Some(now - 100_000),
+                last_sample_after_ms: Some(now - 1),
+                new_coverage_observed: true,
+                request_closed_at_ms: None,
+                cost_status: "complete".into(),
+                reconciliation_status: "unknown".into(),
+                eligibility_status: "blocked".into(),
+                blocked_reasons: vec!["reconciliation_unknown".into()],
+            },
+        );
+        state.evidence_gain_records.insert(
+            "wrong-cohort".into(),
+            EvidenceGainRecord {
+                evidence_cohort_id: Some("other-cohort".into()),
+                ..state.evidence_gain_records["gain-transition-1"].clone()
+            },
+        );
+
+        assert!(record_evidence_gain_request_completion(
+            &mut state,
+            &request_id,
+            now
+        ));
+        let closed = &state.evidence_requests[&request_id];
+        assert_eq!(
+            closed.completion_source_event_id.as_deref(),
+            Some("scout-event-3")
+        );
+        assert_eq!(closed.completion_trade_id.as_deref(), Some("trade-3"));
+        assert_eq!(closed.completion_episode_id.as_deref(), Some("episode-1"));
+        assert_eq!(
+            state.evidence_gain_records["gain-transition-1"].request_closed_at_ms,
+            Some(now)
+        );
+        assert!(!record_evidence_gain_request_completion(
+            &mut state,
+            &request_id,
+            now + 1
+        ));
     }
 }
 

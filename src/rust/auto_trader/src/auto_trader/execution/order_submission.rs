@@ -72,7 +72,18 @@ async fn submit_and_record_selected_order(
             "Auto Trader was disabled before order submission",
         ));
     }
-    let response = match submit_persisted_entry_request(&persisted_request).await {
+    let source_event_id = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("live_worker_event_id"))
+        .and_then(serde_json::Value::as_str);
+    let response = match submit_persisted_entry_request(
+        &persisted_request,
+        decision_id,
+        source_event_id,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             let mut settings = state.settings.lock().await;
@@ -601,6 +612,8 @@ async fn submit_and_record_selected_order(
 /// result rather than creating a second fill.
 async fn submit_persisted_entry_request(
     request: &PersistedEntryRequest,
+    decision_id: &str,
+    source_event_id: Option<&str>,
 ) -> Result<serde_json::Value, PersistedEntrySubmissionError> {
     if !persisted_entry_request_is_replayable(request) {
         return Err(PersistedEntrySubmissionError {
@@ -612,6 +625,13 @@ async fn submit_persisted_entry_request(
     let prepare_started = Instant::now();
     let request_body = request.body.clone();
     let request_prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
+    // Reaching this point means the durable reservation has already committed
+    // and the exact persisted request body/client identity has been validated
+    // and copied. Benchmark-only observers run immediately before transport.
+    #[cfg(feature = "benchmark-support")]
+    notify_benchmark_order_ready(decision_id, source_event_id);
+    #[cfg(not(feature = "benchmark-support"))]
+    let _ = (decision_id, source_event_id);
     let started = Instant::now();
     let response =
         crate::service_rpc::position_request(&request.method, &request.path, Some(request_body))

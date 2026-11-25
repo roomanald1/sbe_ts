@@ -160,9 +160,15 @@ async fn execute_vwap_child(
     client_order_id: Option<&str>,
     lifecycle: Option<&CanonicalLifecycleLink>,
 ) -> Result<(f64, Option<f64>), String> {
-    let matched = paper_exchange_match(symbol, side, quantity, None)
+    let mut matched = paper_exchange_match(symbol, side, quantity, None, client_order_id)
         .await
         .map_err(|(status, message)| format!("Paper exchange returned {status}: {message}"))?;
+    matched.source_reported_filled_quantity = Some(matched.filled_quantity);
+    for fill in &mut matched.fills {
+        fill.source_quantity = Some(fill.quantity);
+        fill.source_price = Some(fill.price);
+    }
+    let source_evidence = paper_exchange_fill_evidence(&matched, client_order_id, quantity);
     let filled = matched.filled_quantity;
     if filled <= EPSILON {
         return Ok((0.0, None));
@@ -172,17 +178,26 @@ async fn execute_vwap_child(
     let fills = matched
         .fills
         .into_iter()
-        .map(|fill| (fill.quantity, fill.price))
+        .zip(source_evidence)
+        .map(|(fill, evidence)| (fill.quantity, fill.price, evidence))
         .collect::<Vec<_>>();
     let fee_rate = configured_fee_rates().taker.abs();
     let timestamp = now_ms().map_err(|error| error.to_string())?;
     let mut ledger = store.ledger.lock().await;
     let offset = ledger.trades.len();
-    for (index, (qty, execution_price)) in fills.into_iter().enumerate() {
+    for (index, (qty, execution_price, source_evidence)) in fills.into_iter().enumerate() {
         let fill_id = allocate_fill_id(&mut ledger, timestamp);
         ledger.trades.push(PositionTrade {
             id: format!("{timestamp}-{index}-{offset}"),
             fill_id: Some(fill_id),
+            paper_exchange_schema_version: source_evidence.schema_version,
+            paper_exchange_source_epoch: source_evidence.source_epoch,
+            paper_exchange_source_cursor: source_evidence.source_cursor,
+            paper_exchange_request_fingerprint: source_evidence.request_fingerprint,
+            paper_exchange_execution_id: source_evidence.execution_id,
+            paper_exchange_source_quantity: source_evidence.source_quantity,
+            paper_exchange_source_price: source_evidence.source_price,
+            paper_exchange_source_complete: source_evidence.complete,
             symbol: symbol.to_owned(),
             side: side.clone(),
             quantity: qty,

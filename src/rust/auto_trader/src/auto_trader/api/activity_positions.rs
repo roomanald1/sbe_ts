@@ -377,15 +377,26 @@ mod closed_ledger_rows_tests {
         assert_eq!(provenance["exploratory"], true);
         assert_eq!(provenance["purpose"], "signal");
         assert_eq!(provenance["opportunityId"], "opportunity-1");
+        assert_eq!(provenance["episodeId"], "canonical-episode-1");
         assert_eq!(provenance["tradeId"], "trade-1");
+        assert_eq!(provenance["profileId"], "profile-a");
+        assert_eq!(provenance["profileHash"], "sha256:v1:abc");
+        assert_eq!(provenance["profileVersion"], 3);
+        assert_eq!(provenance["executionMode"], "paper");
         assert_eq!(provenance["entryPolicy"], "exploratory");
         assert_eq!(provenance["workerEventIdentityVersion"], 1);
         assert_eq!(provenance["workerEventId"], "event-7");
         assert_eq!(provenance["workerEpisodeId"], "episode-2");
+        assert!((summary["pnl"].as_f64().unwrap() - 0.8).abs() < 1e-12);
+        assert!((summary["totalFees"].as_f64().unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(summary["pnlQuoteCurrency"], "USDT");
         assert!(rows
             .iter()
             .filter(|row| row["ledgerTrade"].is_object())
             .all(|row| row["provenance"] == *provenance));
+        let entry_fill = rows.iter().find(|row| row["rowId"] == "ledger-trade:fill-1").unwrap();
+        assert_eq!(entry_fill["entryFees"], 0.1);
+        assert_eq!(entry_fill["ledgerTrade"]["parent_order_id"], "entry-order");
     }
 
     #[test]

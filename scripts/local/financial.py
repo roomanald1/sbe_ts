@@ -11,6 +11,9 @@ from common import emit, save, now
 from evidence_analysis import latest, body, age
 
 ZERO = Decimal("0")
+EXECUTION_RECONCILIATION_TOLERANCE = Decimal("0.00000001")
+PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE = Decimal("0.00000001")
+PORTFOLIO_FX_MAX_AGE_MS = 120_000
 
 def dec(value):
     if isinstance(value, bool) or not isinstance(
@@ -31,6 +34,1045 @@ def pct(numerator, denominator):
 
 def total(values):
     return sum((dec(v) for v in values), ZERO)
+
+
+def reconcile_independent_execution_fills(
+    position_trades, execution_ledger, position_source_coverage=None
+):
+    """Compare PM fills to a separately sourced Paper Exchange fill ledger.
+
+    This reconciles execution quantity, notional, and signed fee cashflows by
+    currency, not trading performance. PM parent order IDs must be propagated
+    into the independent source as ``order_id``; timestamps or symbol/side are
+    not safe join keys. Both sources must explicitly establish complete row
+    coverage, and each row must carry known fee amount/currency metadata.
+    """
+    result = {
+        "status": "BLOCKED",
+        "independent_execution_ledger_reconciled": False,
+        "position_trade_rows": 0,
+        "independent_execution_rows": 0,
+        "matched_order_count": 0,
+        "unmatched_position_order_count": 0,
+        "unmatched_execution_order_count": 0,
+        "mismatch_count": 0,
+        "unmatched_position_orders": [],
+        "unmatched_execution_orders": [],
+        "mismatches": [],
+        "blockers": [],
+        "position_source_complete": False,
+        "independent_execution_source_complete": False,
+        "fee_rows_reconciled": 0,
+        "note": "Execution reconciliation does not estimate returns or profitability.",
+    }
+    if (
+        not isinstance(position_source_coverage, dict)
+        or position_source_coverage.get("has_older") is not False
+        or isinstance(position_source_coverage.get("total_records"), bool)
+        or not isinstance(position_source_coverage.get("total_records"), int)
+        or isinstance(position_source_coverage.get("returned_records"), bool)
+        or not isinstance(position_source_coverage.get("returned_records"), int)
+        or position_source_coverage.get("total_records")
+        != position_source_coverage.get("returned_records")
+        or not isinstance(position_trades, list)
+        or position_source_coverage.get("returned_records") != len(position_trades)
+    ):
+        result["blockers"].append(
+            "Position fill source lacks complete, count-matched history coverage"
+        )
+        return result
+    result["position_source_complete"] = True
+    if not isinstance(execution_ledger, dict):
+        result["blockers"].append("Independent Paper Exchange execution ledger unavailable")
+        return result
+    if (
+        execution_ledger.get("schema_version") != 1
+        or execution_ledger.get("source_system") != "paper_exchange"
+        or execution_ledger.get("execution_mode") != "paper"
+        or execution_ledger.get("independent_source") is not True
+        or execution_ledger.get("complete") is not True
+        or not isinstance(execution_ledger.get("snapshot_id"), str)
+        or not execution_ledger.get("snapshot_id")
+    ):
+        result["blockers"].append("Independent execution ledger contract is incomplete or unverified")
+        return result
+    if not isinstance(position_trades, list) or not isinstance(execution_ledger.get("fills"), list):
+        result["blockers"].append("Position fills or independent execution rows are unavailable")
+        return result
+    result["independent_execution_source_complete"] = True
+
+    def aggregate(rows, source, id_field):
+        by_order = defaultdict(lambda: {
+            "symbol": None, "side": None, "quantity": ZERO, "notional": ZERO,
+            "fees_by_currency": defaultdict(lambda: ZERO), "fee_rows": 0,
+        })
+        seen_ids = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"{source} row is not an object")
+            order_id = row.get(id_field)
+            if not isinstance(order_id, str) or not order_id.strip():
+                raise ValueError(f"{source} row has no stable order identity")
+            execution_id = row.get("fill_id") if source == "Position Management" else row.get("execution_id")
+            if not isinstance(execution_id, str) or not execution_id.strip() or execution_id in seen_ids:
+                raise ValueError(f"{source} row has a missing or duplicate execution identity")
+            seen_ids.add(execution_id)
+            symbol, side = row.get("symbol"), row.get("side")
+            if not isinstance(symbol, str) or not symbol.strip() or side not in ("buy", "sell"):
+                raise ValueError(f"{source} row has invalid instrument or side")
+            quantity, price = dec(row.get("quantity")), dec(row.get("price", row.get("execution_price")))
+            if quantity <= 0 or price <= 0:
+                raise ValueError(f"{source} row has non-positive quantity or price")
+            if row.get("fee_known") is not True:
+                raise ValueError(f"{source} row has unknown fee metadata")
+            fee = dec(row.get("fee"))
+            fee_currency = row.get("fee_currency")
+            if not isinstance(fee_currency, str) or not fee_currency.strip():
+                raise ValueError(f"{source} row has missing fee currency")
+            aggregate = by_order[order_id]
+            if aggregate["symbol"] not in (None, symbol) or aggregate["side"] not in (None, side):
+                raise ValueError(f"{source} order identity crosses symbol or side")
+            aggregate["symbol"], aggregate["side"] = symbol, side
+            aggregate["quantity"] += quantity
+            aggregate["notional"] += quantity * price
+            aggregate["fees_by_currency"][fee_currency] += fee
+            aggregate["fee_rows"] += 1
+        return by_order
+
+    try:
+        pm = aggregate(position_trades, "Position Management", "parent_order_id")
+        independent = aggregate(execution_ledger["fills"], "Paper Exchange", "order_id")
+    except (ValueError, TypeError) as error:
+        result["blockers"].append(str(error))
+        return result
+
+    pm_orders, external_orders = set(pm), set(independent)
+    unmatched_pm = sorted(pm_orders - external_orders)
+    unmatched_external = sorted(external_orders - pm_orders)
+    mismatches = []
+    for order_id in sorted(pm_orders & external_orders):
+        left, right = pm[order_id], independent[order_id]
+        reasons = []
+        if (left["symbol"], left["side"]) != (right["symbol"], right["side"]):
+            reasons.append("instrument_or_side_mismatch")
+        if abs(left["quantity"] - right["quantity"]) > EXECUTION_RECONCILIATION_TOLERANCE:
+            reasons.append("executed_quantity_mismatch")
+        if abs(left["notional"] - right["notional"]) > EXECUTION_RECONCILIATION_TOLERANCE:
+            reasons.append("executed_notional_mismatch")
+        left_fee_currencies = set(left["fees_by_currency"])
+        right_fee_currencies = set(right["fees_by_currency"])
+        if left_fee_currencies != right_fee_currencies:
+            reasons.append("fee_currency_mismatch")
+        elif any(
+            abs(left["fees_by_currency"][currency] - right["fees_by_currency"][currency])
+            > EXECUTION_RECONCILIATION_TOLERANCE
+            for currency in left_fee_currencies
+        ):
+            reasons.append("fee_amount_mismatch")
+        if reasons:
+            mismatches.append({"order_id": order_id, "reasons": reasons})
+
+    result.update({
+        "status": "RECONCILED" if not unmatched_pm and not unmatched_external and not mismatches else "MISMATCH",
+        "position_trade_rows": len(position_trades),
+        "independent_execution_rows": len(execution_ledger["fills"]),
+        "matched_order_count": len(pm_orders & external_orders) - len(mismatches),
+        "unmatched_position_order_count": len(unmatched_pm),
+        "unmatched_execution_order_count": len(unmatched_external),
+        "mismatch_count": len(mismatches),
+        "unmatched_position_orders": unmatched_pm[:100],
+        "unmatched_execution_orders": unmatched_external[:100],
+        "mismatches": mismatches[:100],
+        "fee_rows_reconciled": sum(
+            pm[order_id]["fee_rows"]
+            for order_id in pm_orders & external_orders
+            if order_id not in {mismatch["order_id"] for mismatch in mismatches}
+        ),
+        "independent_execution_ledger_reconciled": not unmatched_pm and not unmatched_external and not mismatches,
+    })
+    if unmatched_pm:
+        result["blockers"].append("Position fills are absent from the independent execution ledger")
+    if unmatched_external:
+        result["blockers"].append("Independent execution fills are absent from Position Management")
+    if mismatches:
+        result["blockers"].append(
+            "Independent execution identity, quantity, notional or fee evidence does not reconcile"
+        )
+    return result
+
+
+def compare_paper_exchange_match_evidence(
+    position_trades, match_ledger, position_source_coverage=None
+):
+    """Compare observed PM fills to versioned PEx matching evidence only.
+
+    This diagnostic validates identity, source quantity, actual PM clipping,
+    notional, and page cursors. It never treats matcher rows as settled fills,
+    independent fee evidence, complete history, or profitability evidence.
+    """
+    result = {
+        "diagnostic": "paper_exchange_match_evidence_comparison",
+        "status": "BLOCKED",
+        "evidence_kind": "paper_exchange_match_evidence",
+        "observed_rows_consistent": False,
+        "financial_reconciliation_eligible": False,
+        "completed_financial_reconciliation": False,
+        "source_history_complete": False,
+        "position_source_complete": False,
+        "position_fill_rows": len(position_trades) if isinstance(position_trades, list) else 0,
+        "source_match_rows": 0,
+        "matched_fill_count": 0,
+        "clipped_fill_count": 0,
+        "mismatch_count": 0,
+        "missing_source_link_count": 0,
+        "unmatched_source_row_count": 0,
+        "source_epoch": None,
+        "after_cursor": None,
+        "next_cursor": None,
+        "max_cursor": None,
+        "page_complete": False,
+        "blockers": [],
+        "mismatches": [],
+        "note": "Matching evidence is not settled execution, fee, or return evidence.",
+    }
+    if not isinstance(match_ledger, dict):
+        result["blockers"].append("Paper Exchange match-evidence page unavailable")
+        return result
+
+    rows = match_ledger.get("rows")
+    epoch = match_ledger.get("source_epoch")
+    page_fields_valid = (
+        match_ledger.get("schema_version") == "paper_exchange_match_ledger:v1"
+        and match_ledger.get("evidence_kind") == "paper_exchange_match_evidence"
+        and match_ledger.get("reconciliation_eligible") is False
+        and match_ledger.get("cursor_kind") == "match_fill"
+        and isinstance(epoch, str)
+        and len(epoch) == 32
+        and all(character in "0123456789abcdef" for character in epoch)
+        and match_ledger.get("capture_scope") == "matches_with_caller_supplied_order_id_only"
+        and match_ledger.get("identity_complete") is True
+        and isinstance(rows, list)
+        and isinstance(match_ledger.get("page_complete"), bool)
+        and isinstance(match_ledger.get("history_complete"), bool)
+        and match_ledger.get("history_complete") is False
+    )
+    if not page_fields_valid:
+        result["blockers"].append(
+            "Paper Exchange match-evidence schema, source epoch, cursor kind, or completeness metadata is invalid"
+        )
+    result["source_epoch"] = epoch if isinstance(epoch, str) else None
+    result["source_history_complete"] = match_ledger.get("history_complete") is True
+    if match_ledger.get("history_complete") is not True:
+        result["blockers"].append(
+            "Paper Exchange source history is explicitly incomplete; comparison covers only returned rows"
+        )
+
+    after = match_ledger.get("after_cursor")
+    next_cursor = match_ledger.get("next_cursor")
+    max_cursor = match_ledger.get("max_cursor")
+    page_size = match_ledger.get("page_size")
+    page_complete = match_ledger.get("page_complete")
+    cursor_number = lambda value: (
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    )
+    cursor_fields_valid = (
+        cursor_number(after)
+        and cursor_number(max_cursor)
+        and isinstance(page_size, int)
+        and not isinstance(page_size, bool)
+        and page_size == len(rows) if isinstance(rows, list) else False
+    )
+    if next_cursor is not None:
+        cursor_fields_valid = cursor_fields_valid and cursor_number(next_cursor)
+    if not cursor_fields_valid:
+        result["blockers"].append("Match-evidence page cursor or row-count metadata is invalid")
+    result.update({
+        "after_cursor": after if cursor_number(after) else None,
+        "next_cursor": next_cursor if cursor_number(next_cursor) else None,
+        "max_cursor": max_cursor if cursor_number(max_cursor) else None,
+        "page_complete": page_complete is True,
+    })
+    if isinstance(rows, list):
+        result["source_match_rows"] = len(rows)
+    else:
+        result["blockers"].append("Match-evidence rows are unavailable")
+        rows = []
+
+    source_by_execution_id = {}
+    source_ids = set()
+    source_cursors = set()
+    prior_cursor = after if cursor_number(after) else 0
+    source_invalid = False
+    for row in rows:
+        if not isinstance(row, dict):
+            source_invalid = True
+            result["blockers"].append("Paper Exchange match-evidence row is not an object")
+            continue
+        execution_id = row.get("source_execution_id")
+        order_id = row.get("order_id")
+        cursor = row.get("source_cursor")
+        fingerprint = row.get("request_fingerprint")
+        symbol, side = row.get("symbol"), row.get("side")
+        try:
+            quantity, price = dec(row.get("quantity")), dec(row.get("price"))
+        except (ValueError, TypeError):
+            source_invalid = True
+            result["blockers"].append("Paper Exchange row has invalid source quantity or price")
+            continue
+        row_valid = (
+            isinstance(execution_id, str) and bool(execution_id.strip())
+            and isinstance(order_id, str) and bool(order_id.strip())
+            and cursor_number(cursor) and cursor > 0
+            and isinstance(fingerprint, str) and bool(fingerprint.strip())
+            and isinstance(symbol, str) and bool(symbol.strip())
+            and side in ("buy", "sell")
+            and quantity > 0 and price > 0
+        )
+        if not row_valid:
+            source_invalid = True
+            result["blockers"].append("Paper Exchange match-evidence row has incomplete identity or values")
+            continue
+        if execution_id in source_ids or cursor in source_cursors:
+            source_invalid = True
+            result["blockers"].append("Paper Exchange match-evidence contains duplicate fill ID or cursor")
+            continue
+        if (
+            not cursor_number(after)
+            or not cursor_number(max_cursor)
+            or cursor <= after
+            or cursor > max_cursor
+            or cursor <= prior_cursor
+        ):
+            source_invalid = True
+            result["blockers"].append("Paper Exchange match-evidence cursors are outside ordered page bounds")
+            continue
+        source_ids.add(execution_id)
+        source_cursors.add(cursor)
+        prior_cursor = cursor
+        source_by_execution_id[execution_id] = {
+            "order_id": order_id,
+            "cursor": cursor,
+            "request_fingerprint": fingerprint,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+        }
+
+    if isinstance(rows, list) and cursor_fields_valid:
+        if rows and next_cursor != rows[-1].get("source_cursor"):
+            source_invalid = True
+            result["blockers"].append("Match-evidence next_cursor does not identify the final returned row")
+        if page_complete is True and rows and rows[-1].get("source_cursor") != max_cursor:
+            source_invalid = True
+            result["blockers"].append("Complete page ends before its reported high-water cursor")
+        if page_complete is False and (not rows or rows[-1].get("source_cursor") >= max_cursor):
+            source_invalid = True
+            result["blockers"].append("Incomplete page has no cursor position remaining before high-water")
+        if page_complete is True and not rows and after < max_cursor:
+            source_invalid = True
+            result["blockers"].append("Empty complete page ends before its reported high-water cursor")
+
+    if not isinstance(position_trades, list):
+        result["blockers"].append("Position Management fill rows unavailable")
+        return result
+    result["position_source_complete"] = (
+        isinstance(position_source_coverage, dict)
+        and position_source_coverage.get("has_older") is False
+        and isinstance(position_source_coverage.get("total_records"), int)
+        and not isinstance(position_source_coverage.get("total_records"), bool)
+        and position_source_coverage.get("total_records") == len(position_trades)
+        and isinstance(position_source_coverage.get("returned_records"), int)
+        and not isinstance(position_source_coverage.get("returned_records"), bool)
+        and position_source_coverage.get("returned_records") == len(position_trades)
+    )
+    if not result["position_source_complete"]:
+        result["blockers"].append(
+            "Position fill comparison has partial or unverified source coverage"
+        )
+
+    seen_pm_fill_ids = set()
+    seen_pm_source_ids = set()
+    seen_pm_cursors = set()
+    matched_source_ids = set()
+    mismatches = []
+    missing_source_links = 0
+    clipped_count = 0
+    consistent_count = 0
+    for trade in position_trades:
+        if not isinstance(trade, dict):
+            missing_source_links += 1
+            result["blockers"].append("Position Management fill row is not an object")
+            continue
+        pm_fill_id = trade.get("fill_id")
+        execution_id = trade.get("paper_exchange_execution_id")
+        order_id = trade.get("parent_order_id")
+        cursor = trade.get("paper_exchange_source_cursor")
+        reasons = []
+        if not isinstance(pm_fill_id, str) or not pm_fill_id.strip():
+            reasons.append("missing_pm_fill_id")
+        elif pm_fill_id in seen_pm_fill_ids:
+            reasons.append("duplicate_pm_fill_id")
+        else:
+            seen_pm_fill_ids.add(pm_fill_id)
+        if trade.get("paper_exchange_source_complete") is not True:
+            reasons.append("pm_source_link_incomplete")
+        if trade.get("paper_exchange_schema_version") != "paper_exchange_match:v1":
+            reasons.append("pm_source_schema_mismatch")
+        if not isinstance(order_id, str) or not order_id.strip():
+            reasons.append("missing_source_order_id")
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            reasons.append("missing_source_fill_id")
+        elif execution_id in seen_pm_source_ids:
+            reasons.append("duplicate_pm_source_fill_id")
+        else:
+            seen_pm_source_ids.add(execution_id)
+        if not cursor_number(cursor) or cursor <= 0:
+            reasons.append("missing_or_invalid_pm_source_cursor")
+        elif cursor in seen_pm_cursors:
+            reasons.append("duplicate_pm_source_cursor")
+        else:
+            seen_pm_cursors.add(cursor)
+        epoch_value = trade.get("paper_exchange_source_epoch")
+        if not isinstance(epoch_value, str) or not epoch_value:
+            reasons.append("missing_pm_source_epoch")
+        elif isinstance(epoch, str) and epoch_value != epoch:
+            reasons.append("source_epoch_mismatch")
+        fingerprint_value = trade.get("paper_exchange_request_fingerprint")
+        if not isinstance(fingerprint_value, str) or not fingerprint_value:
+            reasons.append("missing_pm_request_fingerprint")
+        link_incomplete = any(reason in {
+            "missing_pm_fill_id",
+            "duplicate_pm_fill_id",
+            "pm_source_link_incomplete",
+            "pm_source_schema_mismatch",
+            "missing_source_order_id",
+            "missing_or_invalid_pm_source_cursor",
+            "duplicate_pm_source_cursor",
+            "missing_pm_source_epoch",
+            "source_epoch_mismatch",
+            "missing_pm_request_fingerprint",
+        } for reason in reasons)
+        if "missing_source_fill_id" in reasons or "duplicate_pm_source_fill_id" in reasons:
+            missing_source_links += 1
+            mismatches.append({
+                "pm_fill_id": pm_fill_id if isinstance(pm_fill_id, str) else None,
+                "order_id": order_id if isinstance(order_id, str) else None,
+                "source_execution_id": execution_id if isinstance(execution_id, str) else None,
+                "reasons": reasons,
+            })
+            continue
+
+        source_row = source_by_execution_id.get(execution_id)
+        if source_row is None:
+            missing_source_links += 1
+            mismatches.append({
+                "pm_fill_id": pm_fill_id,
+                "order_id": order_id,
+                "source_execution_id": execution_id,
+                "reasons": ["source_fill_not_in_returned_page"],
+            })
+            continue
+        matched_source_ids.add(execution_id)
+        if link_incomplete:
+            missing_source_links += 1
+        if order_id != source_row["order_id"]:
+            reasons.append("source_order_id_mismatch")
+        if cursor != source_row["cursor"]:
+            reasons.append("source_cursor_mismatch")
+        if fingerprint_value != source_row["request_fingerprint"]:
+            reasons.append("request_fingerprint_mismatch")
+        if trade.get("symbol") != source_row["symbol"] or trade.get("side") != source_row["side"]:
+            reasons.append("instrument_or_side_mismatch")
+        try:
+            pm_source_quantity = dec(trade.get("paper_exchange_source_quantity"))
+            pm_quantity = dec(trade.get("quantity"))
+            pm_price = dec(trade.get("execution_price"))
+        except (ValueError, TypeError):
+            reasons.append("invalid_pm_source_or_executed_quantity_or_price")
+        else:
+            if abs(pm_source_quantity - source_row["quantity"]) > EXECUTION_RECONCILIATION_TOLERANCE:
+                reasons.append("source_quantity_mismatch")
+            if pm_quantity <= 0 or pm_price <= 0:
+                reasons.append("non_positive_pm_quantity_or_price")
+            if pm_quantity > source_row["quantity"] + EXECUTION_RECONCILIATION_TOLERANCE:
+                reasons.append("pm_quantity_exceeds_source_quantity")
+            elif pm_quantity < source_row["quantity"] - EXECUTION_RECONCILIATION_TOLERANCE:
+                clipped_count += 1
+                reasons.append("position_manager_clipped_quantity")
+            if abs(pm_price - source_row["price"]) > EXECUTION_RECONCILIATION_TOLERANCE:
+                reasons.append("execution_price_mismatch")
+            source_notional = source_row["quantity"] * source_row["price"]
+            pm_source_notional = pm_source_quantity * pm_price
+            if abs(pm_source_notional - source_notional) > EXECUTION_RECONCILIATION_TOLERANCE:
+                reasons.append("source_notional_mismatch")
+            pm_executed_notional = pm_quantity * pm_price
+            expected_clipped_notional = pm_quantity * source_row["price"]
+            if abs(pm_executed_notional - expected_clipped_notional) > EXECUTION_RECONCILIATION_TOLERANCE:
+                reasons.append("clipped_execution_notional_mismatch")
+        if reasons:
+            mismatches.append({
+                "pm_fill_id": pm_fill_id,
+                "order_id": order_id,
+                "source_execution_id": execution_id,
+                "reasons": sorted(set(reasons)),
+            })
+        else:
+            consistent_count += 1
+
+    unmatched_sources = source_ids - matched_source_ids
+    result["missing_source_link_count"] = missing_source_links
+    result["unmatched_source_row_count"] = len(unmatched_sources)
+    result["matched_fill_count"] = consistent_count
+    result["clipped_fill_count"] = clipped_count
+    result["mismatch_count"] = len(mismatches)
+    result["mismatches"] = mismatches[:100]
+    structurally_complete_page = (
+        page_fields_valid and cursor_fields_valid and not source_invalid
+    )
+    result["observed_rows_consistent"] = (
+        structurally_complete_page
+        and not missing_source_links
+        and not unmatched_sources
+        and not mismatches
+        and bool(consistent_count)
+    )
+    if result["observed_rows_consistent"]:
+        result["status"] = "MATCHED_OBSERVED_EVIDENCE_PARTIAL_HISTORY"
+    elif consistent_count or clipped_count or mismatches:
+        result["status"] = "PARTIAL_OR_MISMATCHED_OBSERVED_EVIDENCE"
+    if result["unmatched_source_row_count"]:
+        result["blockers"].append("Returned Paper Exchange rows lack matching PM source links")
+    if missing_source_links:
+        result["blockers"].append("Some PM fills lack complete matching-evidence identity")
+    if clipped_count:
+        result["blockers"].append("PM clipped one or more source match quantities")
+    if mismatches:
+        result["blockers"].append("Observed PM and Paper Exchange match evidence differs")
+    result["blockers"] = list(dict.fromkeys(result["blockers"]))
+    return result
+
+
+def reconcile_independent_portfolio_intervals(
+    position_intervals,
+    independent_contract,
+    interval_source_coverage=None,
+    position_trades=None,
+    position_source_coverage=None,
+):
+    """Reconcile PM flat-cash intervals to a separately versioned source.
+
+    This contract compares boundaries, fill/top-up cursors, per-currency cash,
+    identified contributions, known fee-bearing fills, and timestamped FX
+    marks. It publishes interval net cash return fields only when every input
+    interval reconciles. It never estimates open-position returns.
+    """
+    result = {
+        "status": "BLOCKED",
+        "independent_portfolio_interval_reconciled": False,
+        "position_interval_count": 0,
+        "independent_interval_count": 0,
+        "matched_interval_count": 0,
+        "mismatch_count": 0,
+        "intervals": [],
+        "reconciled_flat_cash_period_net_pnl_usd": None,
+        "reconciled_flat_cash_period_return_percent": None,
+        "source_is_synthetic_test_fixture": False,
+        "blockers": [],
+        "note": (
+            "Return fields require complete independent interval, fill, contribution, "
+            "balance and timestamp-aligned FX reconciliation; this is not a profitability conclusion."
+        ),
+    }
+
+    def block(reason):
+        if reason not in result["blockers"]:
+            result["blockers"].append(reason)
+
+    def is_integer(value):
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    def number(value, label):
+        try:
+            return dec(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{label} is missing or invalid") from error
+
+    def money_map(value, label, allow_empty=False):
+        if not isinstance(value, dict) or (not value and not allow_empty):
+            raise ValueError(f"{label} is missing or empty")
+        normalized = {}
+        for currency, amount in value.items():
+            if not isinstance(currency, str) or not currency.strip():
+                raise ValueError(f"{label} has an invalid currency")
+            normalized[currency] = number(amount, f"{label}.{currency}")
+        return normalized
+
+    def int_map(value, label):
+        if not isinstance(value, dict) or not value:
+            raise ValueError(f"{label} is missing or empty")
+        normalized = {}
+        for currency, timestamp in value.items():
+            if not isinstance(currency, str) or not currency.strip() or not is_integer(timestamp):
+                raise ValueError(f"{label} has an invalid timestamp")
+            normalized[currency] = timestamp
+        return normalized
+
+    def equal_money_maps(left, right, label):
+        if set(left) != set(right):
+            raise ValueError(f"{label} currency coverage mismatch")
+        for currency in left:
+            if abs(left[currency] - right[currency]) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                raise ValueError(f"{label} amount mismatch for {currency}")
+
+    def interval_identity(interval):
+        fields = (
+            "portfolio_id",
+            "execution_mode",
+            "ledger_epoch",
+            "interval_start_utc_ms",
+            "interval_end_utc_ms",
+            "fill_cursor_start",
+            "fill_cursor_end",
+            "trade_row_cursor_end",
+            "topup_cursor_start",
+            "topup_cursor_end",
+        )
+        if not isinstance(interval, dict):
+            raise ValueError("Interval row is not an object")
+        identity = tuple(interval.get(field) for field in fields)
+        if (
+            not isinstance(identity[0], str)
+            or not identity[0]
+            or identity[1] != "paper"
+            or not isinstance(identity[2], str)
+            or not identity[2]
+            or any(not is_integer(value) for value in identity[3:])
+            or identity[4] <= identity[3]
+            or identity[6] < identity[5]
+            or identity[7] < 0
+            or identity[9] < identity[8]
+        ):
+            raise ValueError("Interval identity or cursor bounds are incomplete")
+        return identity
+
+    def sequence_for_fill_id(fill_id, epoch):
+        prefix = f"pm-fill:v1:{epoch}:"
+        if not isinstance(fill_id, str) or not fill_id.startswith(prefix):
+            return None
+        suffix = fill_id[len(prefix):]
+        if not suffix.isdigit():
+            return None
+        sequence = int(suffix)
+        return sequence if sequence > 0 else None
+
+    def contribution_projection(rows, identity, label):
+        if not isinstance(rows, list):
+            raise ValueError(f"{label} contribution events are unavailable")
+        _, _, _, interval_start, interval_end, _, _, _, topup_start, topup_end = identity
+        projected = {}
+        by_currency = defaultdict(lambda: ZERO)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"{label} contribution row is not an object")
+            contribution_id = row.get("contribution_id")
+            source = row.get("source")
+            source_cursor = row.get("source_cursor")
+            timestamp = row.get("timestamp_utc_ms")
+            currency = row.get("currency")
+            if (
+                not isinstance(contribution_id, str)
+                or not contribution_id
+                or not isinstance(source, str)
+                or not source
+                or not is_integer(source_cursor)
+                or not topup_start <= source_cursor < topup_end
+                or not is_integer(timestamp)
+                or not interval_start <= timestamp < interval_end
+                or not isinstance(currency, str)
+                or not currency
+            ):
+                raise ValueError(f"{label} contribution identity is incomplete")
+            if contribution_id in projected:
+                raise ValueError(f"{label} contribution ID is duplicated")
+            amount = number(row.get("amount"), f"{label} contribution amount")
+            value_usd = number(row.get("value_usd"), f"{label} contribution USD value")
+            projected[contribution_id] = {
+                "source": source,
+                "source_cursor": source_cursor,
+                "timestamp_utc_ms": timestamp,
+                "currency": currency,
+                "amount": amount,
+                "value_usd": value_usd,
+            }
+            by_currency[currency] += amount
+        if len(projected) != topup_end - topup_start:
+            raise ValueError(f"{label} contribution cursor coverage is incomplete")
+        return projected, dict(by_currency)
+
+    def validate_flat_interval(pm, external, identity):
+        _, _, epoch, interval_start, interval_end, fill_start, fill_end, _, topup_start, topup_end = identity
+        if pm.get("baseline_evidence_id") != interval_source_coverage.get("baseline_evidence_id"):
+            raise ValueError("PM interval does not link to the verified opening baseline")
+        if (
+            pm.get("schema_version") != 1
+            or pm.get("is_baseline") is not False
+            or pm.get("complete") is not True
+            or pm.get("truncated") is not False
+            or pm.get("coverage_gap") is not False
+            or pm.get("heartbeat_gap") is not False
+            or pm.get("ledger_epoch_changed") is not False
+            or pm.get("ledger_epoch") != epoch
+            or pm.get("portfolio_return_complete") is not True
+            or pm.get("portfolio_return_completeness_reasons") != []
+            or pm.get("portfolio_return_scope") != "pm_internal_flat_cash_only"
+            or pm.get("all_symbols_covered") is not True
+            or pm.get("unknown_cashflow_fills") != 0
+            or pm.get("unknown_fee_fills") != 0
+            or pm.get("legacy_fill_rows_without_allocator_identity") != 0
+        ):
+            raise ValueError("PM interval is incomplete, non-flat, or outside flat-cash scope")
+        if external.get("complete") is not True:
+            raise ValueError("Independent interval is not marked complete")
+        if (
+            not is_integer(pm.get("known_fee_fills"))
+            or not is_integer(pm.get("unknown_fee_fills"))
+            or pm.get("known_fee_fills") < 0
+            or pm.get("unknown_fee_fills") < 0
+        ):
+            raise ValueError("PM fee fill counts are missing or invalid")
+        positions = pm.get("positions")
+        if not isinstance(positions, list):
+            raise ValueError("PM flat-cash position coverage is unavailable")
+        for position in positions:
+            if not isinstance(position, dict):
+                raise ValueError("PM position row is invalid")
+            if "quantity" in position:
+                if abs(number(position["quantity"], "PM position quantity")) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                    raise ValueError("PM interval contains a non-flat position")
+            elif not (
+                isinstance(position.get("status"), str)
+                and position["status"].startswith("closed")
+                and is_integer(position.get("closed_at_ms"))
+            ):
+                raise ValueError("PM interval contains an unvalued dated-carry position")
+        for interval in (pm, external):
+            if interval_identity(interval) != identity:
+                raise ValueError("Shared portfolio, epoch, interval, or cursor identity mismatch")
+
+        opening = money_map(pm.get("opening_cash_balances_by_currency"), "PM opening cash")
+        closing = money_map(pm.get("cash_balances_by_currency"), "PM closing cash")
+        external_opening = money_map(external.get("opening_cash_balances_by_currency"), "Independent opening cash")
+        external_closing = money_map(external.get("closing_cash_balances_by_currency"), "Independent closing cash")
+        equal_money_maps(opening, external_opening, "Opening cash")
+        equal_money_maps(closing, external_closing, "Closing cash")
+
+        marks = external.get("fx_marks")
+        if not isinstance(marks, list):
+            raise ValueError("Independent timestamped FX marks are unavailable")
+        mark_map = {}
+        for mark in marks:
+            if not isinstance(mark, dict):
+                raise ValueError("Independent FX mark row is invalid")
+            boundary, currency = mark.get("boundary"), mark.get("currency")
+            if boundary not in ("opening", "closing") or not isinstance(currency, str) or not currency:
+                raise ValueError("Independent FX mark identity is invalid")
+            key = (boundary, currency)
+            if key in mark_map:
+                raise ValueError("Independent FX mark is duplicated")
+            mark_map[key] = mark
+
+        valuations = {}
+        for boundary, balances, boundary_ms, pm_rates_key, pm_times_key, pm_values_key, independent_values_key, pm_total_key, independent_total_key in (
+            ("opening", opening, interval_start, "opening_fx_rates_usd_by_currency", "opening_fx_rates_updated_at_by_currency", "opening_cash_value_usd_by_currency", "opening_cash_value_usd_by_currency", "opening_cash_total_usd", "opening_cash_total_usd"),
+            ("closing", closing, interval_end, "closing_fx_rates_usd_by_currency", "closing_fx_rates_updated_at_by_currency", "closing_cash_value_usd_by_currency", "closing_cash_value_usd_by_currency", "closing_cash_total_usd", "closing_cash_total_usd"),
+        ):
+            pm_rates = money_map(pm.get(pm_rates_key), f"PM {boundary} FX rates")
+            pm_times = int_map(pm.get(pm_times_key), f"PM {boundary} FX timestamps")
+            external_values = money_map(external.get(independent_values_key), f"Independent {boundary} USD valuation")
+            pm_values = money_map(pm.get(pm_values_key), f"PM {boundary} USD valuation")
+            if set(pm_rates) != set(balances) or set(pm_times) != set(balances):
+                raise ValueError(f"{boundary.title()} FX mark currency coverage is incomplete")
+            if set(pm_values) != set(balances) or set(external_values) != set(balances):
+                raise ValueError(f"{boundary.title()} USD valuation currency coverage is incomplete")
+            boundary_values = {}
+            for currency, balance in balances.items():
+                mark = mark_map.get((boundary, currency))
+                if mark is None:
+                    raise ValueError(f"Missing independent {boundary} FX mark for {currency}")
+                rate = number(mark.get("rate_usd"), f"Independent {boundary} FX rate {currency}")
+                updated_at = mark.get("updated_at_utc_ms")
+                if (
+                    not is_integer(updated_at)
+                    or updated_at != pm_times[currency]
+                    or abs(rate - pm_rates[currency]) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE
+                ):
+                    raise ValueError(f"Timestamp-aligned {boundary} FX mark mismatch for {currency}")
+                if updated_at > boundary_ms or (currency != "USD" and boundary_ms - updated_at > PORTFOLIO_FX_MAX_AGE_MS):
+                    raise ValueError(f"Independent {boundary} FX mark is future-dated or stale for {currency}")
+                if currency == "USD" and rate != Decimal("1"):
+                    raise ValueError("USD FX mark must equal one")
+                valued = balance * rate
+                if abs(valued - pm_values[currency]) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE or abs(valued - external_values[currency]) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                    raise ValueError(f"{boundary.title()} cash valuation mismatch for {currency}")
+                boundary_values[currency] = valued
+            total_usd = sum(boundary_values.values(), ZERO)
+            pm_total = number(pm.get(pm_total_key), f"PM {boundary} cash total")
+            external_total = number(external.get(independent_total_key), f"Independent {boundary} cash total")
+            if abs(total_usd - pm_total) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE or abs(total_usd - external_total) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                raise ValueError(f"{boundary.title()} cash total mismatch")
+            valuations[boundary] = boundary_values
+
+        pm_contributions, pm_contributions_by_currency = contribution_projection(
+            pm.get("external_contribution_events"), identity, "PM"
+        )
+        external_contributions, external_contributions_by_currency = contribution_projection(
+            external.get("external_contribution_events"), identity, "Independent"
+        )
+        if pm_contributions != external_contributions:
+            raise ValueError("Separately identified external contribution events mismatch")
+        pm_contribution_map = money_map(pm.get("external_contributions_by_currency"), "PM contributions by currency") if pm.get("external_contributions_by_currency") else {}
+        external_contribution_map = money_map(external.get("external_contributions_by_currency"), "Independent contributions by currency") if external.get("external_contributions_by_currency") else {}
+        if pm_contributions_by_currency != pm_contribution_map or pm_contributions_by_currency != external_contributions_by_currency or pm_contributions_by_currency != external_contribution_map:
+            raise ValueError("External contribution currency totals mismatch")
+        for contribution_id, contribution in pm_contributions.items():
+            if contribution["currency"] != "USD":
+                raise ValueError(f"Contribution {contribution_id} lacks timestamp-aligned PM FX valuation")
+            if contribution["value_usd"] != contribution["amount"]:
+                raise ValueError(f"USD contribution {contribution_id} has mismatched value")
+
+        sequence_start, sequence_end = fill_start, fill_end
+        if pm.get("known_fee_fills") + pm.get("unknown_fee_fills") != sequence_end:
+            raise ValueError("PM lifetime fee counts do not match its allocator cursor")
+        pm_interval_fills = []
+        pm_sequences = set()
+        for trade in position_trades:
+            if not isinstance(trade, dict):
+                raise ValueError("Position fill row is invalid")
+            sequence = sequence_for_fill_id(trade.get("fill_id"), epoch)
+            if sequence is None:
+                continue
+            if sequence_start < sequence <= sequence_end:
+                timestamp = trade.get("timestamp")
+                if not is_integer(timestamp) or not interval_start <= timestamp < interval_end:
+                    raise ValueError("PM fill timestamp is outside its interval bounds")
+                if sequence in pm_sequences:
+                    raise ValueError("PM fill cursor is duplicated")
+                pm_sequences.add(sequence)
+                pm_interval_fills.append(trade)
+        if pm_sequences != set(range(sequence_start + 1, sequence_end + 1)):
+            raise ValueError("PM fill rows do not cover the shared fill cursor range")
+        if len(pm_interval_fills) != sequence_end - sequence_start:
+            raise ValueError("PM interval fill count does not match its cursor range")
+        if external.get("known_fee_fills") != len(pm_interval_fills) or external.get("unknown_fee_fills") != 0:
+            raise ValueError("Independent fill fee coverage is incomplete or mismatched")
+        external_fills = external.get("fills")
+        if not isinstance(external_fills, list):
+            raise ValueError("Independent interval fills are unavailable")
+        external_sequences = [row.get("fill_cursor") if isinstance(row, dict) else None for row in external_fills]
+        if (
+            any(not is_integer(sequence) for sequence in external_sequences)
+            or len(set(external_sequences)) != len(external_sequences)
+            or set(external_sequences) != pm_sequences
+        ):
+            raise ValueError("Independent fill rows do not cover the shared fill cursor range")
+        interval_position_coverage = {
+            "has_older": False,
+            "total_records": len(pm_interval_fills),
+            "returned_records": len(pm_interval_fills),
+        }
+        fill_result = reconcile_independent_execution_fills(
+            pm_interval_fills, {"schema_version": 1, "source_system": "paper_exchange", "execution_mode": "paper", "independent_source": True, "complete": True, "snapshot_id": independent_contract["snapshot_id"], "fills": external_fills}, interval_position_coverage
+        )
+        if not fill_result["independent_execution_ledger_reconciled"]:
+            raise ValueError("Interval fill and known fee rows do not reconcile")
+
+        fill_cash_movements = defaultdict(lambda: ZERO)
+        for fill in external_fills:
+            symbol = fill.get("symbol")
+            if not isinstance(symbol, str) or "-" not in symbol:
+                raise ValueError("Independent fill has an invalid currency pair")
+            _, quote = symbol.rsplit("-", 1)
+            if not quote:
+                raise ValueError("Independent fill has an invalid quote currency")
+            quantity = number(fill.get("quantity"), "Independent fill quantity")
+            price = number(fill.get("price", fill.get("execution_price")), "Independent fill price")
+            sign = Decimal("-1") if fill.get("side") == "buy" else Decimal("1")
+            fill_cash_movements[quote] += sign * quantity * price
+            fee_currency = fill.get("fee_currency")
+            if not isinstance(fee_currency, str) or not fee_currency:
+                raise ValueError("Independent known fee currency is missing")
+            fill_cash_movements[fee_currency] += number(fill.get("fee"), "Independent signed fee cashflow")
+        for currency, amount in external_contributions_by_currency.items():
+            fill_cash_movements[currency] += amount
+        pm_movements = money_map(pm.get("cash_movements_by_currency"), "PM cash movements", allow_empty=True)
+        external_movements = money_map(external.get("cash_movements_by_currency"), "Independent cash movements", allow_empty=True)
+        equal_money_maps(dict(fill_cash_movements), pm_movements, "PM cash movements from fills/contributions")
+        equal_money_maps(dict(fill_cash_movements), external_movements, "Independent cash movements from fills/contributions")
+        for currency in set(opening) | set(closing) | set(fill_cash_movements):
+            opening_amount = opening.get(currency, ZERO)
+            closing_amount = closing.get(currency, ZERO)
+            movement = fill_cash_movements.get(currency, ZERO)
+            if abs(closing_amount - opening_amount - movement) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                raise ValueError(f"Opening balance plus fills/contributions does not reconcile for {currency}")
+
+        opening_total = sum(valuations["opening"].values(), ZERO)
+        closing_total = sum(valuations["closing"].values(), ZERO)
+        contributions_usd = sum(
+            (contribution["value_usd"] for contribution in pm_contributions.values()), ZERO
+        )
+        net_pnl = closing_total - opening_total - contributions_usd
+        opening_capital = number(pm.get("opening_cash_total_usd"), "PM opening USD capital")
+        if opening_capital <= 0:
+            raise ValueError("PM opening USD capital is non-positive")
+        period_return = net_pnl / opening_capital * Decimal("100")
+        pm_net_pnl = number(pm.get("flat_cash_period_net_pnl_usd"), "PM internal flat-cash net PnL")
+        pm_return = number(pm.get("flat_cash_period_return_pct"), "PM internal flat-cash return")
+        if abs(net_pnl - pm_net_pnl) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+            raise ValueError("Independently reconciled cash PnL differs from PM interval")
+        if abs(period_return - pm_return) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+            raise ValueError("Independently reconciled cash return differs from PM interval")
+        return {
+            "status": "RECONCILED",
+            "evidence_id": pm.get("evidence_id"),
+            "independent_interval_id": external.get("interval_id"),
+            "reconciled_flat_cash_period_net_pnl_usd": rounded(net_pnl),
+            "reconciled_flat_cash_period_return_percent": rounded(period_return, 8),
+            "position_fill_rows_reconciled": len(pm_interval_fills),
+            "known_fee_fill_rows_reconciled": len(pm_interval_fills),
+            "contribution_events_reconciled": len(pm_contributions),
+        }
+
+    coverage_ok = (
+        isinstance(interval_source_coverage, dict)
+        and interval_source_coverage.get("schema_version") == 1
+        and interval_source_coverage.get("coverage") == "pm_internal_complete"
+        and interval_source_coverage.get("truncated") is False
+        and interval_source_coverage.get("baseline_verified") is True
+        and isinstance(interval_source_coverage.get("baseline_evidence_id"), str)
+        and bool(interval_source_coverage.get("baseline_evidence_id"))
+        and isinstance(position_intervals, list)
+        and bool(position_intervals)
+        and interval_source_coverage.get("returned_intervals") == len(position_intervals)
+    )
+    if not coverage_ok:
+        block("PM portfolio interval source is missing, truncated, or incomplete")
+        return result
+    if (
+        not isinstance(independent_contract, dict)
+        or independent_contract.get("schema_version") != 1
+        or independent_contract.get("contract") != "paper_exchange_portfolio_interval_v1"
+        or independent_contract.get("source_system") != "paper_exchange"
+        or independent_contract.get("execution_mode") != "paper"
+        or independent_contract.get("independent_source") is not True
+        or independent_contract.get("complete") is not True
+        or independent_contract.get("baseline_evidence_id")
+        != interval_source_coverage.get("baseline_evidence_id")
+        or not isinstance(independent_contract.get("snapshot_id"), str)
+        or not independent_contract.get("snapshot_id")
+        or not isinstance(independent_contract.get("intervals"), list)
+    ):
+        block("Independent versioned Paper Exchange portfolio interval contract is unavailable or incomplete")
+        return result
+    result["source_is_synthetic_test_fixture"] = independent_contract.get("fixture_only") is True
+    result["position_interval_count"] = len(position_intervals)
+    result["independent_interval_count"] = len(independent_contract["intervals"])
+    if len(position_intervals) != len(independent_contract["intervals"]):
+        block("PM and independent interval counts do not match")
+        return result
+    if (
+        not isinstance(position_source_coverage, dict)
+        or position_source_coverage.get("has_older") is not False
+        or position_source_coverage.get("total_records") != position_source_coverage.get("returned_records")
+        or not isinstance(position_trades, list)
+        or position_source_coverage.get("returned_records") != len(position_trades)
+    ):
+        block("Complete Position Management fill rows are required for interval reconciliation")
+        return result
+
+    def order_intervals(intervals, label):
+        by_identity = {}
+        for interval in intervals:
+            try:
+                identity = interval_identity(interval)
+            except ValueError as error:
+                raise ValueError(f"{label}: {error}") from error
+            if identity in by_identity:
+                raise ValueError(f"{label} interval identity is duplicated")
+            by_identity[identity] = interval
+        return by_identity
+
+    try:
+        pm_by_identity = order_intervals(position_intervals, "PM")
+        source_by_identity = order_intervals(independent_contract["intervals"], "Independent")
+    except ValueError as error:
+        block(str(error))
+        return result
+    if set(pm_by_identity) != set(source_by_identity):
+        block("Shared portfolio, epoch, interval, or cursor bounds do not match")
+        return result
+
+    ordered_identities = sorted(
+        pm_by_identity, key=lambda item: (item[4], item[3], item[5], item[6])
+    )
+    for previous_identity, current_identity in zip(
+        ordered_identities, ordered_identities[1:]
+    ):
+        if (
+            previous_identity[0:3] != current_identity[0:3]
+            or previous_identity[4] != current_identity[3]
+            or previous_identity[6] != current_identity[5]
+            or previous_identity[9] != current_identity[8]
+        ):
+            block("PM and independent interval series has a time, epoch, fill, or top-up cursor gap")
+            return result
+
+    reconciled_intervals = []
+    mismatches = []
+    for identity in ordered_identities:
+        try:
+            interval_result = validate_flat_interval(
+                pm_by_identity[identity], source_by_identity[identity], identity
+            )
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            mismatches.append({
+                "evidence_id": pm_by_identity[identity].get("evidence_id"),
+                "independent_interval_id": source_by_identity[identity].get("interval_id"),
+                "reason": str(error),
+            })
+            continue
+        reconciled_intervals.append(interval_result)
+    result["matched_interval_count"] = len(reconciled_intervals)
+    result["mismatch_count"] = len(mismatches)
+    result["intervals"] = reconciled_intervals + mismatches
+    if mismatches or len(reconciled_intervals) != len(position_intervals):
+        result["status"] = "MISMATCH"
+        # Do not expose per-interval returns from a partial portfolio history.
+        # A neighboring missing or mismatched interval invalidates the claimed
+        # complete return series, even when one isolated pair matched.
+        for interval in reconciled_intervals:
+            interval["status"] = "WITHHELD"
+            interval["reconciled_flat_cash_period_net_pnl_usd"] = None
+            interval["reconciled_flat_cash_period_return_percent"] = None
+            interval["return_fields_withheld_reason"] = "portfolio interval series is not fully reconciled"
+        result["blockers"].extend(
+            f"Portfolio interval mismatch {row.get('evidence_id')}: {row['reason']}"
+            for row in mismatches[:100]
+        )
+        return result
+    result.update({
+        "status": "RECONCILED",
+        "independent_portfolio_interval_reconciled": True,
+        "reconciled_flat_cash_period_net_pnl_usd": [
+            interval["reconciled_flat_cash_period_net_pnl_usd"]
+            for interval in reconciled_intervals
+        ],
+        "reconciled_flat_cash_period_return_percent": [
+            interval["reconciled_flat_cash_period_return_percent"]
+            for interval in reconciled_intervals
+        ],
+    })
+    return result
 
 
 SNAPSHOT_SOURCES = {}
@@ -141,6 +1183,9 @@ def load_snapshot_manifest(filename):
             "independent_execution_ledger_reconciled": False,
             "acceptance": "NOT_EVALUATED",
         }
+        SNAPSHOT_MANIFEST["execution_reconciliation_inputs"] = load_execution_reconciliation_inputs(
+            data.get("execution_reconciliation_sources"), cache
+        )
         return
 
     if len(sources) != len(REQUIRED_ENDPOINTS):
@@ -233,6 +1278,153 @@ def load_snapshot_manifest(filename):
         "execution_mode": data.get("execution_mode"),
         "historical_integrity_verified": False,
         "acceptance": "NOT_EVALUATED"
+    }
+    SNAPSHOT_MANIFEST["execution_reconciliation_inputs"] = load_execution_reconciliation_inputs(
+        data.get("execution_reconciliation_sources"), cache
+    )
+
+
+def load_execution_reconciliation_inputs(sources, cache):
+    """Load optional PM fills and separate Paper Exchange evidence sources."""
+    if not isinstance(sources, list) or len(sources) not in (2, 3, 4):
+        return None
+    contracts = {
+        ("positions", "trades"): ("positions-trades-", "/positions/trades"),
+        ("positions", "portfolio-evidence-intervals"):
+            ("positions-portfolio-evidence-intervals-", "/positions/portfolio-evidence-intervals"),
+        ("paper_exchange", "execution-ledger"):
+            ("paper_exchange-execution-ledger-", "/internal/executions/ledger"),
+        ("paper_exchange", "match-evidence-ledger"):
+            ("paper_exchange-match-evidence-ledger-", "/internal/orders/match/ledger"),
+    }
+    bodies = {}
+    for item in sources:
+        if not isinstance(item, dict):
+            return None
+        key = (item.get("service"), item.get("endpoint"))
+        contract = contracts.get(key)
+        if contract is None or key in bodies or item.get("status") != "COLLECTED":
+            return None
+        path = Path(item.get("evidence", "")).resolve()
+        if (
+            path.parent != cache
+            or not path.name.startswith(contract[0])
+            or path.stat().st_size > 32_000_000
+        ):
+            return None
+        raw = path.read_bytes()
+        payload = json.loads(raw)
+        if (
+            payload.get("service") != item["service"]
+            or payload.get("route") != contract[1]
+            or payload.get("application_status") != 200
+            or payload.get("bytes") != item.get("bytes")
+            or "body" not in payload
+        ):
+            return None
+        bodies[key] = payload["body"]
+    pm_body = bodies.get(("positions", "trades"))
+    exchange_body = bodies.get(("paper_exchange", "execution-ledger"))
+    match_evidence_body = bodies.get(("paper_exchange", "match-evidence-ledger"))
+    interval_body = bodies.get(("positions", "portfolio-evidence-intervals"))
+    if (
+        not isinstance(pm_body, dict)
+        or pm_body.get("has_older") is not False
+        or not isinstance(pm_body.get("trades"), list)
+        or isinstance(pm_body.get("total"), bool)
+        or not isinstance(pm_body.get("total"), int)
+        or pm_body.get("total") != len(pm_body["trades"])
+        or not isinstance(exchange_body, dict) and not isinstance(match_evidence_body, dict)
+        or ("positions", "portfolio-evidence-intervals") in bodies
+        and not isinstance(interval_body, dict)
+    ):
+        return None
+    interval_coverage = None
+    pm_portfolio_intervals = None
+    if interval_body is not None:
+        raw_intervals = interval_body.get("intervals")
+        baseline_rows = [
+            row for row in raw_intervals
+            if isinstance(row, dict) and row.get("is_baseline") is True
+        ] if isinstance(raw_intervals, list) else []
+        period_rows = [
+            row for row in raw_intervals
+            if isinstance(row, dict) and row.get("is_baseline") is not True
+        ] if isinstance(raw_intervals, list) else []
+        baseline_verified = False
+        baseline_evidence_id = None
+        if len(baseline_rows) == 1 and period_rows:
+            baseline = baseline_rows[0]
+            baseline_evidence_id = baseline.get("evidence_id")
+            baseline_verified = (
+                isinstance(baseline_evidence_id, str)
+                and bool(baseline_evidence_id)
+                and baseline.get("complete") is True
+                and isinstance(baseline.get("portfolio_id"), str)
+                and bool(baseline.get("portfolio_id"))
+                and baseline.get("execution_mode") == "paper"
+                and isinstance(baseline.get("ledger_epoch"), str)
+                and isinstance(baseline.get("interval_end_utc_ms"), int)
+            )
+            previous = baseline
+            for row in sorted(
+                period_rows,
+                key=lambda value: value.get("interval_end_utc_ms", -1)
+                if isinstance(value.get("interval_end_utc_ms"), int)
+                else -1,
+            ):
+                baseline_verified = baseline_verified and (
+                    row.get("complete") is True
+                    and row.get("is_baseline") is False
+                    and row.get("baseline_evidence_id") == baseline_evidence_id
+                    and row.get("portfolio_id") == previous.get("portfolio_id")
+                    and row.get("execution_mode") == previous.get("execution_mode")
+                    and row.get("ledger_epoch") == previous.get("ledger_epoch")
+                    and row.get("interval_start_utc_ms") == previous.get("interval_end_utc_ms")
+                    and row.get("fill_cursor_start") == previous.get("fill_cursor_end")
+                    and row.get("topup_cursor_start") == previous.get("topup_cursor_end")
+                    and row.get("opening_cash_balances_by_currency")
+                    == previous.get("cash_balances_by_currency")
+                    and row.get("opening_cash_value_usd_by_currency")
+                    == previous.get("closing_cash_value_usd_by_currency")
+                    and row.get("opening_fx_rates_usd_by_currency")
+                    == previous.get("closing_fx_rates_usd_by_currency")
+                    and row.get("opening_fx_rates_updated_at_by_currency")
+                    == previous.get("closing_fx_rates_updated_at_by_currency")
+                )
+                previous = row
+        interval_coverage = {
+            "schema_version": interval_body.get("schema_version"),
+            "coverage": interval_body.get("coverage"),
+            "truncated": interval_body.get("truncated"),
+            "returned_intervals": len(period_rows),
+            "next_cursor": interval_body.get("next_cursor"),
+            "baseline_verified": baseline_verified,
+            "baseline_evidence_id": baseline_evidence_id,
+        }
+        if isinstance(raw_intervals, list):
+            pm_portfolio_intervals = period_rows
+    independent_interval_contract = (
+        exchange_body.get("portfolio_interval_contract")
+        if isinstance(exchange_body, dict) else None
+    )
+    if (
+        not isinstance(independent_interval_contract, dict)
+        or independent_interval_contract.get("fixture_only") is True
+    ):
+        independent_interval_contract = None
+    return {
+        "position_trades": pm_body["trades"],
+        "position_source_coverage": {
+            "has_older": pm_body["has_older"],
+            "total_records": pm_body["total"],
+            "returned_records": len(pm_body["trades"]),
+        },
+        "execution_ledger": exchange_body,
+        "match_evidence_ledger": match_evidence_body,
+        "pm_portfolio_intervals": pm_portfolio_intervals,
+        "portfolio_interval_source_coverage": interval_coverage,
+        "independent_portfolio_interval_contract": independent_interval_contract,
     }
 
 
@@ -530,6 +1722,31 @@ def reconciliation():
 
     snapshot = SNAPSHOT_MANIFEST or {}
     coverage = snapshot.get("ledger_coverage") or {}
+    reconciliation_inputs = snapshot.get("execution_reconciliation_inputs")
+    if reconciliation_inputs is None:
+        execution_reconciliation = reconcile_independent_execution_fills(None, None)
+        match_evidence_comparison = compare_paper_exchange_match_evidence(None, None)
+        portfolio_interval_reconciliation = reconcile_independent_portfolio_intervals(
+            None, None
+        )
+    else:
+        execution_reconciliation = reconcile_independent_execution_fills(
+            reconciliation_inputs["position_trades"],
+            reconciliation_inputs["execution_ledger"],
+            reconciliation_inputs.get("position_source_coverage"),
+        )
+        match_evidence_comparison = compare_paper_exchange_match_evidence(
+            reconciliation_inputs.get("position_trades"),
+            reconciliation_inputs.get("match_evidence_ledger"),
+            reconciliation_inputs.get("position_source_coverage"),
+        )
+        portfolio_interval_reconciliation = reconcile_independent_portfolio_intervals(
+            reconciliation_inputs.get("pm_portfolio_intervals"),
+            reconciliation_inputs.get("independent_portfolio_interval_contract"),
+            reconciliation_inputs.get("portfolio_interval_source_coverage"),
+            reconciliation_inputs.get("position_trades"),
+            reconciliation_inputs.get("position_source_coverage"),
+        )
     blockers = []
     if snapshot.get("ledger_snapshot_consistent") is not True:
         blockers.append("Ledger snapshot consistency not guaranteed")
@@ -546,8 +1763,10 @@ def reconciliation():
         blockers.append("Fee metadata is incomplete or its currency differs from the trade quote")
     if coverage.get("rows_without_parent_order_id", 0) > 0:
         blockers.append("Some PositionTrade rows lack parent-order attribution")
-    if snapshot.get("independent_execution_ledger_reconciled") is not True:
-        blockers.append("No independent execution ledger reconciliation")
+    if not execution_reconciliation["independent_execution_ledger_reconciled"]:
+        blockers.extend(execution_reconciliation["blockers"])
+    if not portfolio_interval_reconciliation["independent_portfolio_interval_reconciled"]:
+        blockers.extend(portfolio_interval_reconciliation["blockers"])
     if coverage.get("timestamp_order_inversion_rows", 0) > 0:
         blockers.append("Ledger append order includes fill timestamp inversions")
 
@@ -569,6 +1788,9 @@ def reconciliation():
         "fx_rates_updated_at_by_currency": snapshot.get("fx_rates_updated_at_by_currency"),
         "market_marks_consistency": snapshot.get("market_marks_consistency"),
         "ledger_coverage": coverage,
+        "independent_execution_reconciliation": execution_reconciliation,
+        "paper_exchange_match_evidence_comparison": match_evidence_comparison,
+        "independent_portfolio_interval_reconciliation": portfolio_interval_reconciliation,
         "evidence": evidence,
         "acceptance": "NOT_EVALUATED",
         "blockers": blockers

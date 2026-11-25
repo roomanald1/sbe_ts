@@ -544,46 +544,124 @@ fn persist_durable_settings_snapshot(
     transaction.commit().map_err(settings_persistence_error)
 }
 
+struct DurableEntryWriteResult {
+    result: Result<(), (StatusCode, String)>,
+    stage_timings_ms: Vec<(&'static str, f64)>,
+}
+
 fn persist_durable_entry_reservation_record(
     path: &PathBuf,
     reservations: &[DurableEntryReservation],
-) -> Result<(), (StatusCode, String)> {
+) -> DurableEntryWriteResult {
     // One bounded group commit amortizes SQLite transaction/fsync overhead.
     // Callers are acknowledged only after this transaction commits.
-    let database_existed = path.exists();
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).map_err(settings_persistence_error)?;
-    }
-    let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(settings_persistence_error)?;
-    if !database_existed {
+    let mut stage_timings_ms = Vec::with_capacity(8);
+    let total_started = Instant::now();
+    let result = (|| {
+        let preparation_started = Instant::now();
+        let serialized = reservations
+            .iter()
+            .map(|reservation| {
+                serde_json::to_string(reservation)
+                    .map(|payload| (reservation.decision_id.clone(), payload))
+                    .map_err(settings_persistence_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        stage_timings_ms.push((
+            "entry_intent_serialization",
+            preparation_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        let directory_started = Instant::now();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(settings_persistence_error)?;
+        }
+        stage_timings_ms.push((
+            "entry_intent_directory_prepare",
+            directory_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        let database_existed = path.exists();
+        let open_started = Instant::now();
+        let mut connection =
+            rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
         connection
-            .execute_batch("PRAGMA journal_mode=WAL;")
+            .busy_timeout(Duration::from_secs(5))
             .map_err(settings_persistence_error)?;
-    }
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS durable_entry_reservations (decision_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
-        )
-        .map_err(settings_persistence_error)?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(settings_persistence_error)?;
-    for reservation in reservations {
-        let payload = serde_json::to_string(reservation).map_err(settings_persistence_error)?;
-        transaction
-            .execute(
-                "INSERT INTO durable_entry_reservations(decision_id,payload) VALUES(?1,?2) ON CONFLICT(decision_id) DO UPDATE SET payload=excluded.payload",
-                rusqlite::params![reservation.decision_id, payload],
+        stage_timings_ms.push((
+            "entry_intent_connection_open",
+            open_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        let schema_started = Instant::now();
+        if !database_existed {
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL;")
+                .map_err(settings_persistence_error)?;
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS durable_entry_reservations (decision_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
             )
             .map_err(settings_persistence_error)?;
+        stage_timings_ms.push((
+            "entry_intent_schema_setup",
+            schema_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        // BEGIN IMMEDIATE makes SQLite writer-lock acquisition observable as
+        // its own stage. The subsequent insert and commit remain in the same
+        // transaction and retain the existing durable acknowledgement point.
+        let sqlite_lock_started = Instant::now();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(settings_persistence_error)?;
+        stage_timings_ms.push((
+            "entry_intent_sqlite_lock_wait",
+            sqlite_lock_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        let statement_started = Instant::now();
+        let mut statement = transaction
+            .prepare_cached(
+                "INSERT INTO durable_entry_reservations(decision_id,payload) VALUES(?1,?2) ON CONFLICT(decision_id) DO UPDATE SET payload=excluded.payload",
+            )
+            .map_err(settings_persistence_error)?;
+        stage_timings_ms.push((
+            "entry_intent_sql_prepare",
+            statement_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+        let sql_started = Instant::now();
+        for (decision_id, payload) in &serialized {
+            statement
+                .execute(rusqlite::params![decision_id, payload])
+                .map_err(settings_persistence_error)?;
+        }
+        drop(statement);
+        stage_timings_ms.push((
+            "entry_intent_sql_execute",
+            sql_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+
+        let commit_started = Instant::now();
+        transaction.commit().map_err(settings_persistence_error)?;
+        stage_timings_ms.push((
+            "entry_intent_durable_commit",
+            commit_started.elapsed().as_secs_f64() * 1_000.0,
+        ));
+        Ok(())
+    })();
+    stage_timings_ms.push((
+        "entry_intent_sqlite_write_total",
+        total_started.elapsed().as_secs_f64() * 1_000.0,
+    ));
+    DurableEntryWriteResult {
+        result,
+        stage_timings_ms,
     }
-    transaction.commit().map_err(settings_persistence_error)
 }
 
 struct PendingDurableEntryReservation {
@@ -619,6 +697,11 @@ fn schedule_durable_entry_reservation_batch(state: &AutoTraderState) {
             .iter()
             .map(|item| item.reservation.clone())
             .collect::<Vec<_>>();
+        record_settings_persist_sample(
+            &state.settings_persist_timings_ms,
+            "entry_intent_batch_size",
+            reservations.len() as f64,
+        );
         let write_lock_started = Instant::now();
         let _write_guard = state.settings_persist_write_lock.clone().lock_owned().await;
         record_settings_persist_sample(
@@ -628,12 +711,24 @@ fn schedule_durable_entry_reservation_batch(state: &AutoTraderState) {
         );
         let path = state.settings_path.clone();
         let write_started = Instant::now();
-        let result = tokio::task::spawn_blocking(move || {
+        let persistence = tokio::task::spawn_blocking(move || {
             persist_durable_entry_reservation_record(&path, &reservations)
         })
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
-        .and_then(|result| result);
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()));
+        let result = match persistence {
+            Ok(persistence) => {
+                for (stage, elapsed_ms) in persistence.stage_timings_ms {
+                    record_settings_persist_sample(
+                        &state.settings_persist_timings_ms,
+                        stage,
+                        elapsed_ms,
+                    );
+                }
+                persistence.result
+            }
+            Err(error) => Err(error),
+        };
         record_settings_persist_sample(
             &state.settings_persist_timings_ms,
             "entry_intent_write",
@@ -840,7 +935,10 @@ mod sqlite_state_tests {
 
         let mut restored = read_settings_database(&path).unwrap().unwrap();
         let restored_position = &restored.strategy_positions["BTC-USDT"]["momentum"];
-        assert_eq!(restored_position.price_path, position.price_path);
+        assert_eq!(
+            serde_json::to_value(&restored_position.price_path).unwrap(),
+            serde_json::to_value(&position.price_path).unwrap()
+        );
         assert_eq!(restored_position.price_path_total_samples, 1);
         assert!(!restored_position.price_path_truncated);
         assert!(restored_position.price_path_restart_interrupted);
@@ -855,7 +953,10 @@ mod sqlite_state_tests {
         persist_durable_settings_snapshot(&path, &restored).unwrap();
         restored = read_settings_database(&path).unwrap().unwrap();
         let restored_position = &restored.strategy_positions["BTC-USDT"]["momentum"];
-        assert_eq!(restored_position.price_path, position.price_path);
+        assert_eq!(
+            serde_json::to_value(&restored_position.price_path).unwrap(),
+            serde_json::to_value(&position.price_path).unwrap()
+        );
         assert!(restored_position.price_path_restart_interrupted);
 
         let _ = std::fs::remove_file(&path);

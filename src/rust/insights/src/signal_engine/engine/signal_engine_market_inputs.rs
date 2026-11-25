@@ -1,3 +1,79 @@
+fn executable_scout_price(
+    direction: &str,
+    entry_bid: Option<f64>,
+    entry_ask: Option<f64>,
+    bid: f64,
+    ask: f64,
+    entry_quote_timestamp: Option<u64>,
+) -> Option<(f64, f64)> {
+    if !bid.is_finite()
+        || !ask.is_finite()
+        || bid <= 0.0
+        || ask < bid
+        || entry_quote_timestamp.is_none()
+    {
+        return None;
+    }
+    match direction {
+        "bullish" => entry_ask
+            .filter(|entry| entry.is_finite() && *entry > 0.0)
+            .map(|entry| (entry, bid)),
+        "bearish" => entry_bid
+            .filter(|entry| entry.is_finite() && *entry > 0.0)
+            .map(|entry| (entry, ask)),
+        _ => None,
+    }
+}
+
+fn scout_return_percent(direction: &str, entry: f64, execution_price: f64) -> f64 {
+    match direction {
+        "bullish" => (execution_price / entry - 1.0) * 100.0,
+        "bearish" => ((entry - execution_price) / entry) * 100.0,
+        _ => 0.0,
+    }
+}
+
+fn apply_scout_path_sample(
+    path: &mut ScoutPathAccumulator,
+    sample: &ScoutPathSample,
+    return_percent: f64,
+    retention_limit: usize,
+) {
+    if path.retained_samples.back().is_some_and(|previous| {
+        (previous.path_epoch, previous.sequence) >= (sample.path_epoch, sample.sequence)
+    }) {
+        return;
+    }
+    if let Some(previous) = path.last_source_timestamp {
+        if sample.timestamp < previous {
+            path.source_timestamps_monotonic = false;
+        } else {
+            path.maximum_gap_ms = path.maximum_gap_ms.max(sample.timestamp - previous);
+        }
+    } else {
+        path.first_source_timestamp = Some(sample.timestamp);
+    }
+    path.sample_count = path.sample_count.saturating_add(1);
+    path.last_source_timestamp = Some(sample.timestamp);
+    path.last_sequence = sample.sequence;
+    path.latest_freshness_ms = Some(sample.freshness_ms);
+    path.maximum_favorable_excursion_percent = Some(
+        path.maximum_favorable_excursion_percent
+            .map_or(return_percent, |current| current.max(return_percent)),
+    );
+    path.maximum_adverse_excursion_percent = Some(
+        path.maximum_adverse_excursion_percent
+            .map_or(return_percent, |current| current.min(return_percent)),
+    );
+    if retention_limit > 0 && path.retained_samples.len() == retention_limit {
+        path.retained_samples.pop_front();
+        path.truncated = true;
+    }
+    if retention_limit > 0 {
+        path.retained_samples.push_back(sample.clone());
+    }
+}
+
 fn feature_vector(components: &SignalComponents) -> Option<[f64; 4]> {
     let values = [
         components
@@ -16,6 +92,192 @@ fn feature_vector(components: &SignalComponents) -> Option<[f64; 4]> {
 }
 
 impl SignalEngine {
+    const MAX_RETAINED_SCOUT_PATH_SAMPLES: usize = 4_096;
+
+    pub fn mark_scout_path_interrupted(&mut self, sample_id: &str) -> bool {
+        let mut marked = false;
+        for pending in self
+            .pending
+            .iter_mut()
+            .filter(|pending| pending.sample_id.as_deref() == Some(sample_id))
+        {
+            pending.scout_path.interrupted_by_process_restart = true;
+            marked = true;
+        }
+        marked
+    }
+
+    pub fn mark_scout_path_capture_failed(&mut self, sample_id: &str) -> bool {
+        let mut marked = false;
+        for pending in self
+            .pending
+            .iter_mut()
+            .filter(|pending| pending.sample_id.as_deref() == Some(sample_id))
+        {
+            pending.scout_path.capture_failed = true;
+            marked = true;
+        }
+        marked
+    }
+
+    pub fn set_scout_path_epoch(&mut self, sample_id: &str, epoch: u64) {
+        for pending in self
+            .pending
+            .iter_mut()
+            .filter(|pending| pending.sample_id.as_deref() == Some(sample_id))
+        {
+            pending.scout_path.path_epoch = epoch;
+        }
+    }
+
+    pub fn has_pending_scout(&self, sample_id: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.sample_id.as_deref() == Some(sample_id))
+    }
+
+    pub fn scout_entry_quote(&self, timestamp: u64, entry_price: f64) -> Option<(f64, f64, u64)> {
+        self.best_quote
+            .filter(|(quote_time, bid, ask)| {
+                *quote_time <= timestamp
+                    && timestamp.saturating_sub(*quote_time) <= MAX_BOOK_AGE_MS
+                    && bid.is_finite()
+                    && ask.is_finite()
+                    && *bid > 0.0
+                    && *ask >= *bid
+            })
+            .map(|(quote_time, bid, ask)| {
+                let half_spread = (ask - bid) * 0.5;
+                (
+                    entry_price - half_spread,
+                    entry_price + half_spread,
+                    quote_time,
+                )
+            })
+    }
+
+    /// Restore only observations that were durably captured. The restart flag
+    /// remains set so later observations cannot make this path complete.
+    pub fn restore_scout_path_samples(
+        &mut self,
+        sample_id: &str,
+        samples: &[ScoutPathSample],
+        truncated: bool,
+        freshness_ms: Option<u64>,
+        persisted_sample_count: u64,
+        entry_quote: Option<(f64, f64, u64)>,
+    ) {
+        let mut ordered = samples
+            .iter()
+            .filter(|sample| {
+                sample.decision_id == sample_id
+                    && self
+                        .pending
+                        .iter()
+                        .find(|pending| pending.sample_id.as_deref() == Some(sample_id))
+                        .is_some_and(|pending| sample.symbol == pending.symbol)
+            })
+            .collect::<Vec<_>>();
+        ordered.sort_by_key(|sample| (sample.path_epoch, sample.sequence));
+        for pending in self
+            .pending
+            .iter_mut()
+            .filter(|pending| pending.sample_id.as_deref() == Some(sample_id))
+        {
+            let path = &mut pending.scout_path;
+            if let Some((entry_bid, entry_ask, quote_timestamp)) = entry_quote {
+                pending.entry_bid = Some(entry_bid);
+                pending.entry_ask = Some(entry_ask);
+                pending.entry_quote_timestamp = Some(quote_timestamp);
+            }
+            let mut last_restored = None;
+            for sample in &ordered {
+                if sample.timestamp < pending.timestamp
+                    || (pending.scout_observation_only
+                        && sample.timestamp
+                            > pending
+                                .timestamp
+                                .saturating_add(pending.horizon_seconds.saturating_mul(1_000)))
+                {
+                    continue;
+                }
+                let Some((entry, execution_price)) = executable_scout_price(
+                    pending.direction.as_str(),
+                    pending.entry_bid,
+                    pending.entry_ask,
+                    sample.bid,
+                    sample.ask,
+                    pending.entry_quote_timestamp,
+                ) else {
+                    continue;
+                };
+                let return_percent =
+                    scout_return_percent(pending.direction.as_str(), entry, execution_price);
+                apply_scout_path_sample(
+                    path,
+                    sample,
+                    return_percent,
+                    if pending.scout_observation_only {
+                        0
+                    } else {
+                        Self::MAX_RETAINED_SCOUT_PATH_SAMPLES
+                    },
+                );
+                path.latest_sample = Some((**sample).clone());
+                last_restored = Some(*sample);
+            }
+            let restored_horizon_sample_count = last_restored.map(|sample| sample.sample_count);
+            if let Some(last) = last_restored {
+                path.first_source_timestamp = last.first_source_timestamp;
+                path.maximum_gap_ms = path.maximum_gap_ms.max(last.maximum_gap_ms);
+                path.source_timestamps_monotonic &= last.source_timestamps_monotonic;
+                path.maximum_favorable_excursion_percent = last.maximum_favorable_excursion_percent;
+                path.maximum_adverse_excursion_percent = last.maximum_adverse_excursion_percent;
+                path.sample_count = path.sample_count.max(last.sample_count);
+                path.last_sequence = last.sequence;
+                path.last_source_timestamp = Some(last.timestamp);
+                path.latest_sample = Some((*last).clone());
+            }
+            path.truncated |= truncated;
+            let restored_count = if pending.scout_observation_only {
+                restored_horizon_sample_count.unwrap_or(0)
+            } else {
+                persisted_sample_count
+            };
+            path.sample_count = path.sample_count.max(restored_count);
+            path.latest_freshness_ms = freshness_ms;
+            path.interrupted_by_process_restart = true;
+        }
+    }
+
+    /// Returns one newly observed sample per active Scout identity. Multiple
+    /// pending horizons share the same source path and are deduplicated here.
+    pub fn latest_scout_path_samples(
+        &self,
+        timestamp: u64,
+        bid: f64,
+        ask: f64,
+        freshness_ms: u64,
+    ) -> Vec<ScoutPathSample> {
+        let mut latest = BTreeMap::<String, ScoutPathSample>::new();
+        for pending in self
+            .pending
+            .iter()
+            .filter(|pending| pending.sample_id.is_some())
+        {
+            let Some(sample) = pending.scout_path.latest_sample.as_ref() else {
+                continue;
+            };
+            if sample.timestamp != timestamp || sample.bid != bid || sample.ask != ask {
+                continue;
+            }
+            let mut sample = sample.clone();
+            sample.freshness_ms = freshness_ms;
+            latest.insert(sample.decision_id.clone(), sample);
+        }
+        latest.into_values().collect()
+    }
+
     pub fn track_counterfactual(
         &mut self,
         symbol: String,
@@ -428,39 +690,74 @@ impl SignalEngine {
                                 .saturating_add(pending.horizon_seconds.saturating_mul(1_000)))
             }) {
                 let path = &mut pending.scout_path;
-                if let Some(previous) = path.last_source_timestamp {
-                    if timestamp < previous {
-                        path.source_timestamps_monotonic = false;
-                        continue;
-                    }
-                    path.maximum_gap_ms = path.maximum_gap_ms.max(timestamp - previous);
-                } else {
-                    path.first_source_timestamp = Some(timestamp);
-                }
-                let (entry, execution_price) = match pending.direction.as_str() {
-                    "bullish" => (pending.entry_ask, best_bid),
-                    "bearish" => (pending.entry_bid, best_ask),
-                    _ => continue,
+                let Some((entry, execution_price)) = executable_scout_price(
+                    pending.direction.as_str(),
+                    pending.entry_bid,
+                    pending.entry_ask,
+                    best_bid,
+                    best_ask,
+                    pending.entry_quote_timestamp,
+                ) else {
+                    continue;
                 };
-                if let Some(entry) = entry.filter(|entry| {
-                    pending.entry_quote_timestamp.is_some() && entry.is_finite() && *entry > 0.0
-                }) {
-                    let return_percent = match pending.direction.as_str() {
-                        "bullish" => (execution_price / entry - 1.0) * 100.0,
-                        "bearish" => ((entry - execution_price) / entry) * 100.0,
-                        _ => continue,
-                    };
-                    path.maximum_favorable_excursion_percent = Some(
-                        path.maximum_favorable_excursion_percent
-                            .map_or(return_percent, |current| current.max(return_percent)),
-                    );
-                    path.maximum_adverse_excursion_percent = Some(
-                        path.maximum_adverse_excursion_percent
-                            .map_or(return_percent, |current| current.min(return_percent)),
-                    );
+                if path
+                    .last_source_timestamp
+                    .is_some_and(|previous| timestamp < previous)
+                {
+                    path.source_timestamps_monotonic = false;
+                    continue;
                 }
-                path.sample_count = path.sample_count.saturating_add(1);
-                path.last_source_timestamp = Some(timestamp);
+                let gap_ms = path
+                    .last_source_timestamp
+                    .map_or(0, |previous| timestamp.saturating_sub(previous));
+                let sequence = path.last_sequence.saturating_add(1);
+                let sample = ScoutPathSample {
+                    decision_id: pending.sample_id.clone().unwrap_or_default(),
+                    symbol: pending.symbol.clone(),
+                    path_epoch: path.path_epoch,
+                    sequence,
+                    timestamp,
+                    bid: best_bid,
+                    ask: best_ask,
+                    freshness_ms: 0,
+                    gap_ms,
+                    first_source_timestamp: path.first_source_timestamp,
+                    maximum_gap_ms: path.maximum_gap_ms,
+                    source_timestamps_monotonic: path.source_timestamps_monotonic,
+                    maximum_favorable_excursion_percent: path.maximum_favorable_excursion_percent,
+                    maximum_adverse_excursion_percent: path.maximum_adverse_excursion_percent,
+                    sample_count: path.sample_count,
+                    capture_complete: !path.capture_failed,
+                };
+                apply_scout_path_sample(
+                    path,
+                    &sample,
+                    scout_return_percent(pending.direction.as_str(), entry, execution_price),
+                    if pending.scout_observation_only {
+                        0
+                    } else {
+                        Self::MAX_RETAINED_SCOUT_PATH_SAMPLES
+                    },
+                );
+                // Observation horizons share the durable Scout path row set;
+                // mark them truncated when that bounded set no longer covers
+                // every observed event, even though they retain only summary
+                // aggregates in memory.
+                if path.sample_count > Self::MAX_RETAINED_SCOUT_PATH_SAMPLES as u64 {
+                    path.truncated = true;
+                }
+                let mut sample = sample;
+                sample.first_source_timestamp = path.first_source_timestamp;
+                sample.maximum_gap_ms = path.maximum_gap_ms;
+                sample.source_timestamps_monotonic = path.source_timestamps_monotonic;
+                sample.maximum_favorable_excursion_percent =
+                    path.maximum_favorable_excursion_percent;
+                sample.maximum_adverse_excursion_percent = path.maximum_adverse_excursion_percent;
+                sample.sample_count = path.sample_count;
+                if let Some(retained) = path.retained_samples.back_mut() {
+                    *retained = sample.clone();
+                }
+                path.latest_sample = Some(sample);
             }
         }
         self.book_bid_levels.clear();
@@ -633,6 +930,160 @@ mod scout_tests {
             None,
         ));
         engine
+    }
+
+    #[test]
+    fn replayed_scout_path_after_process_restart_is_never_complete() {
+        let mut engine = start_observation_scout("bullish", "restart-case");
+        assert!(engine.mark_scout_path_interrupted("restart-case"));
+        for second in 2..=61 {
+            engine.on_book(
+                second * 1_000,
+                100.0 + second as f64 * 0.01,
+                100.2 + second as f64 * 0.01,
+                &[1.0],
+                &[1.0],
+                &[],
+                &[],
+            );
+        }
+        let outcomes = engine.on_price(61_000, 100.61, 0.0);
+        let path = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert!(!path.complete);
+        assert_eq!(path.completeness_reason, "process_restart_interrupted");
+    }
+
+    #[test]
+    fn restored_executable_samples_rebuild_excursions_but_keep_restart_gap_incomplete() {
+        let mut before_restart = start_observation_scout("bullish", "durable-path");
+        before_restart.set_scout_path_epoch("durable-path", 10);
+        let mut durable_samples = Vec::new();
+        for (timestamp, bid, ask) in [(2_000, 100.3, 100.5), (3_000, 99.9, 100.1)] {
+            before_restart.on_book(timestamp, bid, ask, &[1.0], &[1.0], &[], &[]);
+            durable_samples
+                .extend(before_restart.latest_scout_path_samples(timestamp, bid, ask, 4));
+        }
+
+        let mut after_restart = start_observation_scout("bullish", "durable-path");
+        after_restart.restore_scout_path_samples(
+            "durable-path",
+            &durable_samples,
+            false,
+            Some(4),
+            2,
+            Some((99.9, 100.1, 1_000)),
+        );
+        after_restart.set_scout_path_epoch("durable-path", 20);
+        assert_eq!(after_restart.pending[0].scout_path.sample_count, 2);
+        assert!(
+            (after_restart.pending[0]
+                .scout_path
+                .maximum_favorable_excursion_percent
+                .unwrap()
+                - 0.1998)
+                .abs()
+                < 0.002
+        );
+        assert!(
+            (after_restart.pending[0]
+                .scout_path
+                .maximum_adverse_excursion_percent
+                .unwrap()
+                + 0.1998)
+                .abs()
+                < 0.002
+        );
+        after_restart.mark_scout_path_interrupted("durable-path");
+        after_restart.on_book(61_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        let outcomes = after_restart.on_price(61_000, 100.1, 0.0);
+        let evidence = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert_eq!(evidence.sample_count, 3);
+        assert!(!evidence.complete);
+        assert_eq!(evidence.completeness_reason, "process_restart_interrupted");
+    }
+
+    #[test]
+    fn scout_path_retention_is_bounded_and_reports_truncation() {
+        let mut engine = start_observation_scout("bullish", "bounded-path");
+        for timestamp in 2_000..=6_200 {
+            engine.on_book(timestamp, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        }
+        let path = &engine.pending[0].scout_path;
+        assert_eq!(
+            path.retained_samples.len(),
+            SignalEngine::MAX_RETAINED_SCOUT_PATH_SAMPLES
+        );
+        assert!(path.truncated);
+        assert!(path.sample_count > path.retained_samples.len() as u64);
+        let outcomes = engine.on_price(61_000, 100.0, 0.0);
+        let evidence = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert!(!evidence.complete);
+        assert_eq!(evidence.completeness_reason, "retained_path_truncated");
+    }
+
+    #[test]
+    fn duplicate_scout_registration_does_not_duplicate_path_state() {
+        let mut engine = start_observation_scout("bullish", "idempotent-path");
+        assert_eq!(engine.pending.len(), 5);
+        assert!(!engine.track_scout(
+            "idempotent-path".into(),
+            "BTC-USDT".into(),
+            "observation-test".into(),
+            1_000,
+            "bullish".into(),
+            100.0,
+            5.0,
+            5.0,
+            1.0,
+            0.5,
+            0.1,
+            None,
+            None,
+            None,
+            None,
+        ));
+        assert_eq!(engine.pending.len(), 5);
+    }
+
+    #[test]
+    fn failed_durable_capture_forces_incomplete_evidence() {
+        let mut engine = start_observation_scout("bullish", "capture-failed");
+        assert!(engine.mark_scout_path_capture_failed("capture-failed"));
+        for second in 2..=61 {
+            engine.on_book(second * 1_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        }
+        let outcomes = engine.on_price(61_000, 100.0, 0.0);
+        let evidence = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert!(!evidence.complete);
+        assert_eq!(evidence.completeness_reason, "durable_capture_failed");
     }
 
     #[test]

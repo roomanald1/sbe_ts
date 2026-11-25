@@ -281,6 +281,28 @@ pub struct ScoutPathEvidence {
     pub completeness_reason: String,
 }
 
+/// A bounded, executable-side book observation captured for an active Scout.
+/// Sequence is monotonic within a path; epoch changes whenever Insights starts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScoutPathSample {
+    pub decision_id: String,
+    pub symbol: String,
+    pub path_epoch: u64,
+    pub sequence: u64,
+    pub timestamp: u64,
+    pub bid: f64,
+    pub ask: f64,
+    pub freshness_ms: u64,
+    pub gap_ms: u64,
+    pub first_source_timestamp: Option<u64>,
+    pub maximum_gap_ms: u64,
+    pub source_timestamps_monotonic: bool,
+    pub maximum_favorable_excursion_percent: Option<f64>,
+    pub maximum_adverse_excursion_percent: Option<f64>,
+    pub sample_count: u64,
+    pub capture_complete: bool,
+}
+
 // Retained only to decode historical kind-6 records. New evaluations never
 // generate or persist quote paths.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

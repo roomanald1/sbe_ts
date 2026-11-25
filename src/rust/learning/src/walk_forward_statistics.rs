@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 
 const ONLINE_WINDOW_MS: u64 = 4 * 60 * 60 * 1_000;
 pub(super) const BOOTSTRAP_REPLICATES: usize = 512;
+pub(super) const MAX_PROMOTION_BOOTSTRAP_REPLICATES: usize = 65_536;
 pub(super) const MEAN_BLOCK_LENGTH_DAYS: f64 = 7.0;
 // Preserve roughly one day of serial dependence across six four-hour blocks.
-const MEAN_BLOCK_LENGTH_ONLINE_WINDOWS: f64 = 6.0;
+pub(super) const MEAN_BLOCK_LENGTH_ONLINE_WINDOWS: f64 = 6.0;
 pub(super) const MINIMUM_SPA_DAY_CLUSTERS: usize = 30;
 
 /// A complete daily portfolio row. Flat periods must be present as explicit
@@ -414,6 +415,69 @@ fn stationary_bootstrap_means(
         .collect()
 }
 
+/// Lower confidence bound for ordered UTC blocks using the same stationary-
+/// bootstrap block length as the existing online walk-forward analysis.
+/// Calendar gaps start a new block; they are never treated as zero returns.
+pub(super) fn stationary_bootstrap_lower_bound(
+    samples: &[(u64, f64)],
+    alpha: f64,
+    expected_block_length: f64,
+    bootstrap_replicates: usize,
+) -> Option<f64> {
+    if samples.len() < 3
+        || samples.iter().any(|(_, value)| !value.is_finite())
+        || samples.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        || !alpha.is_finite()
+        || !(0.0..0.5).contains(&alpha)
+        || alpha * (bootstrap_replicates as f64) < 1.0
+        || !expected_block_length.is_finite()
+        || expected_block_length < 1.0
+        || bootstrap_replicates < 100
+    {
+        return None;
+    }
+    let mut seed = 0x517c_c1b7_2722_0a95_u64;
+    for (day, value) in samples {
+        seed = splitmix64(seed ^ day.rotate_left(13) ^ value.to_bits().rotate_left(37));
+    }
+    let restart_probability = 1.0 / expected_block_length;
+    let mut estimates = Vec::with_capacity(bootstrap_replicates);
+    for _ in 0..bootstrap_replicates {
+        let mut index = (splitmix64(seed) as usize) % samples.len();
+        seed = splitmix64(seed);
+        let mut total = samples[index].1;
+        for _ in 1..samples.len() {
+            let next = (index + 1) % samples.len();
+            let has_calendar_gap = samples[next].0 != samples[index].0.saturating_add(1);
+            if has_calendar_gap || (splitmix64(seed) as f64 / u64::MAX as f64) < restart_probability
+            {
+                index = (splitmix64(seed) as usize) % samples.len();
+            } else {
+                index = next;
+            }
+            seed = splitmix64(seed);
+            total += samples[index].1;
+        }
+        estimates.push(total / samples.len() as f64);
+    }
+    estimates.sort_by(f64::total_cmp);
+    Some(estimates[percentile_index(alpha, estimates.len())])
+}
+
+/// Increase promotion-only bootstrap draws when multiplicity-adjusted alpha
+/// is too small for the baseline simulation resolution. Extremely small
+/// alpha fails closed at a bounded workload instead of producing a coarse CI.
+pub(super) fn promotion_bootstrap_replicates(alpha: f64) -> Option<usize> {
+    if !alpha.is_finite() || !(0.0..0.5).contains(&alpha) {
+        return None;
+    }
+    let required = (2.0 / alpha).ceil();
+    if !required.is_finite() || required > MAX_PROMOTION_BOOTSTRAP_REPLICATES as f64 {
+        return None;
+    }
+    Some(BOOTSTRAP_REPLICATES.max(required as usize))
+}
+
 fn stationary_bootstrap_indices(
     length: usize,
     seed: &mut u64,
@@ -565,6 +629,37 @@ mod tests {
         assert!(first.expectancy_ci_low_percent.unwrap() > 0.0);
         assert_eq!(first.effective_sample_size, 30.0);
         assert_eq!(first.window_count, 30);
+    }
+
+    #[test]
+    fn paired_scout_lower_bound_is_deterministic_and_rejects_calendar_gaps_as_zeroes() {
+        let rows = (10..40)
+            .filter(|day| *day % 4 != 0)
+            .map(|day| (day, 0.25))
+            .collect::<Vec<_>>();
+        let first = stationary_bootstrap_lower_bound(&rows, 0.05, 7.0, 512).unwrap();
+        let second = stationary_bootstrap_lower_bound(&rows, 0.05, 7.0, 512).unwrap();
+        assert_eq!(first, second);
+        assert!(first > 0.0);
+        assert_eq!(
+            stationary_bootstrap_lower_bound(&rows[..2], 0.05, 7.0, 512),
+            None
+        );
+        assert_eq!(
+            stationary_bootstrap_lower_bound(&rows, 0.0001, 7.0, 512),
+            None,
+            "confidence tails below bootstrap resolution fail closed"
+        );
+    }
+
+    #[test]
+    fn promotion_bootstrap_resolution_grows_with_adjusted_alpha_and_is_bounded() {
+        assert_eq!(promotion_bootstrap_replicates(0.1), Some(512));
+        let adjusted = promotion_bootstrap_replicates(0.0009).unwrap();
+        assert!(adjusted > BOOTSTRAP_REPLICATES);
+        assert!(adjusted as f64 * 0.0009 >= 2.0);
+        assert_eq!(promotion_bootstrap_replicates(0.000001), None);
+        assert_eq!(promotion_bootstrap_replicates(0.0), None);
     }
 
     #[test]

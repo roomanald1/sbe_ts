@@ -35,7 +35,7 @@ impl SignalStore {
         }
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp);")?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=1000; CREATE TABLE IF NOT EXISTS signal_records (id INTEGER PRIMARY KEY, timestamp INTEGER NOT NULL, kind INTEGER NOT NULL, payload BLOB NOT NULL); CREATE INDEX IF NOT EXISTS signal_records_timestamp ON signal_records(timestamp); CREATE INDEX IF NOT EXISTS signal_records_kind_timestamp ON signal_records(kind, timestamp); CREATE TABLE IF NOT EXISTS scout_path_registrations (decision_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, signal_timestamp INTEGER NOT NULL, direction TEXT NOT NULL, entry_price REAL NOT NULL, entry_bid REAL, entry_ask REAL, entry_quote_timestamp INTEGER, active INTEGER NOT NULL DEFAULT 1, capture_complete INTEGER NOT NULL DEFAULT 1, truncated INTEGER NOT NULL DEFAULT 0, sample_count INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS scout_path_registrations_symbol ON scout_path_registrations(symbol, active); CREATE TABLE IF NOT EXISTS scout_path_samples (decision_id TEXT NOT NULL, path_epoch INTEGER NOT NULL, sequence INTEGER NOT NULL, timestamp INTEGER NOT NULL, bid REAL NOT NULL, ask REAL NOT NULL, freshness_ms INTEGER NOT NULL, gap_ms INTEGER NOT NULL, first_source_timestamp INTEGER, maximum_gap_ms INTEGER NOT NULL, source_timestamps_monotonic INTEGER NOT NULL, maximum_favorable_excursion_percent REAL, maximum_adverse_excursion_percent REAL, sample_count INTEGER NOT NULL, capture_complete INTEGER NOT NULL, PRIMARY KEY(decision_id, path_epoch, sequence)); CREATE INDEX IF NOT EXISTS scout_path_samples_order ON scout_path_samples(decision_id, path_epoch, sequence);")?;
         Ok(connection)
     }
 
@@ -147,7 +147,8 @@ impl SignalStore {
                 let mut statement = connection.prepare(
                     "SELECT rowid FROM signal_daily_summary WHERE kind = ?1 AND training_payload IS NOT NULL AND (?2 IS NULL OR day_start_ms >= ?2) ORDER BY day_start_ms DESC",
                 )?;
-                let rows = statement.query_map(params![kind, since_day], |row| row.get::<_, i64>(0))?;
+                let rows =
+                    statement.query_map(params![kind, since_day], |row| row.get::<_, i64>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             for archive_id in archive_ids {
@@ -215,10 +216,10 @@ impl SignalStore {
             let mut statement = connection.prepare(
                 "SELECT payload FROM signal_records WHERE kind = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2",
             )?;
-            let rows = statement.query_map(
-                params![kind, limit.min(i64::MAX as usize) as i64],
-                |row| row.get::<_, Vec<u8>>(0),
-            )?;
+            let rows = statement
+                .query_map(params![kind, limit.min(i64::MAX as usize) as i64], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         // End the SQLite read transaction before decompressing/deserializing.

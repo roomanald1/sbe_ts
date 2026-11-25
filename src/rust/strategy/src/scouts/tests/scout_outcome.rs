@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod scout_outcome_tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn spec() -> ParameterSpec {
         ParameterSpec {
@@ -107,7 +108,10 @@ mod scout_outcome_tests {
         };
         assert_eq!(symbol, "BTC-USDT");
         assert_eq!(strategy, "live-momentum");
-        assert_eq!(profile_id, strategies::profile_id("BTC-USDT", "live-momentum", &baseline.strategy_parameters));
+        assert_eq!(
+            profile_id,
+            strategies::profile_id("BTC-USDT", "live-momentum", &baseline.strategy_parameters)
+        );
         assert_eq!(parameters, baseline.strategy_parameters);
         assert_eq!(comparison, strategies::ScoutComparisonMetadata::Independent);
         assert_eq!(learning_context.as_deref(), Some("scout:BTC:trade"));
@@ -120,7 +124,13 @@ mod scout_outcome_tests {
         baseline.exit_scenario = "strategy".into();
         baseline.scout_parameter_key = Some("minimum_momentum".into());
         baseline.scout_parameter_value = Some(0.7);
-        assert!(learning_outcome_event(&baseline, &BTreeMap::from([("minimum_momentum".into(), 0.7)])).is_none());
+        assert!(
+            learning_outcome_event(
+                &baseline,
+                &BTreeMap::from([("minimum_momentum".into(), 0.7)])
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -185,29 +195,101 @@ mod scout_outcome_tests {
         let mut baseline = outcome("baseline", 0.4);
         baseline.scout_comparison_id = Some("cmp".into());
         baseline.scout_comparison_role = Some("baseline".into());
-        baseline.exit_scenario = "horizon-60".into();
         let mut variant = outcome("variant", 1.1);
         variant.scout_comparison_id = Some("cmp".into());
         variant.scout_comparison_role = Some("variant".into());
         variant.scout_parameter_key = Some("minimum_momentum".into());
         variant.scout_parameter_value = Some(0.7);
-        variant.exit_scenario = "horizon-60".into();
+        let raw_context =
+            "scout:live:live-momentum:BTC-USDT:bearish:legacy:trend:profile:momentum-v1:scenario";
+        baseline.learning_context = raw_context.into();
+        variant.learning_context = raw_context.into();
 
         let tested = validate_scout_outcome(&variant).unwrap();
         assert!(tested.contains_key("minimum_momentum"));
-        let FeedbackEvent::ScoutOutcome { event_id, comparison, .. } =
-            paired_event("cmp|scenario:horizon-60", &baseline, &variant).unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!(event_id, "scout-comparison:cmp|scenario:horizon-60");
-        assert_eq!(
-            comparison,
-            strategies::ScoutComparisonMetadata::Paired {
-                group_id: "cmp".into(),
-                horizon_seconds: Some(60),
-            }
+        let mut event_ids = BTreeSet::new();
+        for horizon_seconds in [60, 300] {
+            let scenario = format!("horizon-{horizon_seconds}");
+            baseline.exit_scenario = scenario.clone();
+            variant.exit_scenario = scenario.clone();
+            let comparison_id = format!("cmp|scenario:{scenario}");
+            let FeedbackEvent::ScoutOutcome {
+                event_id,
+                comparison,
+                learning_context,
+                ..
+            } = paired_event(&comparison_id, &baseline, &variant).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(event_id, format!("scout-comparison:{comparison_id}"));
+            assert!(event_ids.insert(event_id));
+            assert_eq!(
+                learning_context.as_deref(),
+                Some("scout:v1:short:trend:BTC-USDT:live-momentum:trade")
+            );
+            assert_eq!(
+                comparison,
+                strategies::ScoutComparisonMetadata::Paired {
+                    group_id: "cmp".into(),
+                    horizon_seconds: Some(horizon_seconds),
+                }
+            );
+        }
+        assert_eq!(event_ids.len(), 2);
+    }
+
+    #[test]
+    fn paired_feedback_normalizes_only_known_directions_and_explicit_regimes() {
+        for (raw_direction, expected_direction) in [("bullish", "long"), ("bearish", "short")] {
+            let raw_context = format!(
+                "scout:live:live-momentum:BTC-USDT:{raw_direction}:legacy:trend:profile:momentum-v1:scenario"
+            );
+            let expected_context =
+                format!("scout:v1:{expected_direction}:trend:BTC-USDT:live-momentum:trade");
+            assert_eq!(
+                canonical_paired_learning_context(
+                    &raw_context,
+                    Some("trend"),
+                    "BTC-USDT",
+                    "live-momentum",
+                )
+                .as_deref(),
+                Some(expected_context.as_str())
+            );
+        }
+
+        let valid_raw =
+            "scout:live:live-momentum:BTC-USDT:bullish:legacy:trend:profile:momentum-v1:scenario";
+        assert!(
+            canonical_paired_learning_context(valid_raw, None, "BTC-USDT", "live-momentum",)
+                .is_none()
         );
+        assert!(
+            canonical_paired_learning_context(
+                valid_raw,
+                Some("unknown"),
+                "BTC-USDT",
+                "live-momentum",
+            )
+            .is_none()
+        );
+        assert!(
+            canonical_paired_learning_context(
+                "scout:BTC:trade:scenario:strategy",
+                Some("trend"),
+                "BTC-USDT",
+                "live-momentum",
+            )
+            .is_none()
+        );
+        assert!(canonical_paired_learning_context(
+            "scout:live:live-momentum:BTC-USDT:neutral:legacy:trend:profile:momentum-v1:scenario",
+            Some("trend"),
+            "BTC-USDT",
+            "live-momentum",
+        )
+        .is_none());
     }
 
     #[test]
@@ -350,7 +432,10 @@ mod scout_outcome_tests {
         let pair = state.pairs.values().next().unwrap();
         assert!(pair.baseline.is_none());
         assert!(pair.variant.is_some());
-        assert!(state.outbox.is_empty(), "an expired baseline must never produce Learning feedback");
+        assert!(
+            state.outbox.is_empty(),
+            "an expired baseline must never produce Learning feedback"
+        );
     }
 
     #[test]

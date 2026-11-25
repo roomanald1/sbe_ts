@@ -143,6 +143,224 @@ fn price_path_excursion_evidence_for_samples(
     })
 }
 
+fn stable_pm_exit_fill_id(value: &str) -> bool {
+    value
+        .strip_prefix("pm-fill:v1:")
+        .and_then(|identity| identity.split_once(':'))
+        .is_some_and(|(epoch, sequence)| {
+            !epoch.trim().is_empty() && sequence.parse::<u64>().is_ok()
+        })
+}
+
+fn exit_fill_lineage_evidence(
+    response: &serde_json::Value,
+    expected_client_order_id: Option<&str>,
+    expected_symbol: &str,
+    expected_side: &str,
+) -> serde_json::Value {
+    let reported_filled = response["filled_quantity"].as_f64().unwrap_or(f64::NAN);
+    let fills = response["fill_evidence"].as_array();
+    if reported_filled.is_finite()
+        && reported_filled <= 1e-12
+        && fills.is_none_or(|rows| rows.is_empty())
+    {
+        return serde_json::json!({
+            "schema_version": 1,
+            "expected_client_order_id": expected_client_order_id,
+            "expected_symbol": expected_symbol,
+            "expected_side": expected_side,
+            "coverage_status": "not_applicable",
+            "fee_coverage_status": "not_applicable",
+            "fill_lineage_complete": true,
+            "fees_complete": true,
+            "complete": true,
+            "exit_fill_ids": [],
+            "fills": [],
+            "missing_coverage": [],
+        });
+    }
+
+    let mut missing = Vec::new();
+    let expected_client_order_id =
+        expected_client_order_id.filter(|value| !value.trim().is_empty());
+    if expected_client_order_id.is_none() {
+        missing.push("exit_client_order_id_missing");
+    }
+    let mut output_fills = Vec::new();
+    let mut exit_fill_ids = Vec::new();
+    let mut seen_fill_ids = std::collections::BTreeSet::new();
+    let mut filled_quantity = 0.0;
+    let mut known_fee_total = 0.0;
+    let mut all_order_links_valid = expected_client_order_id.is_some();
+    let mut all_fill_ids_valid = true;
+    let mut all_fees_complete = response["fee_complete"].as_bool() == Some(true);
+    if !all_fees_complete {
+        missing.push("response_fee_completeness_false_or_missing");
+    }
+
+    let Some(fills) = fills else {
+        missing.push("exit_fill_evidence_missing");
+        return serde_json::json!({
+            "schema_version": 1,
+            "expected_client_order_id": expected_client_order_id,
+            "expected_symbol": expected_symbol,
+            "expected_side": expected_side,
+            "coverage_status": "missing",
+            "fee_coverage_status": "missing",
+            "fill_lineage_complete": false,
+            "fees_complete": false,
+            "complete": false,
+            "exit_fill_ids": [],
+            "fills": [],
+            "missing_coverage": missing,
+        });
+    };
+    if fills.is_empty() {
+        missing.push("exit_fill_evidence_empty_for_filled_order");
+    }
+
+    for fill in fills {
+        let fill_id = fill["fill_id"].as_str();
+        let valid_fill_id = fill_id.is_some_and(stable_pm_exit_fill_id);
+        if !valid_fill_id {
+            all_fill_ids_valid = false;
+            missing.push("exit_fill_id_missing_or_unsupported");
+        }
+        let unique_fill_id = fill_id.is_some_and(|id| seen_fill_ids.insert(id.to_owned()));
+        if valid_fill_id && !unique_fill_id {
+            all_fill_ids_valid = false;
+            missing.push("exit_fill_id_duplicate");
+        }
+        let parent_order_id = fill["parent_order_id"].as_str();
+        let client_order_id = fill["client_order_id"].as_str();
+        let order_link_valid = expected_client_order_id.is_some_and(|expected| {
+            parent_order_id == Some(expected) && client_order_id == Some(expected)
+        });
+        let market_identity_valid = fill["symbol"].as_str() == Some(expected_symbol)
+            && fill["side"].as_str() == Some(expected_side);
+        if !order_link_valid {
+            all_order_links_valid = false;
+            missing.push("exit_fill_order_identity_missing_or_mismatched");
+        }
+        if !market_identity_valid {
+            all_order_links_valid = false;
+            missing.push("exit_fill_symbol_or_side_mismatched");
+        }
+        if order_link_valid && market_identity_valid && valid_fill_id && unique_fill_id {
+            exit_fill_ids.push(fill_id.unwrap().to_owned());
+        }
+
+        let quantity = fill["quantity"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let execution_price = fill["execution_price"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        if let Some(quantity) = quantity {
+            filled_quantity += quantity;
+        } else {
+            missing.push("exit_fill_quantity_missing_or_invalid");
+        }
+        if execution_price.is_none() {
+            missing.push("exit_fill_execution_price_missing_or_invalid");
+        }
+
+        let raw_fee = fill["fee"].as_f64().filter(|value| value.is_finite());
+        let fee_known = fill["fee_known"].as_bool() == Some(true) && raw_fee.is_some();
+        let fee_currency = fill["fee_currency"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty());
+        let fee_currency_known = fee_currency.is_some();
+        if fee_known {
+            known_fee_total += raw_fee.unwrap().abs();
+        }
+        if !fee_known || !fee_currency_known {
+            all_fees_complete = false;
+            missing.push(if fee_known {
+                "exit_fill_fee_currency_missing"
+            } else {
+                "exit_fill_fee_amount_unknown"
+            });
+        }
+        let fee_status = match (fee_known, fee_currency_known) {
+            (true, true) => "known",
+            (true, false) => "currency_unknown",
+            _ => "unknown",
+        };
+        output_fills.push(serde_json::json!({
+            "pm_trade_id": fill["id"],
+            "fill_id": fill_id,
+            "parent_order_id": parent_order_id,
+            "client_order_id": client_order_id,
+            "symbol": fill["symbol"],
+            "side": fill["side"],
+            "order_link_status": if order_link_valid && market_identity_valid { "linked" } else { "mismatched" },
+            "quantity": quantity,
+            "execution_price": execution_price,
+            "fee_known": fee_known,
+            "fee_amount": fee_known.then_some(raw_fee).flatten(),
+            "fee_currency": fee_currency,
+            "fee_currency_known": fee_currency_known,
+            "fee_status": fee_status,
+        }));
+    }
+
+    let quantity_matches = reported_filled.is_finite()
+        && reported_filled >= 0.0
+        && (filled_quantity - reported_filled).abs()
+            <= 1e-9 * filled_quantity.abs().max(reported_filled.abs()).max(1.0);
+    if !quantity_matches {
+        missing.push("exit_fill_quantity_does_not_match_response");
+    }
+    let reported_fee = response["estimated_fee"]
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .map(f64::abs);
+    let fee_total_matches = reported_fee.is_some_and(|reported| {
+        (known_fee_total - reported).abs()
+            <= 1e-9 * known_fee_total.abs().max(reported.abs()).max(1.0)
+    });
+    if !fee_total_matches {
+        all_fees_complete = false;
+        missing.push("per_fill_fee_total_does_not_match_response");
+    }
+    let fill_lineage_complete = all_order_links_valid && all_fill_ids_valid && quantity_matches;
+    let fees_complete = all_fees_complete && fill_lineage_complete;
+    let coverage_status = if fills.is_empty() {
+        "missing"
+    } else if fill_lineage_complete {
+        "complete"
+    } else {
+        "incomplete"
+    };
+    let fee_coverage_status = if fills.is_empty() {
+        "missing"
+    } else if fees_complete {
+        "complete"
+    } else {
+        "incomplete"
+    };
+    serde_json::json!({
+        "schema_version": 1,
+        "expected_client_order_id": expected_client_order_id,
+        "expected_symbol": expected_symbol,
+        "expected_side": expected_side,
+        "coverage_status": coverage_status,
+        "fee_coverage_status": fee_coverage_status,
+        "fill_lineage_complete": fill_lineage_complete,
+        "fees_complete": fees_complete,
+        "complete": fill_lineage_complete && fees_complete,
+        "reported_filled_quantity": reported_filled.is_finite().then_some(reported_filled),
+        "fill_evidence_quantity": filled_quantity,
+        "reported_estimated_fee": reported_fee,
+        "known_fee_amount_abs_total": known_fee_total,
+        "fee_total_matches": fee_total_matches,
+        "exit_fill_ids": exit_fill_ids,
+        "fills": output_fills,
+        "missing_coverage": missing,
+    })
+}
+
 fn position_exit_audit_payload(
     decision_id: &str,
     observed_at: u64,
@@ -152,6 +370,8 @@ fn position_exit_audit_payload(
     side: &str,
     order_type: &str,
     response: &serde_json::Value,
+    expected_client_order_id: Option<&str>,
+    lifecycle_identity: Option<&CanonicalLifecycleIdentity>,
     position: &TraderPosition,
     quantity: f64,
     filled: f64,
@@ -168,10 +388,40 @@ fn position_exit_audit_payload(
     exit_decision_context: &serde_json::Value,
 ) -> serde_json::Value {
     let mid = bid + (ask - bid) * 0.5;
+    let exit_fill_evidence =
+        exit_fill_lineage_evidence(response, expected_client_order_id, symbol, side);
+    let trade_id = lifecycle_identity
+        .map(|identity| identity.trade_id.as_str())
+        .or(position.trade_id.as_deref())
+        .unwrap_or(decision_id);
+    let canonical_identity_status = match lifecycle_identity {
+        None => "missing",
+        Some(identity)
+            if position
+                .trade_id
+                .as_deref()
+                .is_none_or(|trade_id| trade_id == identity.trade_id) =>
+        {
+            "complete"
+        }
+        Some(_) => "mismatched",
+    };
+    let lineage_status = if canonical_identity_status == "complete"
+        && exit_fill_evidence["complete"].as_bool() == Some(true)
+    {
+        "complete"
+    } else {
+        "NeedsAudit"
+    };
     let mut payload = serde_json::json!({
         "record_schema_version": 2,
         "decision_id": decision_id,
-        "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
+        "trade_id": trade_id,
+        "canonical_lifecycle_identity": lifecycle_identity,
+        "canonical_identity_status": canonical_identity_status,
+        "lineage_status": lineage_status,
+        "exit_client_order_id": expected_client_order_id,
+        "exit_fill_evidence": exit_fill_evidence,
         "trade_closed": filled + 1e-12 >= quantity,
         "strategy": position.strategy,
         "stage": format!("exit:{submitted_at}"),
@@ -217,7 +467,7 @@ fn position_exit_audit_payload(
         .collect::<Vec<_>>());
     payload["price_path_evidence"] = price_path_excursion_evidence(position, observed_at);
     payload["entry_context"] = serde_json::json!({
-        "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
+        "trade_id": trade_id,
         "strategy_decision": position.strategy_decision,
         "average_price": position.average_entry_price,
         "fees": position.entry_fees,
@@ -231,7 +481,7 @@ fn position_exit_audit_payload(
         "entry_fill_ids": position.entry_fill_ids,
         "entry_fee_currencies": position.entry_fee_currencies,
         "entry_fill_costs_complete": position.entry_fill_costs_complete,
-        "lifecycle_identity": position.lifecycle_identity,
+        "lifecycle_identity": lifecycle_identity.or(position.lifecycle_identity.as_ref()),
     });
     payload["exit_decision_context"] = exit_decision_context.clone();
     payload["exit_rule_trace"] = serde_json::json!({
@@ -312,6 +562,10 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
         "effective_take_profit_percent": payload["effective_take_profit_percent"],
         "pre_exit_price_path": payload["price_path"],
         "pre_exit_price_path_evidence": payload["price_path_evidence"],
+        "exit_fill_evidence": payload["exit_fill_evidence"],
+        "canonical_lifecycle_identity": payload["canonical_lifecycle_identity"],
+        "canonical_identity_status": payload["canonical_identity_status"],
+        "lineage_status": payload["lineage_status"],
         "exit_timestamp_ms": now,
         "observe_at_ms": now.saturating_add(POST_EXIT_OBSERVATION_HORIZON_MS),
         "next_sample_at_ms": now,
@@ -408,6 +662,19 @@ mod tests {
             quantity: 2.0,
             average_entry_price: 100.0,
             entry_fees: 0.2,
+            trade_id: Some("trade-1".into()),
+            lifecycle_identity: Some(CanonicalLifecycleIdentity {
+                schema_version: 1,
+                opportunity_id: "opportunity-1".into(),
+                episode_id: "episode-1".into(),
+                trade_id: "trade-1".into(),
+                profile_id: Some("profile-1".into()),
+                profile_hash: Some("sha256:profile-1".into()),
+                profile_version: Some(1),
+                execution_mode: "paper".into(),
+                entry_policy: "strict".into(),
+                source: "auto_trader_entry_reservation".into(),
+            }),
             entry_timestamp_ms: 1_000,
             strategy_decision: Some(serde_json::json!({"strategy": "test"})),
             price_path: vec![TradePriceSample {
@@ -426,7 +693,25 @@ mod tests {
             "take-profit",
             "sell",
             "PostOnlyLimit",
-            &serde_json::json!({"ok": true}),
+            &serde_json::json!({
+                "filled_quantity":2.0,
+                "estimated_fee":0.1,
+                "fee_complete":true,
+                "fill_evidence":[
+                    {"id":"pm-row-1","fill_id":"pm-fill:v1:epoch-1:1",
+                     "parent_order_id":"1800","client_order_id":"1800",
+                     "symbol":"BTC-USDT","side":"sell",
+                     "quantity":1.0,"execution_price":109.0,"fee":-0.05,
+                     "fee_known":true,"fee_currency":"USDT"},
+                    {"id":"pm-row-2","fill_id":"pm-fill:v1:epoch-1:2",
+                     "parent_order_id":"1800","client_order_id":"1800",
+                     "symbol":"BTC-USDT","side":"sell",
+                     "quantity":1.0,"execution_price":110.0,"fee":-0.05,
+                     "fee_known":true,"fee_currency":"USDT"}
+                ]
+            }),
+            Some("1800"),
+            position.lifecycle_identity.as_ref(),
             &position,
             2.0,
             2.0,
@@ -451,6 +736,33 @@ mod tests {
         assert_eq!(payload["exit_rule_trace"]["reason"], "take-profit");
         assert_eq!(payload["exit_order_type"], "PostOnlyLimit");
         assert_eq!(payload["exit_decision_context"]["signal_active"], true);
+        assert_eq!(payload["trade_id"], "trade-1");
+        assert_eq!(
+            payload["canonical_lifecycle_identity"]["episode_id"],
+            "episode-1"
+        );
+        assert_eq!(payload["canonical_identity_status"], "complete");
+        assert_eq!(payload["lineage_status"], "complete");
+        assert_eq!(payload["exit_fill_evidence"]["coverage_status"], "complete");
+        assert_eq!(
+            payload["exit_fill_evidence"]["fee_coverage_status"],
+            "complete"
+        );
+        assert_eq!(
+            payload["exit_fill_evidence"]["exit_fill_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            payload["exit_fill_evidence"]["fills"][0]["fee_amount"],
+            -0.05
+        );
+        assert_eq!(
+            payload["exit_fill_evidence"]["fills"][0]["fee_currency"],
+            "USDT"
+        );
     }
 
     #[test]
@@ -463,7 +775,14 @@ mod tests {
             "stop-loss",
             "buy",
             "Ioc",
-            &serde_json::Value::Null,
+            &serde_json::json!({
+                "filled_quantity":0.0,
+                "estimated_fee":0.0,
+                "fee_complete":true,
+                "fill_evidence":[]
+            }),
+            None,
+            None,
             &TraderPosition::default(),
             0.0,
             0.0,
@@ -483,6 +802,100 @@ mod tests {
         assert_eq!(payload["fill_rate"], serde_json::Value::Null);
         assert_eq!(payload["net_return_percent"], serde_json::Value::Null);
         assert_eq!(payload["fee_bps"], serde_json::Value::Null);
+        assert_eq!(
+            payload["exit_fill_evidence"]["coverage_status"],
+            "not_applicable"
+        );
+    }
+
+    #[test]
+    fn exit_fill_evidence_keeps_unknown_fees_null_and_rejects_mismatched_parent() {
+        let response = serde_json::json!({
+            "filled_quantity":2.0,
+            "estimated_fee":0.04,
+            "fee_complete":false,
+            "fill_evidence":[
+                {"id":"pm-row-1","fill_id":"pm-fill:v1:epoch-1:1",
+                 "parent_order_id":"order-7","client_order_id":"order-7",
+                 "symbol":"BTC-USDT","side":"sell",
+                 "quantity":1.0,"execution_price":109.0,"fee":-0.05,
+                 "fee_known":true,"fee_currency":"USDT"},
+                {"id":"pm-row-2","fill_id":"pm-fill:v1:epoch-1:2",
+                 "parent_order_id":"different-order","client_order_id":"order-7",
+                 "symbol":"ETH-USDT","side":"buy",
+                 "quantity":1.0,"execution_price":110.0,"fee":0.0,
+                 "fee_known":false,"fee_currency":""}
+            ]
+        });
+        let evidence = exit_fill_lineage_evidence(&response, Some("order-7"), "BTC-USDT", "sell");
+        assert_eq!(evidence["coverage_status"], "incomplete");
+        assert_eq!(evidence["fee_coverage_status"], "incomplete");
+        assert_eq!(evidence["complete"], false);
+        assert_eq!(
+            evidence["exit_fill_ids"],
+            serde_json::json!(["pm-fill:v1:epoch-1:1"])
+        );
+        assert_eq!(evidence["fills"][0]["fee_amount"], -0.05);
+        assert_eq!(evidence["fills"][0]["fee_currency"], "USDT");
+        assert_eq!(evidence["fills"][1]["fee_amount"], serde_json::Value::Null);
+        assert_eq!(
+            evidence["fills"][1]["fee_currency"],
+            serde_json::Value::Null
+        );
+        assert_eq!(evidence["fills"][1]["fee_status"], "unknown");
+        assert_eq!(evidence["fee_total_matches"], false);
+        assert!(evidence["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "exit_fill_order_identity_missing_or_mismatched"));
+        assert!(evidence["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "exit_fill_symbol_or_side_mismatched"));
+        assert!(evidence["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "per_fill_fee_total_does_not_match_response"));
+
+        let missing = exit_fill_lineage_evidence(
+            &serde_json::json!({"filled_quantity":1.0,"estimated_fee":0.0,"fee_complete":false}),
+            Some("order-7"),
+            "BTC-USDT",
+            "sell",
+        );
+        assert_eq!(missing["coverage_status"], "missing");
+        assert_eq!(missing["exit_fill_ids"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn known_fee_amount_without_currency_remains_unconvertible_and_incomplete() {
+        let evidence = exit_fill_lineage_evidence(
+            &serde_json::json!({
+                "filled_quantity":1.0,
+                "estimated_fee":0.05,
+                "fee_complete":false,
+                "fill_evidence":[{
+                    "id":"pm-row-1","fill_id":"pm-fill:v1:epoch-1:1",
+                    "parent_order_id":"order-7","client_order_id":"order-7",
+                    "symbol":"BTC-USDT","side":"sell",
+                    "quantity":1.0,"execution_price":109.0,"fee":-0.05,
+                    "fee_known":true,"fee_currency":""
+                }]
+            }),
+            Some("order-7"),
+            "BTC-USDT",
+            "sell",
+        );
+        assert_eq!(evidence["fees_complete"], false);
+        assert_eq!(evidence["fills"][0]["fee_amount"], -0.05);
+        assert_eq!(
+            evidence["fills"][0]["fee_currency"],
+            serde_json::Value::Null
+        );
+        assert_eq!(evidence["fills"][0]["fee_status"], "currency_unknown");
     }
 
     #[test]
@@ -576,6 +989,10 @@ mod tests {
             "effective_stop_loss_percent": 0.5,
             "effective_take_profit_percent": 0.8,
             "price_path": [{"timestamp": 123, "bid": 99.4, "ask": 99.6}],
+            "exit_fill_evidence": {"coverage_status":"complete", "exit_fill_ids":["pm-fill:v1:e:1"]},
+            "canonical_lifecycle_identity": {"trade_id":"trade-early-exit"},
+            "canonical_identity_status":"complete",
+            "lineage_status":"complete",
             "entry_context": {
                 "learning_context": "btc:live-momentum:short",
                 "average_price": 100.0,
@@ -598,5 +1015,14 @@ mod tests {
         assert_eq!(observation["exit_filled_quantity"], 1.0);
         assert_eq!(observation["effective_stop_loss_percent"], 0.5);
         assert_eq!(observation["pre_exit_price_path"][0]["bid"], 99.4);
+        assert_eq!(
+            observation["exit_fill_evidence"]["coverage_status"],
+            "complete"
+        );
+        assert_eq!(
+            observation["canonical_lifecycle_identity"]["trade_id"],
+            "trade-early-exit"
+        );
+        assert_eq!(observation["lineage_status"], "complete");
     }
 }

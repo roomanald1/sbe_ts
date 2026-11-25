@@ -427,6 +427,55 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
     save_sqlite_ledger_at(path, ledger, observed_at_ms, false)
 }
 
+/// Copy only cached conversion marks that are not future-dated and are fresh
+/// under the existing USD-rate stream contract. Durable writes never fetch FX.
+fn current_portfolio_fx_marks(
+    observed_at_ms: u64,
+) -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+    let Some(snapshot) = USD_RATE_ORDER_SNAPSHOT
+        .get()
+        .and_then(|rates| rates.load_full())
+    else {
+        return (BTreeMap::new(), BTreeMap::new());
+    };
+    let mut rates = BTreeMap::new();
+    let mut updated_at = BTreeMap::new();
+    for (currency, rate) in &snapshot.rates {
+        let timestamp = snapshot
+            .updated_at_by_currency
+            .get(currency)
+            .copied()
+            .unwrap_or(snapshot.updated_at);
+        if !rate.is_finite()
+            || *rate <= 0.0
+            || timestamp > observed_at_ms
+            || (currency != "USD"
+                && observed_at_ms.saturating_sub(timestamp)
+                    > USD_RATE_STREAM_MAX_AGE.as_millis() as u64)
+        {
+            continue;
+        }
+        rates.insert(currency.clone(), *rate);
+        updated_at.insert(currency.clone(), timestamp);
+    }
+    (rates, updated_at)
+}
+
+fn value_cash_balances_usd(
+    balances: &BTreeMap<String, f64>,
+    rates: &BTreeMap<String, f64>,
+) -> Option<BTreeMap<String, f64>> {
+    balances
+        .iter()
+        .map(|(currency, amount)| {
+            let rate = rates.get(currency)?;
+            let value = amount * rate;
+            (amount.is_finite() && rate.is_finite() && value.is_finite())
+                .then(|| (currency.clone(), value))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PortfolioEvidenceIntervalV1 {
     schema_version: u32,
@@ -452,6 +501,18 @@ struct PortfolioEvidenceIntervalV1 {
     opening_cash_amount: Option<f64>,
     #[serde(default)]
     opening_cash_currency: Option<String>,
+    /// Per-currency opening balances and their as-of USD valuations. These are
+    /// absent at the first baseline because no prior observed state exists.
+    #[serde(default)]
+    opening_cash_balances_by_currency: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    opening_cash_value_usd_by_currency: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    opening_cash_total_usd: Option<f64>,
+    #[serde(default)]
+    opening_fx_rates_usd_by_currency: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    opening_fx_rates_updated_at_by_currency: Option<BTreeMap<String, u64>>,
     known_symbols: Vec<String>,
     positions: Vec<serde_json::Value>,
     explicit_flat_symbols: Vec<String>,
@@ -464,6 +525,29 @@ struct PortfolioEvidenceIntervalV1 {
     #[serde(default)]
     cash_balances_by_currency: BTreeMap<String, f64>,
     cash_movements_by_currency: BTreeMap<String, f64>,
+    /// External capital is separately identified from trade cashflows and fees.
+    #[serde(default)]
+    external_contributions_by_currency: BTreeMap<String, f64>,
+    #[serde(default)]
+    external_contribution_events: Vec<PortfolioCashContributionV1>,
+    #[serde(default)]
+    closing_cash_value_usd_by_currency: Option<BTreeMap<String, f64>>,
+    #[serde(default)]
+    closing_fx_rates_usd_by_currency: BTreeMap<String, f64>,
+    #[serde(default)]
+    closing_fx_rates_updated_at_by_currency: BTreeMap<String, u64>,
+    #[serde(default)]
+    closing_cash_total_usd: Option<f64>,
+    #[serde(default)]
+    portfolio_return_complete: bool,
+    #[serde(default)]
+    portfolio_return_completeness_reasons: Vec<String>,
+    #[serde(default)]
+    flat_cash_period_net_pnl_usd: Option<f64>,
+    #[serde(default)]
+    flat_cash_period_return_pct: Option<f64>,
+    #[serde(default)]
+    portfolio_return_scope: String,
     #[serde(default)]
     unknown_cashflow_fills: usize,
     known_fee_fills: usize,
@@ -490,6 +574,18 @@ struct PortfolioEvidenceIntervalV1 {
     #[serde(default)]
     quantitative_eligibility: String,
     completeness_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PortfolioCashContributionV1 {
+    contribution_id: String,
+    source: String,
+    source_cursor: usize,
+    timestamp_utc_ms: u64,
+    currency: String,
+    amount: f64,
+    #[serde(default)]
+    value_usd: Option<f64>,
 }
 
 fn save_sqlite_ledger_at(
@@ -615,6 +711,8 @@ fn save_sqlite_ledger_at(
     let mut cashflow_since_origin_by_currency = BTreeMap::new();
     let mut cash_balances_by_currency = BTreeMap::new();
     let mut cash_movements_by_currency = BTreeMap::new();
+    let mut external_contributions_by_currency = BTreeMap::new();
+    let mut external_contribution_events = Vec::new();
     *cash_balances_by_currency
         .entry("USD".to_owned())
         .or_insert(0.0) += ledger.initial_cash;
@@ -730,11 +828,69 @@ fn save_sqlite_ledger_at(
             .entry("USD".to_owned())
             .or_insert(0.0) += topup.amount;
     }
-    for topup in &ledger.topups[topup_cursor_start..] {
+    for (cursor, topup) in ledger.topups.iter().enumerate().skip(topup_cursor_start) {
         *cash_movements_by_currency
             .entry("USD".to_owned())
             .or_insert(0.0) += topup.amount;
+        *external_contributions_by_currency
+            .entry("USD".to_owned())
+            .or_insert(0.0) += topup.amount;
+        external_contribution_events.push(PortfolioCashContributionV1 {
+            contribution_id: format!("pm-topup:v1:{cursor}"),
+            source: "position_manager_account_topup_ledger".to_owned(),
+            source_cursor: cursor,
+            timestamp_utc_ms: topup.timestamp,
+            currency: "USD".to_owned(),
+            amount: topup.amount,
+            value_usd: (topup.amount.is_finite() && topup.amount > 0.0)
+                .then_some(topup.amount),
+        });
     }
+    let (closing_fx_rates_usd_by_currency, closing_fx_rates_updated_at_by_currency) =
+        current_portfolio_fx_marks(observed_at_ms);
+    let closing_cash_value_usd_by_currency = value_cash_balances_usd(
+        &cash_balances_by_currency,
+        &closing_fx_rates_usd_by_currency,
+    );
+    let closing_cash_total_usd = closing_cash_value_usd_by_currency
+        .as_ref()
+        .map(|values| values.values().sum::<f64>())
+        .filter(|value| value.is_finite());
+    let opening_cash_balances_by_currency = if explicit_baseline_request {
+        Some(cash_balances_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.cash_balances_by_currency.clone())
+    };
+    let opening_cash_value_usd_by_currency = if explicit_baseline_request {
+        closing_cash_value_usd_by_currency.clone()
+    } else {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.closing_cash_value_usd_by_currency.clone())
+    };
+    let opening_cash_total_usd = if explicit_baseline_request {
+        closing_cash_total_usd
+    } else {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.closing_cash_total_usd)
+    };
+    let opening_fx_rates_usd_by_currency = if explicit_baseline_request {
+        Some(closing_fx_rates_usd_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.closing_fx_rates_usd_by_currency.clone())
+    };
+    let opening_fx_rates_updated_at_by_currency = if explicit_baseline_request {
+        Some(closing_fx_rates_updated_at_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.closing_fx_rates_updated_at_by_currency.clone())
+    };
     let heartbeat_gap = previous
         .as_ref()
         .is_some_and(|prior| observed_at_ms.saturating_sub(prior.heartbeat_at_utc_ms) > 60_000);
@@ -851,6 +1007,8 @@ fn save_sqlite_ledger_at(
         // A baseline anchors current balances; it is not itself a period of
         // cash movement from the unknown prior state.
         cash_movements_by_currency.clear();
+        external_contributions_by_currency.clear();
+        external_contribution_events.clear();
     }
     let baseline_evidence_id = if is_baseline {
         Some(evidence_id.clone())
@@ -892,6 +1050,74 @@ fn save_sqlite_ledger_at(
     if !is_baseline && !checkpoint_contiguous {
         completeness_reasons.push("no_contiguous_complete_baseline_interval".to_owned());
     }
+    let mut portfolio_return_completeness_reasons = Vec::new();
+    if is_baseline {
+        portfolio_return_completeness_reasons
+            .push("baseline_anchor_is_not_a_return_period".to_owned());
+    }
+    if !complete {
+        portfolio_return_completeness_reasons
+            .push("portfolio_interval_source_incomplete".to_owned());
+    }
+    if !all_flat {
+        portfolio_return_completeness_reasons
+            .push("open_positions_not_valued_at_interval_end".to_owned());
+    }
+    if opening_cash_balances_by_currency.is_none() {
+        portfolio_return_completeness_reasons
+            .push("opening_per_currency_cash_values_unavailable".to_owned());
+    }
+    if opening_cash_value_usd_by_currency.is_none() {
+        portfolio_return_completeness_reasons
+            .push("opening_timestamp_aligned_fx_valuation_unavailable".to_owned());
+    }
+    if closing_cash_value_usd_by_currency.is_none() {
+        portfolio_return_completeness_reasons
+            .push("closing_timestamp_aligned_fx_valuation_incomplete".to_owned());
+    }
+    if opening_cash_total_usd.is_none_or(|value| !value.is_finite() || value <= 0.0) {
+        portfolio_return_completeness_reasons
+            .push("opening_usd_cash_capital_unavailable_or_nonpositive".to_owned());
+    }
+    if unknown_cashflow_fills > 0 {
+        portfolio_return_completeness_reasons
+            .push("fill_cashflows_or_fees_not_fully_known".to_owned());
+    }
+    if ledger.topups[topup_cursor_start..]
+        .iter()
+        .any(|topup| !topup.amount.is_finite() || topup.amount <= 0.0)
+    {
+        portfolio_return_completeness_reasons
+            .push("external_contribution_amount_unknown_or_invalid".to_owned());
+    }
+    let external_contributions_usd = external_contribution_events
+        .iter()
+        .map(|event| {
+            (event.currency == "USD")
+                .then_some(event.value_usd)
+                .flatten()
+        })
+        .try_fold(0.0, |sum, amount| {
+            amount.filter(|amount| amount.is_finite()).map(|amount| sum + amount)
+        })
+        .filter(|sum: &f64| sum.is_finite());
+    if external_contributions_usd.is_none() {
+        portfolio_return_completeness_reasons
+            .push("external_contribution_usd_valuation_unavailable".to_owned());
+    }
+    let portfolio_return_complete = portfolio_return_completeness_reasons.is_empty();
+    let flat_cash_period_net_pnl_usd = portfolio_return_complete
+        .then(|| {
+            Some(
+                closing_cash_total_usd? - opening_cash_total_usd? - external_contributions_usd?,
+            )
+        })
+        .flatten()
+        .filter(|value| value.is_finite());
+    let flat_cash_period_return_pct = flat_cash_period_net_pnl_usd
+        .zip(opening_cash_total_usd)
+        .map(|(pnl, opening)| pnl / opening * 100.0)
+        .filter(|value| value.is_finite());
     let checkpoint = PortfolioEvidenceIntervalV1 {
         schema_version: 1,
         evidence_id: evidence_id.clone(),
@@ -934,6 +1160,11 @@ fn save_sqlite_ledger_at(
                 .as_ref()
                 .and_then(|prior| prior.opening_cash_currency.clone())
         },
+        opening_cash_balances_by_currency,
+        opening_cash_value_usd_by_currency,
+        opening_cash_total_usd,
+        opening_fx_rates_usd_by_currency,
+        opening_fx_rates_updated_at_by_currency,
         known_symbols,
         positions: summary
             .positions
@@ -952,6 +1183,17 @@ fn save_sqlite_ledger_at(
         cashflow_since_origin_by_currency,
         cash_balances_by_currency,
         cash_movements_by_currency,
+        external_contributions_by_currency,
+        external_contribution_events,
+        closing_cash_value_usd_by_currency,
+        closing_fx_rates_usd_by_currency,
+        closing_fx_rates_updated_at_by_currency,
+        closing_cash_total_usd,
+        portfolio_return_complete,
+        portfolio_return_completeness_reasons,
+        flat_cash_period_net_pnl_usd,
+        flat_cash_period_return_pct,
+        portfolio_return_scope: "pm_internal_flat_cash_only".to_owned(),
         unknown_cashflow_fills,
         known_fee_fills,
         unknown_fee_fills,
@@ -1187,6 +1429,12 @@ mod ledger_snapshot_tests {
             after_topup.cash_balances_by_currency.get("USD"),
             Some(&10_075.0)
         );
+        assert!(!after_topup.portfolio_return_complete);
+        assert!(after_topup.flat_cash_period_net_pnl_usd.is_none());
+        assert!(after_topup
+            .portfolio_return_completeness_reasons
+            .iter()
+            .any(|reason| reason == "closing_timestamp_aligned_fx_valuation_incomplete"));
 
         ledger.trades.push(fill("reopen", "buy", 3, 33_000));
         ledger.fill_id_sequence = 3;
@@ -1195,6 +1443,10 @@ mod ledger_snapshot_tests {
         assert!(!after_fill.complete);
         assert_eq!(after_fill.fill_cursor_end, 3);
         assert!(after_fill.cash_movements_by_currency.contains_key("USDT"));
+        assert!(after_fill
+            .portfolio_return_completeness_reasons
+            .iter()
+            .any(|reason| reason == "open_positions_not_valued_at_interval_end"));
 
         save_sqlite_ledger_at(&path, &ledger, 94_001, false).unwrap();
         let after_gap = latest_portfolio_evidence(&path).unwrap();

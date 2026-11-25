@@ -239,12 +239,38 @@ async fn register_scout(
         .entry(sample.symbol.clone())
         .or_insert_with(|| Arc::new(Mutex::new(SignalEngine::default())))
         .clone();
-    let mut engine = engine.lock().await;
     let decision_id = sample.decision_id.clone();
     let symbol = sample.symbol.clone();
     let strategy = sample.strategy.clone();
     let exit_scenario = sample.exit_scenario.clone();
     let timestamp = sample.timestamp;
+    let entry_quote = engine
+        .lock()
+        .await
+        .scout_entry_quote(timestamp, sample.entry_price);
+    let restored_path = if let Some(store) = runtime.signal_store.as_ref() {
+        Some(
+            store
+                .register_scout_path(
+                    decision_id.clone(),
+                    symbol.clone(),
+                    timestamp,
+                    sample.direction.clone(),
+                    sample.entry_price,
+                    entry_quote,
+                )
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Could not persist Scout path registration: {error}"),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut engine = engine.lock().await;
     if !engine.track_scout_with_maximum_duration(
         sample.decision_id,
         sample.symbol,
@@ -264,6 +290,54 @@ async fn register_scout(
         sample.scout_maximum_duration_ms,
     ) {
         return Ok(StatusCode::NO_CONTENT);
+    }
+    let mut restored_truncated = false;
+    let mut restored_capture_complete = true;
+    let mut restored_freshness = None;
+    let mut restored_sample_count = 0;
+    let mut restored_entry_quote = None;
+    let mut restored_samples = Vec::new();
+    if let Some((
+        samples,
+        truncated,
+        capture_complete,
+        freshness,
+        sample_count,
+        stored_entry_quote,
+    )) = restored_path
+    {
+        restored_samples = samples;
+        restored_truncated = truncated;
+        restored_capture_complete = capture_complete;
+        restored_freshness = freshness;
+        restored_sample_count = sample_count;
+        restored_entry_quote = stored_entry_quote;
+    }
+    if restored_capture_complete
+        && (!restored_samples.is_empty() || timestamp < runtime.signal_process_started_at_ms)
+    {
+        engine.restore_scout_path_samples(
+            &decision_id,
+            &restored_samples,
+            restored_truncated,
+            restored_freshness,
+            restored_sample_count,
+            restored_entry_quote,
+        );
+    }
+    let path_epoch = restored_samples
+        .last()
+        .map(|sample| sample.path_epoch.saturating_add(1))
+        .unwrap_or(runtime.signal_process_started_at_ms)
+        .max(runtime.signal_process_started_at_ms);
+    engine.set_scout_path_epoch(&decision_id, path_epoch);
+    // Replayed registrations and any restored samples cross a process gap;
+    // preserve their covered excursions but never claim continuous coverage.
+    if timestamp < runtime.signal_process_started_at_ms || !restored_samples.is_empty() {
+        engine.mark_scout_path_interrupted(&decision_id);
+    }
+    if !restored_capture_complete {
+        engine.mark_scout_path_capture_failed(&decision_id);
     }
     crate::service_log!(
         "INFO",
@@ -492,6 +566,7 @@ async fn ingest_signal_event(
         .map(|learning| learning.weight)
         .unwrap_or(0.0);
     let mut scout_markouts = Vec::<(String, SignalEvaluation, bool, Option<String>)>::new();
+    let mut path_samples = Vec::new();
     let (snapshot, records) = {
         let event_timestamp = match &request.event {
             SignalFeedEvent::Price { timestamp, .. }
@@ -552,7 +627,15 @@ async fn ingest_signal_event(
                 }
                 for outcome in outcomes {
                     if outcome.scout_id.is_some() {
-                        crate::service_log!("INFO", "Scout observation completed: sample_id={} symbol={} observation_only={} exit_reason={} age_seconds={}", outcome.scout_id.as_deref().unwrap_or("unknown"), outcome.evaluation.symbol, outcome.scout_observation_only, outcome.scout_exit_reason.unwrap_or("horizon"), outcome.evaluation.horizon_seconds);
+                        crate::service_log!(
+                            "INFO",
+                            "Scout observation completed: sample_id={} symbol={} observation_only={} exit_reason={} age_seconds={}",
+                            outcome.scout_id.as_deref().unwrap_or("unknown"),
+                            outcome.evaluation.symbol,
+                            outcome.scout_observation_only,
+                            outcome.scout_exit_reason.unwrap_or("horizon"),
+                            outcome.evaluation.horizon_seconds
+                        );
                         if let Some(sample_id) = outcome.scout_id.clone() {
                             scout_markouts.push((
                                 sample_id,
@@ -758,6 +841,12 @@ async fn ingest_signal_event(
                     &bid_levels,
                     &ask_levels,
                 );
+                path_samples.extend(engine.latest_scout_path_samples(
+                    timestamp,
+                    best_bid,
+                    best_ask,
+                    now_ms().saturating_sub(timestamp),
+                ));
                 crate::latency::record_engine_work("book", engine_work_started.elapsed());
                 if best_bid.is_finite()
                     && best_ask.is_finite()
@@ -780,6 +869,70 @@ async fn ingest_signal_event(
         };
         (snapshot, records)
     };
+    if !path_samples.is_empty() {
+        let sample_ids = path_samples
+            .iter()
+            .map(|sample| sample.decision_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(store) = runtime.signal_store.as_ref() {
+            if let Err(error) = store.persist_scout_path_samples(path_samples).await {
+                crate::service_log!(
+                    "ERROR",
+                    "Scout path persistence failed; path marked incomplete: {error}"
+                );
+                if let Some(engine) = runtime
+                    .engines
+                    .get(&request.symbol)
+                    .map(|entry| entry.value().clone())
+                {
+                    let mut engine = engine.lock().await;
+                    for sample_id in &sample_ids {
+                        engine.mark_scout_path_capture_failed(sample_id);
+                    }
+                }
+                if let Err(marker_error) = store
+                    .mark_scout_path_capture_failed(sample_ids.into_iter().collect())
+                    .await
+                {
+                    crate::service_log!(
+                        "ERROR",
+                        "Could not persist Scout path failure marker: {marker_error}"
+                    );
+                }
+            }
+        }
+    }
+    if let Some(store) = runtime.signal_store.as_ref() {
+        let completed_candidates = scout_markouts
+            .iter()
+            .map(|(sample_id, _, _, _)| sample_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for sample_id in completed_candidates {
+            let symbol = scout_markouts
+                .iter()
+                .find(|(candidate, _, _, _)| candidate == &sample_id)
+                .map(|(_, evaluation, _, _)| evaluation.symbol.clone());
+            let engine = symbol.and_then(|symbol| {
+                runtime
+                    .engines
+                    .get(&symbol)
+                    .map(|engine| engine.value().clone())
+            });
+            let still_pending = if let Some(engine) = engine {
+                engine.lock().await.has_pending_scout(&sample_id)
+            } else {
+                true
+            };
+            if !still_pending {
+                if let Err(error) = store.complete_scout_path(sample_id.clone()).await {
+                    crate::service_log!(
+                        "WARN",
+                        "Could not retire completed Scout path {sample_id}: {error}"
+                    );
+                }
+            }
+        }
+    }
     if !records.is_empty() {
         if let Err(error) = runtime.research_record_sender.try_send(records) {
             let dropped_records = error.into_inner().len();
@@ -999,17 +1152,77 @@ mod signal_ingestion_tests {
     }
 
     fn raw_price_event(timestamp_ms: u64, price: f64) -> Vec<u8> {
+        raw_price_event_for_symbol("BTC-USDT", timestamp_ms, price)
+    }
+
+    fn raw_price_event_for_symbol(symbol_name: &str, timestamp_ms: u64, price: f64) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(56);
         bytes.extend_from_slice(&48_u16.to_le_bytes());
         bytes.extend_from_slice(&1_u16.to_le_bytes());
         bytes.extend_from_slice(&1_u16.to_le_bytes());
         bytes.extend_from_slice(&9_u16.to_le_bytes());
         let mut symbol = [b' '; 32];
-        symbol[..8].copy_from_slice(b"BTC-USDT");
+        let symbol_bytes = symbol_name.as_bytes();
+        assert!(symbol_bytes.len() <= symbol.len());
+        symbol[..symbol_bytes.len()].copy_from_slice(symbol_bytes);
         bytes.extend_from_slice(&symbol);
         bytes.extend_from_slice(&price.to_le_bytes());
         bytes.extend_from_slice(&timestamp_ms.to_le_bytes());
         bytes
+    }
+
+    fn raw_trade_event_for_symbol(
+        symbol_name: &str,
+        timestamp_ms: u64,
+        price: f64,
+        size: f64,
+        is_buy: bool,
+    ) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 97];
+        bytes[2..4].copy_from_slice(&3_u16.to_le_bytes());
+        let mut symbol = [b' '; 32];
+        let symbol_bytes = symbol_name.as_bytes();
+        assert!(symbol_bytes.len() <= symbol.len());
+        symbol[..symbol_bytes.len()].copy_from_slice(symbol_bytes);
+        bytes[8..40].copy_from_slice(&symbol);
+        bytes[72..80].copy_from_slice(&timestamp_ms.to_le_bytes());
+        bytes[80..88].copy_from_slice(&price.to_le_bytes());
+        bytes[88..96].copy_from_slice(&size.to_le_bytes());
+        bytes[96] = u8::from(is_buy);
+        bytes
+    }
+
+    fn raw_book_event_for_symbol(symbol_name: &str, timestamp_ms: u64, mid: f64) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 272];
+        bytes[2..4].copy_from_slice(&2_u16.to_le_bytes());
+        let mut symbol = [b' '; 32];
+        let symbol_bytes = symbol_name.as_bytes();
+        assert!(symbol_bytes.len() <= symbol.len());
+        symbol[..symbol_bytes.len()].copy_from_slice(symbol_bytes);
+        bytes[8..40].copy_from_slice(&symbol);
+        bytes[40..48].copy_from_slice(&timestamp_ms.to_le_bytes());
+        for index in 0..7 {
+            let offset = 48 + index * 16;
+            let bid = mid - 0.01 - index as f64 * 0.01;
+            bytes[offset..offset + 8].copy_from_slice(&bid.to_le_bytes());
+            bytes[offset + 8..offset + 16].copy_from_slice(&100.0_f64.to_le_bytes());
+            let offset = 160 + index * 16;
+            let ask = mid + 0.01 + index as f64 * 0.01;
+            bytes[offset..offset + 8].copy_from_slice(&ask.to_le_bytes());
+            bytes[offset + 8..offset + 16].copy_from_slice(&10.0_f64.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn executable_book_market(timestamp_ms: u64, mid: f64) -> serde_json::Value {
+        let bids = (0..7)
+            .map(|index| (mid - 0.01 - index as f64 * 0.01, 100.0))
+            .collect::<Vec<_>>();
+        let asks = (0..7)
+            .map(|index| (mid + 0.01 + index as f64 * 0.01, 10.0))
+            .collect::<Vec<_>>();
+        market_value(timestamp_ms, bids[0].0, asks[0].0, &bids, &asks)
+            .expect("deterministic executable quote fixture is valid")
     }
 
     #[test]
@@ -1086,9 +1299,11 @@ mod signal_ingestion_tests {
         let (legacy_strategy_signal_events, _) = broadcast::channel(256);
         (
             Arc::new(SignalRuntime {
+                signal_process_started_at_ms: now_ms(),
+                signal_store: None,
                 active_symbols: DashMap::new(),
                 symbol_admission_gate: Mutex::new(()),
-                max_active_symbols: 1,
+                max_active_symbols: 4,
                 symbol_idle_ttl_ms: 60_000,
                 engines: DashMap::new(),
                 research_record_sender,
@@ -1212,9 +1427,11 @@ mod signal_ingestion_tests {
                 .expect("production signal publication should complete within one second")
                 .expect("accepted raw price event publishes a strategy signal update");
             let value: serde_json::Value = serde_json::from_slice(&update).unwrap();
-            assert!(value["event_id"]
-                .as_str()
-                .is_some_and(|event_id| event_id.starts_with("insights-event:v1:sha256:")));
+            assert!(
+                value["event_id"]
+                    .as_str()
+                    .is_some_and(|event_id| event_id.starts_with("insights-event:v1:sha256:"))
+            );
             let source_event_id = value["event_id"].as_str().unwrap();
             let worker_identity =
                 strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
@@ -1249,6 +1466,143 @@ mod signal_ingestion_tests {
         );
         assert_eq!(elapsed_ns.len(), INGEST_BENCHMARK_SAMPLES);
         assert_eq!(benchmark_input_hash(), input_hash);
+    }
+
+    #[tokio::test]
+    async fn correlated_raw_market_to_autotrader_order_ready_fixture() -> anyhow::Result<()> {
+        let (runtime, _research_records) = benchmark_runtime();
+        let mut published = runtime.strategy_signal_events.subscribe();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64;
+
+        // Prime four allowed production symbols with bounded historical paths.
+        // Measured events use current wall time so AutoTrader's report
+        // freshness validation remains active across the workload.
+        let symbols = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"];
+        for symbol in symbols {
+            for index in 0..INGEST_BENCHMARK_WARMUP_EVENTS {
+                let timestamp =
+                    now_ms.saturating_sub((INGEST_BENCHMARK_WARMUP_EVENTS - index) as u64 * 2_000);
+                let price = 100.0 + index as f64 * 0.05;
+                let request =
+                    decode_signal_event(&raw_price_event_for_symbol(symbol, timestamp, price))
+                        .expect("raw benchmark warm-up price decodes");
+                let result =
+                    ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                        .await;
+                assert!(
+                    result.is_ok(),
+                    "production warm-up ingress should accept price"
+                );
+            }
+        }
+        while published.try_recv().is_ok() {}
+
+        let session = auto_trader::auto_trader::CorrelatedMarketOrderReadySession::start().await?;
+        let mut samples = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as u64;
+            let mid = 100.0 + INGEST_BENCHMARK_WARMUP_EVENTS as f64 * 0.05;
+            let raw_ingress_started = std::time::Instant::now();
+            let price_event = raw_price_event_for_symbol(symbol, timestamp, mid);
+            let mut request = decode_signal_event(&price_event)
+                .expect("measured raw price decodes through the production feed codec");
+            request.queued_at = Some(Instant::now());
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "production measured price ingress should accept"
+            );
+            let preliminary_update = tokio::time::timeout(Duration::from_secs(1), published.recv())
+                .await?
+                .context("initial measured price publishes its production snapshot")?;
+            let preliminary_value: serde_json::Value = serde_json::from_slice(&preliminary_update)?;
+            assert_eq!(preliminary_value["signal"]["timestamp"], timestamp);
+
+            let trade_event = raw_trade_event_for_symbol(
+                symbol,
+                timestamp.saturating_add(1_000),
+                mid,
+                10.0,
+                true,
+            );
+            let mut request = decode_signal_event(&trade_event)
+                .expect("measured raw trade decodes through the production feed codec");
+            request.queued_at = Some(Instant::now());
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "production measured trade ingress should accept"
+            );
+
+            let book_timestamp = timestamp.saturating_add(2_000);
+            let book_event = raw_book_event_for_symbol(symbol, book_timestamp, mid);
+            let mut request = decode_signal_event(&book_event)
+                .expect("measured raw book decodes through the production feed codec");
+            request.queued_at = Some(Instant::now());
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "production measured book ingress should accept"
+            );
+            let final_price_event = raw_price_event_for_symbol(symbol, book_timestamp, mid);
+            let mut request = decode_signal_event(&final_price_event)
+                .expect("final raw price decodes through the production feed codec");
+            request.queued_at = Some(Instant::now());
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "final production price ingress should accept"
+            );
+            let update = tokio::time::timeout(Duration::from_secs(1), published.recv())
+                .await?
+                .context("final price publishes the trade/book-enriched signal")?;
+            let value: serde_json::Value = serde_json::from_slice(&update)?;
+            let signal: strategy::StrategyMarketSignal =
+                serde_json::from_value(value["signal"].clone())?;
+            assert_eq!(signal.symbol, symbol);
+            assert_eq!(signal.timestamp, book_timestamp);
+            assert!(signal.components.trade_flow_imbalance.unwrap_or_default() > 0.0);
+            assert!(signal.components.book_imbalance.unwrap_or_default() > 0.0);
+            let market = executable_book_market(book_timestamp, mid);
+            let sample = session
+                .process_signal(signal, market, raw_ingress_started)
+                .await?;
+            assert!(!sample.source_event_id.is_empty());
+            assert_ne!(sample.cycle_status, "cycle_error", "{sample:?}");
+            if sample.order_ready_ms.is_some() {
+                assert_eq!(sample.durable_reservation_visible_at_hook, Some(true));
+                assert_eq!(sample.transport_followed_order_ready, Some(true));
+                assert_eq!(
+                    sample.client_order_identity_present_at_transport,
+                    Some(true)
+                );
+                assert!(sample.failure.is_none());
+            }
+            samples.push(sample);
+        }
+        println!(
+            "CORRELATED_RAW_MARKET_TO_ORDER_READY {{\"fixture_version\":1,\"sample_count\":{},\"records\":{}}}",
+            samples.len(),
+            serde_json::to_string(&samples)?
+        );
+        assert_eq!(samples.len(), symbols.len());
+        assert!(
+            samples.iter().any(|sample| sample.order_ready_ms.is_some()),
+            "fixture must exercise a real durable order-ready path: {samples:?}"
+        );
+        Ok(())
     }
 
     #[test]

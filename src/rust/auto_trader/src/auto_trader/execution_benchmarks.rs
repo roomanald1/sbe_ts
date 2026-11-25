@@ -32,6 +32,478 @@ fn service_endpoint_environment_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(feature = "benchmark-support")]
+type BenchmarkOrderReadyObserver = Box<dyn FnOnce(&str, std::time::Instant) + Send + 'static>;
+
+#[cfg(feature = "benchmark-support")]
+fn benchmark_order_ready_observers()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, BenchmarkOrderReadyObserver>> {
+    static OBSERVERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, BenchmarkOrderReadyObserver>>,
+    > = std::sync::OnceLock::new();
+    OBSERVERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Register a one-shot observer for a stable live-worker event ID. The hook
+/// reports the exact AutoTrader decision ID once the prepared request is ready.
+/// This
+/// feature is enabled only as an Insights dev-dependency; normal service builds
+/// do not include the observer registry or call site.
+#[cfg(feature = "benchmark-support")]
+pub fn observe_benchmark_order_ready(
+    event_id: String,
+    observer: impl FnOnce(&str, std::time::Instant) + Send + 'static,
+) {
+    let previous = benchmark_order_ready_observers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(event_id, Box::new(observer));
+    assert!(previous.is_none(), "duplicate benchmark decision observer");
+}
+
+#[cfg(feature = "benchmark-support")]
+pub(super) fn remove_benchmark_order_ready_observer(event_id: &str) {
+    benchmark_order_ready_observers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(event_id);
+}
+
+#[cfg(feature = "benchmark-support")]
+pub(super) fn notify_benchmark_order_ready(decision_id: &str, event_id: Option<&str>) {
+    let Some(event_id) = event_id else {
+        return;
+    };
+    let observer = benchmark_order_ready_observers()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(event_id);
+    if let Some(observer) = observer {
+        observer(decision_id, std::time::Instant::now());
+    }
+}
+
+#[cfg(feature = "benchmark-support")]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CorrelatedMarketOrderReadySample {
+    pub source_event_id: String,
+    pub decision_id: Option<String>,
+    pub strategy_decision: String,
+    pub cycle_status: String,
+    pub order_ready_ms: Option<f64>,
+    pub durable_reservation_visible_at_hook: Option<bool>,
+    pub transport_followed_order_ready: Option<bool>,
+    pub client_order_identity_present_at_transport: Option<bool>,
+    pub failure: Option<String>,
+}
+
+#[cfg(feature = "benchmark-support")]
+pub struct CorrelatedMarketOrderReadySession {
+    _environment_guard: std::sync::MutexGuard<'static, ()>,
+    previous_pm_endpoint: Option<std::ffi::OsString>,
+    server: tokio::task::JoinHandle<()>,
+    pm_requests: Arc<std::sync::Mutex<Vec<(std::time::Instant, crate::service_rpc::RpcRequest)>>>,
+    state: AutoTraderState,
+    socket_api: AutoTraderSocketApi,
+    settings_path: PathBuf,
+}
+
+#[cfg(feature = "benchmark-support")]
+impl CorrelatedMarketOrderReadySession {
+    pub async fn start() -> anyhow::Result<Self> {
+        use rsocket_rust::prelude::*;
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct LocalPositionManager(
+            Arc<std::sync::Mutex<Vec<(std::time::Instant, crate::service_rpc::RpcRequest)>>>,
+        );
+        #[rsocket_rust::async_trait]
+        impl RSocket for LocalPositionManager {
+            async fn metadata_push(&self, _: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn fire_and_forget(&self, _: Payload) -> anyhow::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+            async fn request_response(&self, payload: Payload) -> anyhow::Result<Option<Payload>> {
+                let request = serde_json::from_slice::<crate::service_rpc::RpcRequest>(
+                    payload
+                        .data()
+                        .ok_or_else(|| anyhow::anyhow!("request data missing"))?
+                        .as_ref(),
+                )?;
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((std::time::Instant::now(), request.clone()));
+                let (status, body) = match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/positions/orders") => (
+                        200,
+                        serde_json::json!({
+                            "status": "accepted",
+                            "filled_quantity": 0.0,
+                            "average_execution_price": null,
+                            "estimated_fee": 0.0,
+                            "order": {}
+                        }),
+                    ),
+                    ("DELETE", _) => (200, serde_json::json!({})),
+                    _ => (
+                        404,
+                        serde_json::json!({"error":"unexpected benchmark route"}),
+                    ),
+                };
+                let response = crate::service_rpc::RpcResponse {
+                    status,
+                    body,
+                    headers: BTreeMap::from([(
+                        "x-position-manager-handler-ms".into(),
+                        "0.01".into(),
+                    )]),
+                };
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&response)?)
+                        .build(),
+                ))
+            }
+            fn request_stream(&self, _: Payload) -> Flux<anyhow::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+            fn request_channel(
+                &self,
+                _: Flux<anyhow::Result<Payload>>,
+            ) -> Flux<anyhow::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+        }
+
+        static FIXTURE_INDEX: AtomicUsize = AtomicUsize::new(1);
+        let fixture_index = FIXTURE_INDEX.fetch_add(1, Ordering::Relaxed);
+        let environment_guard = service_endpoint_environment_lock();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let endpoint = format!("ws://{address}");
+        let pm_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = LocalPositionManager(Arc::clone(&pm_requests));
+        let server = tokio::spawn(async move {
+            RSocketFactory::receive()
+                .transport(WebsocketServerTransport::from(address.to_string()))
+                .acceptor(Box::new(move |_, _| Ok(Box::new(service.clone()))))
+                .serve()
+                .await
+                .expect("local correlated benchmark PM service must run");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let previous_pm_endpoint = std::env::var_os("POSITION_MANAGEMENT_RSOCKET_URL");
+        unsafe { std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &endpoint) };
+
+        let strategy = Strategy::from_name("live-momentum")
+            .expect("live-momentum strategy must be registered");
+        let mut settings = Settings::default();
+        settings.strategies = vec![strategy];
+        settings.signal_strategies_enabled = true;
+        settings.paper_learning_exploration_until_ms = current_time_ms().saturating_add(60_000);
+        let state = benchmark_fixture_state(settings, "correlated-raw", fixture_index);
+        let socket_api = AutoTraderSocketApi {
+            state: state.clone(),
+        };
+        let settings_path = state.settings_path.clone();
+        Ok(Self {
+            _environment_guard: environment_guard,
+            previous_pm_endpoint,
+            server,
+            pm_requests,
+            state,
+            socket_api,
+            settings_path,
+        })
+    }
+
+    /// Evaluate the actual emitted Insights signal with the registered
+    /// Strategy evaluator, submit its versioned report through AutoTrader's
+    /// production receiver, and drive the normal cycle. The ready sample ends
+    /// at the feature-gated hook after durable reservation and exact request
+    /// preparation, immediately before Position Management transport.
+    pub async fn process_signal(
+        &self,
+        mut signal: strategy::StrategyMarketSignal,
+        executable_market: serde_json::Value,
+        raw_ingress_started: std::time::Instant,
+    ) -> anyhow::Result<CorrelatedMarketOrderReadySample> {
+        let strategy = Strategy::LiveMomentum;
+        let source_event_id = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("live_worker_event_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|event_id| !event_id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Insights signal has no source event identity"))?
+            .to_owned();
+        let parameters = {
+            let settings = self.state.settings.lock().await;
+            learned_strategy_parameter_profile(&settings, &signal.symbol, strategy)
+                .parameters
+                .into_iter()
+                .map(|parameter| (parameter.key, parameter.value))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let profile_id = strategy::profile_id(&signal.symbol, strategy.as_str(), &parameters);
+        let profile_version = {
+            let settings = self.state.settings.lock().await;
+            live_profile_for_symbol(&settings, &signal.symbol, strategy).version
+        };
+        signal.strategy = Some(strategy.as_str().to_owned());
+        signal.strategy_candidate = true;
+        let input = strategy::StrategySignal::entry(&signal, &parameters);
+        let evaluated = strategy::evaluate(strategy, &input);
+        let (decision, reason) = match evaluated {
+            Ok(strategy::StrategyDecision::Enter) => (strategy::LiveStrategyDecision::Enter, None),
+            Ok(strategy::StrategyDecision::Hold) => (strategy::LiveStrategyDecision::Hold, None),
+            Ok(strategy::StrategyDecision::Exit) => (strategy::LiveStrategyDecision::Exit, None),
+            Ok(strategy::StrategyDecision::Rebalance) => {
+                (strategy::LiveStrategyDecision::Rebalance, None)
+            }
+            Ok(strategy::StrategyDecision::Scout | strategy::StrategyDecision::Reject) => (
+                strategy::LiveStrategyDecision::Reject,
+                strategy.entry_rejection_reason(&input),
+            ),
+            Err(error) => (strategy::LiveStrategyDecision::Reject, Some(error)),
+        };
+        let identity = strategy::LiveStrategyEventIdentity::for_thesis(
+            &source_event_id,
+            strategy,
+            &signal.symbol,
+            &profile_id,
+            &signal.direction,
+            None,
+        );
+        let metadata = signal
+            .strategy_decision
+            .get_or_insert_with(|| serde_json::json!({}));
+        let metadata = metadata
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Insights strategy metadata is not an object"))?;
+        metadata.insert(
+            "live_worker_event_id".into(),
+            serde_json::Value::String(identity.event_id.clone()),
+        );
+        metadata.insert(
+            "live_worker_event_identity_version".into(),
+            serde_json::Value::from(identity.schema_version),
+        );
+        metadata.insert(
+            "live_worker_episode_id".into(),
+            serde_json::Value::String(identity.episode_id.clone()),
+        );
+        metadata.insert(
+            "live_worker_episode_reset_generation".into(),
+            serde_json::Value::from(identity.episode_reset_generation),
+        );
+        metadata.insert("strategy_parameters".into(), serde_json::json!(parameters));
+        metadata.insert("learning_profile_id".into(), serde_json::json!(profile_id));
+        metadata.insert(
+            "learning_profile_symbol".into(),
+            serde_json::json!(signal.symbol),
+        );
+        metadata.insert(
+            "learning_profile_version".into(),
+            serde_json::json!(profile_version),
+        );
+        metadata.insert(
+            "live_worker_decision".into(),
+            serde_json::to_value(decision)?
+                .as_str()
+                .map(str::to_owned)
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        let report = strategy::LiveStrategyDecisionReport {
+            contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
+            event_id: identity.event_id.clone(),
+            event_identity_version: identity.schema_version,
+            episode_id: identity.episode_id,
+            strategy,
+            symbol: signal.symbol.clone(),
+            profile_id: profile_id.clone(),
+            profile_version,
+            parameter_hash: profile_id,
+            event_time_ms: signal.timestamp,
+            decision,
+            reason,
+            walk_forward_evidence: None,
+            signal: signal.clone(),
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+        let accepted = self.socket_api.report_decision(report).await;
+        anyhow::ensure!(
+            accepted
+                .as_ref()
+                .is_ok_and(|status| (200..300).contains(status)),
+            "AutoTrader live-decision receiver rejected the evaluated report: {accepted:?}"
+        );
+
+        let observer_event_id = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("live_worker_event_id"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("evaluated signal lost its stable worker event ID"))?
+            .to_owned();
+        let request_count_before = self
+            .pm_requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        // Durable entry intents live in the dedicated intent store at
+        // settings_path; the normalized Settings database is a sibling
+        // settings_path.with_extension("sqlite") file.
+        let database_path = self.settings_path.clone();
+        observe_benchmark_order_ready(observer_event_id.clone(), move |decision_id, ready_at| {
+            let observed_decision_id = decision_id.to_owned();
+            let durable = rusqlite::Connection::open(database_path)
+                .and_then(|connection| {
+                    connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM durable_entry_reservations WHERE decision_id=?1)",
+                        [&observed_decision_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                })
+                .unwrap_or(false);
+            let _ = ready_tx.send((observed_decision_id, ready_at, durable));
+        });
+        let symbol = signal.symbol.clone();
+        let dashboard = Dashboard {
+            best: vec![signal],
+            missed_opportunity_bands: Arc::new(Vec::new()),
+            markets: Arc::new(BTreeMap::from([(symbol, executable_market)])),
+            queued_at: None,
+            queue_wait_ms: None,
+        };
+        let cycle = match run_cycle_inner(&self.state, dashboard).await {
+            Ok(cycle) => cycle,
+            Err((_, message)) => {
+                remove_benchmark_order_ready_observer(&observer_event_id);
+                return Ok(CorrelatedMarketOrderReadySample {
+                    source_event_id,
+                    decision_id: None,
+                    strategy_decision: format!("{decision:?}"),
+                    cycle_status: "cycle_error".into(),
+                    order_ready_ms: None,
+                    durable_reservation_visible_at_hook: None,
+                    transport_followed_order_ready: None,
+                    client_order_identity_present_at_transport: None,
+                    failure: Some(message),
+                });
+            }
+        };
+        let cycle_status = cycle.status.to_owned();
+        if cycle_status != "order_submitting" {
+            remove_benchmark_order_ready_observer(&observer_event_id);
+            return Ok(CorrelatedMarketOrderReadySample {
+                source_event_id,
+                decision_id: None,
+                strategy_decision: format!("{decision:?}"),
+                cycle_status,
+                order_ready_ms: None,
+                durable_reservation_visible_at_hook: None,
+                transport_followed_order_ready: None,
+                client_order_identity_present_at_transport: None,
+                failure: cycle.reason,
+            });
+        }
+        let observation = tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("order-ready hook was not reached within five seconds"))?
+            .map_err(|_| anyhow::anyhow!("order-ready observer was dropped"))?;
+        let transport = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let observed = self
+                    .pm_requests
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(request_count_before)
+                    .cloned();
+                if let Some(observed) = observed {
+                    return observed;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("local PM did not observe the prepared order"))?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let completed = self
+                    .state
+                    .settings
+                    .lock()
+                    .await
+                    .orders
+                    .iter()
+                    .find(|order| order.decision_id.as_deref() == Some(&observation.0))
+                    .is_some_and(|order| order.status != "submitting");
+                if completed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("AutoTrader did not finish applying PM response"))?;
+        Ok(CorrelatedMarketOrderReadySample {
+            source_event_id,
+            decision_id: Some(observation.0),
+            strategy_decision: format!("{decision:?}"),
+            cycle_status,
+            order_ready_ms: Some(
+                observation
+                    .1
+                    .saturating_duration_since(raw_ingress_started)
+                    .as_secs_f64()
+                    * 1_000.0,
+            ),
+            durable_reservation_visible_at_hook: Some(observation.2),
+            transport_followed_order_ready: Some(transport.0 > observation.1),
+            client_order_identity_present_at_transport: Some(
+                transport
+                    .1
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.get("client_order_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+            ),
+            failure: None,
+        })
+    }
+}
+
+#[cfg(feature = "benchmark-support")]
+impl Drop for CorrelatedMarketOrderReadySession {
+    fn drop(&mut self) {
+        self.server.abort();
+        if let Some(endpoint) = self.previous_pm_endpoint.take() {
+            unsafe { std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", endpoint) };
+        } else {
+            unsafe { std::env::remove_var("POSITION_MANAGEMENT_RSOCKET_URL") };
+        }
+        let _ = std::fs::remove_file(&self.settings_path);
+        let database_path = settings_database_path(&self.settings_path);
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(database_path.with_extension("sqlite-shm"));
+        let carry_path = self.settings_path.with_extension("dated-carry.json");
+        let _ = std::fs::remove_file(carry_path);
+    }
+}
+
 /// Per-event latency summary used by the end-to-end benchmark runner. Samples
 /// are recorded before inspecting the operation result, so rejected/error
 /// outcomes remain in the measured population.
@@ -47,9 +519,11 @@ pub struct BenchmarkLatencyDistribution {
 impl BenchmarkLatencyDistribution {
     pub fn from_samples_ms(mut samples: Vec<f64>) -> Self {
         assert!(!samples.is_empty(), "benchmark needs at least one event");
-        assert!(samples
-            .iter()
-            .all(|sample| sample.is_finite() && *sample >= 0.0));
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.is_finite() && *sample >= 0.0)
+        );
         samples.sort_by(f64::total_cmp);
         let percentile = |fraction: f64| {
             let index = ((samples.len() as f64 * fraction).ceil() as usize)
@@ -826,7 +1300,23 @@ fn benchmark_precomputed_ingress_state(workload: &str) -> AutoTraderState {
     let mut settings = Settings::default();
     settings.strategies = vec![strategy];
     settings.signal_strategies_enabled = true;
-    benchmark_fixture_state(settings, workload, 0)
+    let state = benchmark_fixture_state(settings.clone(), workload, 0);
+    persist_settings(&state.settings_path, &settings)
+        .expect("benchmark startup must durably initialize Settings and intent schema");
+    let connection = rusqlite::Connection::open(&state.settings_path)
+        .expect("benchmark startup database must open after initialization");
+    let reservation_schema_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_entry_reservations')",
+            [],
+            |row| row.get(0),
+        )
+        .expect("benchmark startup schema lookup must succeed");
+    assert!(
+        reservation_schema_exists,
+        "durable intent schema must exist before the first measured reservation"
+    );
+    state
 }
 
 fn benchmark_precomputed_ingress_dashboard(index: usize, symbol: &str) -> Dashboard {
@@ -913,8 +1403,8 @@ pub async fn run_local_production_path_benchmarks(
     use rsocket_rust::prelude::*;
     use rsocket_rust_transport_websocket::WebsocketServerTransport;
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
     };
 
     #[derive(Clone)]
@@ -1371,6 +1861,27 @@ mod benchmark_measurement_tests {
     use super::*;
 
     #[test]
+    fn measured_ingress_fixture_preinitializes_intent_schema_before_first_order() {
+        let state = benchmark_precomputed_ingress_state("startup-schema-test");
+        let connection = rusqlite::Connection::open(&state.settings_path)
+            .expect("benchmark settings store must open after production startup persistence");
+        let reservation_schema_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_entry_reservations')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("durable reservation table lookup must succeed");
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("WAL journal mode must be readable");
+        assert!(reservation_schema_exists);
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        drop(connection);
+        cleanup_benchmark_fixture_files("startup-schema-test", 1);
+    }
+
+    #[test]
     fn percentile_summary_uses_nearest_rank_and_preserves_every_sample() {
         let distribution = BenchmarkLatencyDistribution::from_samples_ms(
             (1..=1000).rev().map(f64::from).collect(),
@@ -1390,9 +1901,11 @@ mod benchmark_measurement_tests {
             AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[1]
         );
         assert!(AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE.starts_with("unaccepted_"));
-        assert!(AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES
-            .iter()
-            .any(|boundary| boundary.contains("raw market event ingress")));
+        assert!(
+            AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES
+                .iter()
+                .any(|boundary| boundary.contains("raw market event ingress"))
+        );
     }
 
     #[test]
@@ -1483,16 +1996,22 @@ mod benchmark_measurement_tests {
                 AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE
             );
             assert!(record.execution_runtime_flavor.contains("MultiThread"));
-            assert!(record
-                .measurement_scope
-                .contains("local Position Management RSocket double"));
-            assert!(record
-                .measurement_scope
-                .contains("one shared AutoTraderState"));
-            assert!(record
-                .unsupported_boundaries
-                .iter()
-                .any(|boundary| { boundary.contains("raw market event ingress") }));
+            assert!(
+                record
+                    .measurement_scope
+                    .contains("local Position Management RSocket double")
+            );
+            assert!(
+                record
+                    .measurement_scope
+                    .contains("one shared AutoTraderState")
+            );
+            assert!(
+                record
+                    .unsupported_boundaries
+                    .iter()
+                    .any(|boundary| { boundary.contains("raw market event ingress") })
+            );
             assert_eq!(record.event_count, EVENT_COUNT);
             assert!(record.successful_events <= EVENT_COUNT);
             assert!(record.submitted_order_events <= EVENT_COUNT);
@@ -1554,6 +2073,30 @@ mod benchmark_measurement_tests {
                     );
                 }
             }
+            if record.workload_id.contains("multithread-sustained") {
+                // Persistence sub-stages must retain their own sample counts;
+                // none may be synthesized from the order/event population.
+                for stage in [
+                    "entry_intent_batch_size",
+                    "entry_intent_writer_lock_wait",
+                    "entry_intent_serialization",
+                    "entry_intent_directory_prepare",
+                    "entry_intent_connection_open",
+                    "entry_intent_schema_setup",
+                    "entry_intent_sqlite_lock_wait",
+                    "entry_intent_sql_prepare",
+                    "entry_intent_sql_execute",
+                    "entry_intent_durable_commit",
+                    "entry_intent_sqlite_write_total",
+                ] {
+                    let distribution = record
+                        .measurements
+                        .iter()
+                        .find(|(name, _)| name.ends_with(&format!(".settings_persistence.{stage}")))
+                        .unwrap_or_else(|| panic!("missing persistence timing stage {stage}"));
+                    assert!(distribution.1.sample_count > 0, "{stage}");
+                }
+            }
             if burst {
                 assert_eq!(record.concurrent_events, Some(EVENT_COUNT));
                 if record.workload_id.contains("ingress-burst")
@@ -1594,9 +2137,11 @@ mod benchmark_measurement_tests {
             } else {
                 assert!(record.response_timing_sample_count <= EVENT_COUNT);
             }
-            assert!(record
-                .measurements
-                .contains_key(&format!("{}.event_latency", record.workload_id)));
+            assert!(
+                record
+                    .measurements
+                    .contains_key(&format!("{}.event_latency", record.workload_id))
+            );
             let encoded = serde_json::to_vec(&record).expect("evidence must be machine-readable");
             let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(

@@ -1,6 +1,6 @@
 //! Paired, fee-aware candidate/baseline observations for Scout replay.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
@@ -360,7 +360,7 @@ fn build_pm_portfolio_cash_periods(
         if cash_period_emitted {
             let start = interval["interval_start_utc_ms"].as_u64().unwrap();
             let end = interval["interval_end_utc_ms"].as_u64().unwrap();
-            cash_periods.push(json!({
+            let mut cash_period = json!({
                 "source": "position_management_portfolio_evidence_intervals_v1",
                 "evidence_id": interval["evidence_id"],
                 "portfolio_id": interval["portfolio_id"],
@@ -381,9 +381,6 @@ fn build_pm_portfolio_cash_periods(
                 "opening_cash_currency": interval["opening_cash_currency"],
                 "known_symbols": interval["known_symbols"],
                 "explicit_flat_symbols": interval["explicit_flat_symbols"],
-                "cash_balances_by_currency": interval["cash_balances_by_currency"],
-                "cash_movements_by_currency": interval["cash_movements_by_currency"],
-                "cashflow_since_origin_by_currency": interval["cashflow_since_origin_by_currency"],
                 "known_fee_fills": interval["known_fee_fills"],
                 "unknown_fee_fills": interval["unknown_fee_fills"],
                 "unknown_cashflow_fills": interval["unknown_cashflow_fills"],
@@ -394,9 +391,37 @@ fn build_pm_portfolio_cash_periods(
                 "independent_execution_ledger_reconciled": false,
                 "quantitative_eligibility": "blocked_pending_independent_reconciliation",
                 "return_percent": null,
-                "return_value_status": "not_computed_cash_contributions_not_separated",
-                "raw_interval": interval,
-            }));
+                "return_value_status": "not_computed_by_learning_pm_source_values_unreconciled",
+            });
+            let source_financial_evidence = json!({
+                "opening_cash_balances_by_currency": interval["opening_cash_balances_by_currency"],
+                "opening_cash_value_usd_by_currency": interval["opening_cash_value_usd_by_currency"],
+                "opening_cash_total_usd": interval["opening_cash_total_usd"],
+                "opening_fx_rates_usd_by_currency": interval["opening_fx_rates_usd_by_currency"],
+                "opening_fx_rates_updated_at_by_currency": interval["opening_fx_rates_updated_at_by_currency"],
+                "symbol_coverage_scope": interval["symbol_coverage_scope"],
+                "all_symbols_covered": interval["all_symbols_covered"],
+                "cash_balances_by_currency": interval["cash_balances_by_currency"],
+                "cash_movements_by_currency": interval["cash_movements_by_currency"],
+                "cashflow_since_origin_by_currency": interval["cashflow_since_origin_by_currency"],
+                "external_contributions_by_currency": interval["external_contributions_by_currency"],
+                "external_contribution_events": interval["external_contribution_events"],
+                "closing_cash_value_usd_by_currency": interval["closing_cash_value_usd_by_currency"],
+                "closing_fx_rates_usd_by_currency": interval["closing_fx_rates_usd_by_currency"],
+                "closing_fx_rates_updated_at_by_currency": interval["closing_fx_rates_updated_at_by_currency"],
+                "closing_cash_total_usd": interval["closing_cash_total_usd"],
+                "portfolio_return_complete": interval["portfolio_return_complete"],
+                "portfolio_return_completeness_reasons": interval["portfolio_return_completeness_reasons"],
+                "portfolio_return_scope": interval["portfolio_return_scope"],
+                "pm_reported_flat_cash_period_net_pnl_usd": interval["flat_cash_period_net_pnl_usd"],
+                "pm_reported_flat_cash_period_return_pct": interval["flat_cash_period_return_pct"],
+            });
+            cash_period
+                .as_object_mut()
+                .unwrap()
+                .extend(source_financial_evidence.as_object().unwrap().clone());
+            cash_period["raw_interval"] = interval.clone();
+            cash_periods.push(cash_period);
         }
         previous = Some(interval);
     }
@@ -861,6 +886,11 @@ mod tests {
             "is_baseline": baseline,
             "opening_cash_amount": 10_000.0,
             "opening_cash_currency": "USD",
+            "opening_cash_balances_by_currency": {"USD": 10_000.0, "USDT": 1.0},
+            "opening_cash_value_usd_by_currency": {"USD": 10_000.0, "USDT": 1.0},
+            "opening_cash_total_usd": 10_001.0,
+            "opening_fx_rates_usd_by_currency": {"USD": 1.0, "USDT": 1.0},
+            "opening_fx_rates_updated_at_by_currency": {"USD": start_ms, "USDT": start_ms},
             "known_symbols": ["BTC-USDT"],
             "positions": [{"symbol":"BTC-USDT","quantity":0.0}],
             "explicit_flat_symbols": ["BTC-USDT"],
@@ -871,6 +901,17 @@ mod tests {
             "cashflow_since_origin_by_currency": {"USD": 25.0, "USDT": -0.1},
             "cash_balances_by_currency": {"USD": 10_025.0, "USDT": 0.9},
             "cash_movements_by_currency": {"USD": 25.0, "USDT": -0.1},
+            "external_contributions_by_currency": {"USD": 25.0},
+            "external_contribution_events": [{"contribution_id":"pm-topup:v1:0","source":"position_manager_account_topup_ledger","source_cursor":0,"timestamp_utc_ms":end_ms,"currency":"USD","amount":25.0,"value_usd":25.0}],
+            "closing_cash_value_usd_by_currency": {"USD": 10_025.0, "USDT": 0.9},
+            "closing_fx_rates_usd_by_currency": {"USD": 1.0, "USDT": 1.0},
+            "closing_fx_rates_updated_at_by_currency": {"USD": end_ms, "USDT": end_ms},
+            "closing_cash_total_usd": 10_025.9,
+            "portfolio_return_complete": true,
+            "portfolio_return_completeness_reasons": [],
+            "flat_cash_period_net_pnl_usd": -0.1,
+            "flat_cash_period_return_pct": -0.000999900009999,
+            "portfolio_return_scope": "pm_internal_flat_cash_only",
             "unknown_cashflow_fills": 0,
             "known_fee_fills": 2,
             "unknown_fee_fills": 0,
@@ -976,6 +1017,54 @@ mod tests {
         );
         assert_eq!(cash_period["cash_movements_by_currency"]["USD"], 25.0);
         assert_eq!(cash_period["cash_movements_by_currency"]["USDT"], -0.1);
+        assert_eq!(
+            cash_period["opening_cash_balances_by_currency"]["USDT"],
+            1.0
+        );
+        assert_eq!(
+            cash_period["opening_cash_value_usd_by_currency"]["USDT"],
+            1.0
+        );
+        assert_eq!(cash_period["opening_cash_total_usd"], 10_001.0);
+        assert_eq!(cash_period["opening_fx_rates_usd_by_currency"]["USDT"], 1.0);
+        assert_eq!(
+            cash_period["opening_fx_rates_updated_at_by_currency"]["USDT"],
+            1_000
+        );
+        assert_eq!(
+            cash_period["external_contributions_by_currency"]["USD"],
+            25.0
+        );
+        assert_eq!(
+            cash_period["external_contribution_events"][0]["contribution_id"],
+            "pm-topup:v1:0"
+        );
+        assert_eq!(
+            cash_period["closing_cash_value_usd_by_currency"]["USDT"],
+            0.9
+        );
+        assert_eq!(
+            cash_period["closing_fx_rates_updated_at_by_currency"]["USDT"],
+            2_000
+        );
+        assert_eq!(cash_period["closing_cash_total_usd"], 10_025.9);
+        assert_eq!(cash_period["portfolio_return_complete"], true);
+        assert_eq!(
+            cash_period["portfolio_return_completeness_reasons"],
+            json!([])
+        );
+        assert_eq!(
+            cash_period["portfolio_return_scope"],
+            "pm_internal_flat_cash_only"
+        );
+        assert_eq!(
+            cash_period["pm_reported_flat_cash_period_net_pnl_usd"],
+            -0.1
+        );
+        assert_eq!(
+            cash_period["pm_reported_flat_cash_period_return_pct"],
+            -0.000999900009999
+        );
         assert_eq!(cash_period["ledger_epoch"], "epoch-1");
         assert_eq!(cash_period["fill_cursor_start"], 0);
         assert_eq!(cash_period["fill_cursor_end"], 0);
@@ -984,6 +1073,10 @@ mod tests {
         assert_eq!(cash_period["known_fee_fills"], 2);
         assert_eq!(cash_period["provenance"].as_array().unwrap().len(), 2);
         assert_eq!(cash_period["return_percent"], Value::Null);
+        assert_eq!(
+            cash_period["return_value_status"],
+            "not_computed_by_learning_pm_source_values_unreconciled"
+        );
         assert_eq!(
             cash_period["independent_execution_ledger_reconciled"],
             false
@@ -1057,6 +1150,48 @@ mod tests {
                 "portfolio_interval_source_not_complete"
             );
         }
+    }
+
+    #[test]
+    fn pm_bridge_preserves_return_completeness_reasons_without_computing_returns() {
+        let mut interval = pm_interval("period-no-fx", 1_000, 2_000, 0, 1, 0, 1, false);
+        interval["portfolio_return_complete"] = json!(false);
+        interval["portfolio_return_completeness_reasons"] =
+            json!(["closing_timestamp_aligned_fx_valuation_incomplete"]);
+        interval["closing_cash_value_usd_by_currency"] = Value::Null;
+        interval["closing_cash_total_usd"] = Value::Null;
+        interval["flat_cash_period_net_pnl_usd"] = Value::Null;
+        interval["flat_cash_period_return_pct"] = Value::Null;
+        let response = json!({
+            "schema_version":1,
+            "coverage":"pm_internal_complete",
+            "truncated":false,
+            "next_cursor":1,
+            "intervals":[interval]
+        });
+
+        let (periods, _) =
+            build_pm_portfolio_cash_periods(&response, response["intervals"].as_array().unwrap());
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0]["portfolio_return_complete"], false);
+        assert_eq!(
+            periods[0]["portfolio_return_completeness_reasons"][0],
+            "closing_timestamp_aligned_fx_valuation_incomplete"
+        );
+        assert_eq!(
+            periods[0]["pm_reported_flat_cash_period_net_pnl_usd"],
+            Value::Null
+        );
+        assert_eq!(
+            periods[0]["pm_reported_flat_cash_period_return_pct"],
+            Value::Null
+        );
+        assert_eq!(periods[0]["return_percent"], Value::Null);
+        assert_eq!(
+            periods[0]["return_value_status"],
+            "not_computed_by_learning_pm_source_values_unreconciled"
+        );
     }
 
     #[test]

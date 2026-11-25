@@ -81,6 +81,7 @@ async fn submit_position_exit_order(
     let side = if is_long { "sell" } else { "buy" };
     let quantity = position.quantity.abs();
     let notional = quantity * (bid + (ask - bid) * 0.5);
+    let exit_client_order_id = timestamp.to_string();
     let submit_started = Instant::now();
     let response = match submit_configured_order(
         &symbol,
@@ -95,7 +96,7 @@ async fn submit_position_exit_order(
             AutoOrderType::Ioc
         },
         ExecutionParameters::default(),
-        timestamp.to_string(),
+        exit_client_order_id.clone(),
         true,
         lifecycle_identity.as_ref(),
     )
@@ -116,6 +117,14 @@ async fn submit_position_exit_order(
         }
     };
     let submit_response_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
+    let expected_client_order_id = Some(exit_client_order_id.as_str());
+    let exit_fill_evidence =
+        exit_fill_lineage_evidence(&response, expected_client_order_id, &symbol, side);
+    let exit_fill_contract_complete = exit_fill_evidence["complete"].as_bool() == Some(true);
+    let canonical_lifecycle_identity = position
+        .lifecycle_identity
+        .as_ref()
+        .or(lifecycle_identity.as_ref());
     let mut settings = state.settings.lock().await;
     let filled = response["filled_quantity"].as_f64().unwrap_or(0.0);
     let average_price = response["average_execution_price"].as_f64();
@@ -147,6 +156,7 @@ async fn submit_position_exit_order(
     let mut strategy_realized_pnl = 0.0;
     let mut trade_feedback_enqueued = false;
     let mut post_stop_cooldown_started = false;
+    let mut authoritative_outcome_lineage_complete = false;
     if filled > 0.0 {
         if let Some(price) = average_price {
             let Settings {
@@ -223,41 +233,63 @@ async fn submit_position_exit_order(
             };
             let fees_usd = realized_usd(&settings, &symbol, total_fees);
             let strategy_realized_usd = realized_usd(&settings, &symbol, total_trade_pnl);
-            let replay_context = average_price.and_then(|exit_price| {
-                let trade_key = position.trade_id.as_deref()?;
-                let context = build_trade_replay_context(
-                    &symbol,
-                    position.entry_timestamp_ms,
-                    current_time_ms(),
-                    if position.quantity > 0.0 {
-                        "long"
-                    } else {
-                        "short"
-                    },
-                    position.average_entry_price,
-                    exit_price,
-                    position.quantity.abs(),
-                    position.total_entry_fees_paid.max(position.entry_fees),
-                    fee,
-                    entry_walk_forward_evidence(position.strategy_decision.as_ref()),
-                )?;
-                Some(attach_authoritative_outcome_lineage(
-                    context,
-                    &position,
-                    &response,
-                    position
-                        .lifecycle_identity
-                        .as_ref()
-                        .or(lifecycle_identity.as_ref()),
-                    trade_key,
-                ))
-            });
+            let replay_context = exit_fill_contract_complete
+                .then_some(())
+                .and_then(|_| average_price)
+                .and_then(|exit_price| {
+                    let trade_key = position.trade_id.as_deref()?;
+                    let context = build_trade_replay_context(
+                        &symbol,
+                        position.entry_timestamp_ms,
+                        current_time_ms(),
+                        if position.quantity > 0.0 {
+                            "long"
+                        } else {
+                            "short"
+                        },
+                        position.average_entry_price,
+                        exit_price,
+                        position.quantity.abs(),
+                        position.total_entry_fees_paid.max(position.entry_fees),
+                        fee,
+                        entry_walk_forward_evidence(position.strategy_decision.as_ref()),
+                    )?;
+                    Some(attach_authoritative_outcome_lineage(
+                        context,
+                        &position,
+                        &response,
+                        canonical_lifecycle_identity,
+                        trade_key,
+                    ))
+                });
+            authoritative_outcome_lineage_complete =
+                canonical_lifecycle_identity.is_some_and(|identity| {
+                    let Some(trade_id) = position.trade_id.as_deref() else {
+                        return false;
+                    };
+                    exit_fill_contract_complete
+                        && authoritative_outcome_lineage_is_complete(
+                            identity,
+                            replay_context.as_ref(),
+                            &format!("trade:{trade_id}"),
+                        )
+                });
+            let mut closed_audit =
+                closed_trade_audit_for_position(&position, &symbol, replay_context.as_ref());
+            if !authoritative_outcome_lineage_complete {
+                closed_audit.status = ClosedTradeAuditStatus::NeedsAudit;
+                closed_audit.reason = Some(if !exit_fill_contract_complete {
+                    "exit_fill_evidence_incomplete_or_mismatched".into()
+                } else {
+                    "canonical_exit_outcome_lineage_incomplete".into()
+                });
+            }
             record_closed_trade_outcome(
                 &mut settings,
                 total_trade_pnl / entry_notional * 100.0,
                 strategy_realized_usd,
                 fees_usd,
-                closed_trade_audit_for_position(&position, &symbol),
+                closed_audit,
             );
             trade_feedback_enqueued = record_strategy_trade_outcome(
                 &mut settings,
@@ -341,6 +373,8 @@ async fn submit_position_exit_order(
                 "Ioc"
             },
             &response,
+            Some(&exit_client_order_id),
+            canonical_lifecycle_identity,
             &position,
             quantity,
             filled,
@@ -356,6 +390,13 @@ async fn submit_position_exit_order(
             take_profit_percent,
             &exit_decision_context,
         );
+        payload["authoritative_outcome_lineage_complete"] =
+            serde_json::json!(authoritative_outcome_lineage_complete);
+        if payload["trade_closed"].as_bool() == Some(true)
+            && !authoritative_outcome_lineage_complete
+        {
+            payload["lineage_status"] = serde_json::json!("NeedsAudit");
+        }
         if payload["trade_closed"].as_bool() == Some(true) {
             let mut settings = state.settings.lock().await;
             queue_post_exit_observation(&mut settings, &payload);

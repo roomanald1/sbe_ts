@@ -1841,15 +1841,18 @@ async fn run_cycle_inner(
                             .rejected_candidate_count
                             .saturating_add(1);
                         details.push(format!("{strategy_name}: request error {status}: {error}"));
-                        queue_strategy_rejection_audit(
+                        queue_auto_trader_audit(
                             state,
-                            &sized_signal,
-                            strategy_name,
-                            &reason,
-                            now.saturating_mul(1_000),
-                            counterfactual_stop_loss_percent,
-                            counterfactual_take_profit_percent,
-                            "daily_execution",
+                            daily_execution_blocker_audit_payload(
+                                &sized_signal,
+                                strategy_name,
+                                &reason,
+                                "request_failed",
+                                now.saturating_mul(1_000),
+                                counterfactual_stop_loss_percent,
+                                counterfactual_take_profit_percent,
+                                exploratory,
+                            ),
                         );
                         continue;
                     }
@@ -1881,15 +1884,18 @@ async fn run_cycle_inner(
                         .saturating_add(1);
                     let reason = result.reason.as_deref().unwrap_or(result.status);
                     details.push(format!("{strategy_name}: {reason}"));
-                    queue_strategy_rejection_audit(
+                    queue_auto_trader_audit(
                         state,
-                        &sized_signal,
-                        strategy_name,
-                        reason,
-                        now.saturating_mul(1_000),
-                        counterfactual_stop_loss_percent,
-                        counterfactual_take_profit_percent,
-                        "daily_execution",
+                        daily_execution_blocker_audit_payload(
+                            &sized_signal,
+                            strategy_name,
+                            reason,
+                            result.status,
+                            now.saturating_mul(1_000),
+                            counterfactual_stop_loss_percent,
+                            counterfactual_take_profit_percent,
+                            exploratory,
+                        ),
                     );
                 }
             }
@@ -2496,6 +2502,62 @@ mod parallel_daily_cycle_tests {
             audit["decision_id"],
             "10|ETH-USDT|bullish|strategy:live-order-book|phase:final_entry|audit:11000"
         );
+    }
+
+    #[test]
+    fn daily_execution_blocker_audit_preserves_selection_and_actual_order_path() {
+        let mut candidate = signal("live-momentum");
+        candidate.entry_gate = Some(serde_json::json!({
+            "selection_mode": "daily_strategy",
+            "exploratory": false,
+            "checks": {
+                "strategy_walk_forward_evidence_present": false,
+                "cold_start_exploration_pass": false
+            }
+        }));
+        let reason = "walk_forward_evidence unavailable during daily execution";
+
+        let audit = daily_execution_blocker_audit_payload(
+            &candidate,
+            "live-momentum",
+            reason,
+            "skipped",
+            11_000,
+            0.5,
+            0.8,
+            false,
+        );
+
+        assert_eq!(audit["stage"], "strategy_rejection");
+        assert_eq!(audit["status"], "rejected");
+        assert_eq!(audit["exploratory"], false);
+        assert_eq!(audit["actual_order_path_status"], "skipped");
+        assert_eq!(
+            audit["decision_id"],
+            "10|ETH-USDT|bullish|strategy:live-momentum|phase:daily_execution|audit:11000"
+        );
+        assert_eq!(
+            audit["entry_gate"]["selection_mode"],
+            "daily_strategy"
+        );
+        assert_eq!(audit["entry_gate"]["execution_result_status"], "skipped");
+        assert_eq!(audit["entry_gate"]["rejection_reasons"][0], reason);
+        assert_eq!(
+            audit["execution_gate"]["gate_id"],
+            "daily_strategy_execution"
+        );
+        assert_eq!(audit["execution_gate"]["result_status"], "skipped");
+        assert_eq!(audit["execution_gate"]["order_submitted"], false);
+        assert_eq!(audit["gate_path"][0]["stage"], "candidate_selection");
+        assert_eq!(
+            audit["gate_path"][0]["selection_mode"],
+            "daily_strategy"
+        );
+        assert_eq!(audit["gate_path"][0]["status"], "selected");
+        assert_eq!(audit["gate_path"][1]["stage"], "execution");
+        assert_eq!(audit["gate_path"][1]["status"], "blocked");
+        assert_eq!(audit["gate_path"][1]["result_status"], "skipped");
+        assert_eq!(audit["gate_path"][1]["reason"], reason);
     }
 
     #[test]

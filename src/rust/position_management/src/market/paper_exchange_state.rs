@@ -11,9 +11,38 @@ struct MarketMark {
 struct MatcherFill {
     quantity: f64,
     price: f64,
+    #[serde(default)]
+    source_execution_id: Option<String>,
+    #[serde(default)]
+    source_cursor: Option<u64>,
+    #[serde(default)]
+    source_cursor_kind: Option<String>,
+    #[serde(default)]
+    recorded_at_utc_ms: Option<u64>,
+    #[serde(skip)]
+    source_price: Option<f64>,
+    /// Original quantity returned by Paper Exchange before PM applies a cap.
+    #[serde(skip)]
+    source_quantity: Option<f64>,
 }
 #[derive(Clone, Deserialize)]
 struct MatcherResponse {
+    #[serde(default)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    capture_complete: Option<bool>,
+    #[serde(default)]
+    order_id: Option<String>,
+    #[serde(default)]
+    request_fingerprint: Option<String>,
+    #[serde(default)]
+    recorded_at_utc_ms: Option<u64>,
+    #[serde(default)]
+    source_cursor: Option<u64>,
+    #[serde(default)]
+    source_cursor_kind: Option<String>,
+    #[serde(default)]
+    source_epoch: Option<String>,
     reference_price: Option<f64>,
     best_bid: Option<f64>,
     best_ask: Option<f64>,
@@ -23,6 +52,21 @@ struct MatcherResponse {
     remaining_quantity: f64,
     filled_quantity: f64,
     average_execution_price: Option<f64>,
+    /// Kept separately because PM may clip a match for reduce-only safety.
+    #[serde(skip)]
+    source_reported_filled_quantity: Option<f64>,
+}
+
+#[derive(Clone, Default)]
+struct PaperExchangeFillEvidence {
+    schema_version: Option<String>,
+    source_epoch: Option<String>,
+    source_cursor: Option<u64>,
+    request_fingerprint: Option<String>,
+    execution_id: Option<String>,
+    source_quantity: Option<f64>,
+    source_price: Option<f64>,
+    complete: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

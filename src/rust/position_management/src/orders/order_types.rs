@@ -87,6 +87,23 @@ struct PositionTrade {
     /// historical rows; never inferred from the legacy row/order IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fill_id: Option<String>,
+    /// Additive match evidence from Paper Exchange; this is not a settled-fill claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_schema_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_source_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_source_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_request_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_source_quantity: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_source_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_source_complete: Option<bool>,
     symbol: String,
     side: TradeSide,
     quantity: f64,
@@ -134,6 +151,22 @@ struct PositionTradeWire {
     id: String,
     #[serde(default)]
     fill_id: Option<String>,
+    #[serde(default)]
+    paper_exchange_schema_version: Option<String>,
+    #[serde(default)]
+    paper_exchange_source_epoch: Option<String>,
+    #[serde(default)]
+    paper_exchange_source_cursor: Option<u64>,
+    #[serde(default)]
+    paper_exchange_request_fingerprint: Option<String>,
+    #[serde(default)]
+    paper_exchange_execution_id: Option<String>,
+    #[serde(default)]
+    paper_exchange_source_quantity: Option<f64>,
+    #[serde(default)]
+    paper_exchange_source_price: Option<f64>,
+    #[serde(default)]
+    paper_exchange_source_complete: Option<bool>,
     symbol: String,
     side: TradeSide,
     quantity: f64,
@@ -187,6 +220,14 @@ impl<'de> Deserialize<'de> for PositionTrade {
         Ok(Self {
             id: wire.id,
             fill_id: wire.fill_id,
+            paper_exchange_schema_version: wire.paper_exchange_schema_version,
+            paper_exchange_source_epoch: wire.paper_exchange_source_epoch,
+            paper_exchange_source_cursor: wire.paper_exchange_source_cursor,
+            paper_exchange_request_fingerprint: wire.paper_exchange_request_fingerprint,
+            paper_exchange_execution_id: wire.paper_exchange_execution_id,
+            paper_exchange_source_quantity: wire.paper_exchange_source_quantity,
+            paper_exchange_source_price: wire.paper_exchange_source_price,
+            paper_exchange_source_complete: wire.paper_exchange_source_complete,
             symbol: wire.symbol,
             side: wire.side,
             quantity: wire.quantity,
@@ -334,6 +375,48 @@ mod position_trade_fee_migration_tests {
             serde_json::to_value(actual).unwrap()["fill_id"],
             "pm-fill:v1:epoch:2"
         );
+    }
+
+    #[test]
+    fn paper_exchange_match_evidence_round_trips_and_legacy_rows_stay_absent() {
+        let legacy: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id":"legacy", "symbol":"BTC-USDT", "side":"buy", "quantity":0.5,
+            "execution_price":100.0, "timestamp":7
+        }))
+        .unwrap();
+        assert_eq!(legacy.paper_exchange_schema_version, None);
+        assert_eq!(legacy.paper_exchange_source_complete, None);
+        let legacy_json = serde_json::to_value(legacy).unwrap();
+        assert!(legacy_json.get("paper_exchange_execution_id").is_none());
+
+        let trade: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id":"fill-2", "symbol":"BTC-USDT", "side":"sell", "quantity":0.25,
+            "execution_price":110.0, "timestamp":8,
+            "paper_exchange_schema_version":"paper_exchange_match:v1",
+            "paper_exchange_source_epoch":"epoch-4",
+            "paper_exchange_source_cursor":18,
+            "paper_exchange_request_fingerprint":"sha256:req-2",
+            "paper_exchange_execution_id":"pe-exec-42",
+            "paper_exchange_source_quantity":0.5,
+            "paper_exchange_source_price":111.0,
+            "paper_exchange_source_complete":false
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&trade).unwrap();
+        assert_eq!(
+            serialized["paper_exchange_schema_version"],
+            "paper_exchange_match:v1"
+        );
+        assert_eq!(serialized["paper_exchange_source_epoch"], "epoch-4");
+        assert_eq!(serialized["paper_exchange_source_cursor"], 18);
+        assert_eq!(
+            serialized["paper_exchange_request_fingerprint"],
+            "sha256:req-2"
+        );
+        assert_eq!(serialized["paper_exchange_execution_id"], "pe-exec-42");
+        assert_eq!(serialized["paper_exchange_source_quantity"], 0.5);
+        assert_eq!(serialized["paper_exchange_source_price"], 111.0);
+        assert_eq!(serialized["paper_exchange_source_complete"], false);
     }
 
     #[test]

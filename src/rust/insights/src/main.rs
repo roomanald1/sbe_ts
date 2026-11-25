@@ -7,15 +7,15 @@ mod logging;
 #[path = "feeds/rolling_volatility.rs"]
 mod rolling_volatility;
 use anyhow::Result;
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::{
     daily_summary, latency,
     signals::{
-        ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
-        SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,
+        ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, ScoutPathSample,
+        SignalEngine, SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,
     },
 };
 use rsocket_rust::prelude::*;
@@ -25,13 +25,13 @@ use std::{
     collections::{BTreeMap, HashMap},
     pin::Pin,
     sync::{
-        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Mutex, Notify, Semaphore, broadcast, watch},
+    sync::{broadcast, watch, Mutex, Notify, Semaphore},
     time::{Duration, Instant},
 };
 
@@ -80,6 +80,11 @@ struct CachedMarket {
 }
 
 struct SignalRuntime {
+    /// Wall-clock epoch when this process began collecting feed events. Scout
+    /// registrations older than this boundary cannot have continuous local
+    /// path coverage, even when they are replayed after restart.
+    signal_process_started_at_ms: u64,
+    signal_store: Option<SignalStore>,
     active_symbols: DashMap<String, AtomicU64>,
     symbol_admission_gate: Mutex<()>,
     max_active_symbols: usize,
@@ -258,6 +263,10 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn process_epoch_id(process_id: u32, started_at_ms: u64) -> String {
+    format!("{process_id}:{started_at_ms}")
+}
+
 fn signal_diagnostic_due(runtime: &SignalRuntime, symbol: &str, timestamp: u64) -> bool {
     let mut last = runtime
         .snapshot_diagnostic_at
@@ -378,6 +387,12 @@ mod active_symbol_tests {
     use super::*;
 
     #[test]
+    fn process_epoch_changes_when_the_service_process_changes() {
+        assert_ne!(process_epoch_id(41, 1_000), process_epoch_id(42, 1_000));
+        assert_ne!(process_epoch_id(41, 1_000), process_epoch_id(41, 1_001));
+    }
+
+    #[test]
     fn default_symbol_and_news_state_caps_cover_feed_universe_with_bounded_headroom() {
         assert_eq!(DEFAULT_MAX_ACTIVE_SYMBOLS, 256);
         assert_eq!(NEWS_PENDING_MAX_COUNT, 8_192);
@@ -406,11 +421,9 @@ mod active_symbol_tests {
     #[test]
     fn refreshes_existing_symbol_and_news_pending_is_age_bounded() {
         let mut active = HashMap::from([("BTC-USDT".to_owned(), 1)]);
-        assert!(
-            admit_symbol(&mut active, "BTC-USDT", 100, 1, 10)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(admit_symbol(&mut active, "BTC-USDT", 100, 1, 10)
+            .unwrap()
+            .is_empty());
         assert_eq!(active.get("BTC-USDT"), Some(&100));
 
         let mut learning = NewsLearning::default();

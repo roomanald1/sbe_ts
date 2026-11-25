@@ -90,16 +90,30 @@ fn record_closed_trade_outcome(
 fn closed_trade_audit_for_position(
     position: &TraderPosition,
     symbol: &str,
+    replay_context: Option<&strategy::TradeReplayContext>,
 ) -> ClosedTradeAuditRecord {
-    let needs_audit = position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT
-        || position.trade_id.as_deref().is_none_or(str::is_empty);
+    let identity = position.lifecycle_identity.as_ref();
+    let lineage_required = position.exploratory
+        || position.scout_entry
+        || identity.is_some_and(|identity| identity.entry_policy == "exploratory");
+    let lineage_complete = identity.is_some_and(|identity| {
+        replay_context.is_some()
+            && authoritative_outcome_lineage_is_complete(
+                identity,
+                replay_context,
+                &format!("trade:{}", position.trade_id.as_deref().unwrap_or_default()),
+            )
+    });
     let reason = if position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT {
         Some("unattributed_position_manager_reconciliation")
     } else if position.trade_id.as_deref().is_none_or(str::is_empty) {
         Some("missing_stable_trade_identity")
+    } else if lineage_required && !lineage_complete {
+        Some("exploratory_outcome_lineage_incomplete")
     } else {
         None
     };
+    let needs_audit = reason.is_some();
     ClosedTradeAuditRecord {
         status: if needs_audit {
             ClosedTradeAuditStatus::NeedsAudit
@@ -110,6 +124,56 @@ fn closed_trade_audit_for_position(
         symbol: Some(symbol.to_owned()),
         trade_id: position.trade_id.clone(),
     }
+}
+
+fn authoritative_outcome_lineage_is_complete(
+    identity: &CanonicalLifecycleIdentity,
+    replay_context: Option<&strategy::TradeReplayContext>,
+    event_id: &str,
+) -> bool {
+    if identity.schema_version < 1 {
+        return false;
+    }
+    let Some(lineage) = replay_context.and_then(|context| context.lineage.as_ref()) else {
+        return false;
+    };
+    let nonempty = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    lineage.outcome_event_id == event_id
+        && nonempty(&lineage.source_event_id)
+        && lineage.source_event_id != lineage.episode_id
+        && nonempty(&lineage.episode_id)
+        && lineage.episode_id.as_deref() == Some(identity.episode_id.as_str())
+        && nonempty(&lineage.opportunity_id)
+        && lineage.opportunity_id.as_deref() == Some(identity.opportunity_id.as_str())
+        && nonempty(&lineage.trade_id)
+        && lineage.trade_id.as_deref() == Some(identity.trade_id.as_str())
+        && nonempty(&lineage.profile_hash)
+        && lineage.profile_hash == identity.profile_hash
+        && lineage.profile_version == identity.profile_version
+        && lineage.profile_version.is_some()
+        && nonempty(&lineage.execution_mode)
+        && lineage.execution_mode.as_deref() == Some(identity.execution_mode.as_str())
+        && nonempty(&lineage.entry_policy)
+        && lineage.entry_policy.as_deref() == Some(identity.entry_policy.as_str())
+        && nonempty(&lineage.source)
+        && lineage.source.as_deref() == Some(identity.source.as_str())
+        && !lineage.entry_fill_ids.is_empty()
+        && !lineage.exit_fill_ids.is_empty()
+        && lineage
+            .entry_fill_ids
+            .iter()
+            .chain(&lineage.exit_fill_ids)
+            .all(|id| !id.trim().is_empty())
+        && lineage
+            .entry_fill_ids
+            .iter()
+            .all(|id| !lineage.exit_fill_ids.contains(id))
+        && nonempty(&lineage.fee_currency)
+        && lineage.fees_complete
 }
 
 #[cfg(test)]
@@ -169,6 +233,21 @@ fn record_strategy_trade_outcome(
     let Some(trade_id) = trade_id.filter(|value| !value.is_empty()) else {
         return false;
     };
+    let event_id = format!("trade:{trade_id}");
+    let lifecycle_identity = settings.canonical_lifecycle_links.get(trade_id);
+    if _scout || lifecycle_identity.is_some_and(|identity| identity.entry_policy == "exploratory") {
+        if !lifecycle_identity.is_some_and(|identity| {
+            authoritative_outcome_lineage_is_complete(identity, replay_context.as_ref(), &event_id)
+        }) {
+            return false;
+        }
+    }
+    if settings.closed_trade_audit.iter().rev().any(|audit| {
+        audit.trade_id.as_deref() == Some(trade_id)
+            && audit.status == ClosedTradeAuditStatus::NeedsAudit
+    }) {
+        return false;
+    }
     // Closed spot trades cannot lose more than their entry notional. Keep
     // strategy-specific feedback aligned with the legacy closed-trade window
     // and activity metrics, which already reject returns below -100%.
@@ -237,8 +316,6 @@ fn record_strategy_trade_outcome(
                 }]
             })
             .unwrap_or_default();
-        let event_id = format!("trade:{trade_id}");
-        let lifecycle_identity = settings.canonical_lifecycle_links.get(trade_id);
         if !settings.feedback_outbox.iter().any(|event| matches!(event,
             strategy::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
         )) {
@@ -470,6 +547,57 @@ fn entry_walk_forward_evidence(
 mod feedback_outbox_tests {
     use super::*;
 
+    fn exploratory_identity() -> CanonicalLifecycleIdentity {
+        CanonicalLifecycleIdentity {
+            schema_version: 1,
+            opportunity_id: "autotrader:v1:opportunity:explore".into(),
+            episode_id: "autotrader:v1:episode:explore".into(),
+            trade_id: "autotrader:v1:trade:explore".into(),
+            profile_id: Some("profile-explore".into()),
+            profile_hash: Some("sha256:v1:profile-explore".into()),
+            profile_version: Some(3),
+            execution_mode: "paper".into(),
+            entry_policy: "exploratory".into(),
+            source: "auto_trader_entry_reservation".into(),
+        }
+    }
+
+    fn attributed_exploratory_context(
+        trade_key: &str,
+        identity: &CanonicalLifecycleIdentity,
+    ) -> strategy::TradeReplayContext {
+        strategy::TradeReplayContext {
+            market_symbol: "BTC-USDT".into(),
+            entry_timestamp_ms: 1_000,
+            exit_timestamp_ms: 2_000,
+            side: "long".into(),
+            entry_price: 100.0,
+            exit_price: 101.0,
+            quantity: 1.0,
+            entry_fees: 0.1,
+            exit_fees: 0.1,
+            entry_walk_forward_evidence: None,
+            execution_costs_complete: false,
+            lineage: Some(strategy::TradeOutcomeLineage {
+                outcome_event_id: format!("trade:{trade_key}"),
+                source_event_id: Some("worker-event-9".into()),
+                episode_id: Some(identity.episode_id.clone()),
+                opportunity_id: Some(identity.opportunity_id.clone()),
+                trade_id: Some(identity.trade_id.clone()),
+                profile_hash: identity.profile_hash.clone(),
+                profile_version: identity.profile_version,
+                execution_mode: Some(identity.execution_mode.clone()),
+                entry_policy: Some(identity.entry_policy.clone()),
+                source: Some(identity.source.clone()),
+                entry_fill_ids: vec!["pm-fill-entry-1".into()],
+                exit_fill_ids: vec!["pm-fill-exit-1".into()],
+                fee_currency: Some("USDT".into()),
+                fees_complete: true,
+                evidence_gain_correlation: Some("evidence-9".into()),
+            }),
+        }
+    }
+
     #[test]
     fn closed_audit_contributes_filled_trade_replay_context() {
         let context = replay_context_from_close_audit(&serde_json::json!({
@@ -620,6 +748,97 @@ mod feedback_outbox_tests {
     }
 
     #[test]
+    fn attributed_exploratory_close_is_queued_with_canonical_fill_lineage() {
+        let mut settings = Settings::default();
+        let identity = exploratory_identity();
+        settings
+            .canonical_lifecycle_links
+            .insert("explore-key".into(), identity.clone());
+        let context = attributed_exploratory_context("explore-key", &identity);
+        let position = TraderPosition {
+            trade_id: Some("explore-key".into()),
+            lifecycle_identity: Some(identity),
+            exploratory: true,
+            scout_entry: true,
+            ..TraderPosition::default()
+        };
+        let audit = closed_trade_audit_for_position(&position, "BTC-USDT", Some(&context));
+        assert_eq!(audit.status, ClosedTradeAuditStatus::Eligible);
+        record_closed_trade_outcome(&mut settings, 1.0, 1.0, 0.2, audit);
+
+        assert!(record_strategy_trade_outcome(
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("exploratory"),
+            true,
+            1.0,
+            Some(1.0),
+            Some(&serde_json::json!({
+                "live_worker_event_id": "worker-event-9",
+                "strategy_parameters": {"minimum_momentum": 0.003}
+            })),
+            Some("explore-key"),
+            Some(context),
+        ));
+        let Some(FeedbackEvent::TradeOutcome {
+            event_id,
+            episode_id,
+            opportunity_id,
+            trade_id,
+            replay_context: Some(context),
+            ..
+        }) = settings.feedback_outbox.first()
+        else {
+            panic!("authoritatively attributed exploratory outcome was not queued")
+        };
+        let lineage = context.lineage.as_ref().expect("lineage persisted");
+        assert_eq!(event_id, "trade:explore-key");
+        assert_eq!(lineage.outcome_event_id, *event_id);
+        assert_eq!(lineage.episode_id, *episode_id);
+        assert_eq!(lineage.opportunity_id, *opportunity_id);
+        assert_eq!(lineage.trade_id, *trade_id);
+        assert_eq!(lineage.entry_fill_ids, ["pm-fill-entry-1"]);
+        assert_eq!(lineage.exit_fill_ids, ["pm-fill-exit-1"]);
+        assert_eq!(lineage.fee_currency.as_deref(), Some("USDT"));
+        assert!(lineage.fees_complete);
+    }
+
+    #[test]
+    fn exploratory_close_with_unknown_or_incomplete_lineage_stays_quarantined() {
+        let mut settings = Settings::default();
+        let position = TraderPosition {
+            trade_id: Some("explore-unknown".into()),
+            exploratory: true,
+            scout_entry: true,
+            ..TraderPosition::default()
+        };
+        let audit = closed_trade_audit_for_position(&position, "BTC-USDT", None);
+        assert_eq!(audit.status, ClosedTradeAuditStatus::NeedsAudit);
+        assert_eq!(
+            audit.reason.as_deref(),
+            Some("exploratory_outcome_lineage_incomplete")
+        );
+        record_closed_trade_outcome(&mut settings, 0.5, 0.5, 0.1, audit);
+        assert!(!record_strategy_trade_outcome(
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("exploratory"),
+            true,
+            0.5,
+            Some(0.5),
+            Some(&serde_json::json!({"strategy_parameters":{"minimum_momentum":0.003}})),
+            Some("explore-unknown"),
+            None,
+        ));
+        assert!(settings.feedback_outbox.is_empty());
+        let metrics = calculate_activity_learning_metrics(&settings, 0);
+        assert_eq!(metrics.closed_trade_needs_audit_count, 1);
+        assert_eq!(metrics.exit_learning_samples, 0);
+    }
+
+    #[test]
     fn missing_trade_identity_is_quarantined_instead_of_deduped_by_context() {
         let mut settings = Settings::default();
         let position = TraderPosition {
@@ -628,7 +847,7 @@ mod feedback_outbox_tests {
             trade_id: None,
             ..TraderPosition::default()
         };
-        let audit = closed_trade_audit_for_position(&position, "BTC-USDT");
+        let audit = closed_trade_audit_for_position(&position, "BTC-USDT", None);
         assert_eq!(audit.status, ClosedTradeAuditStatus::NeedsAudit);
         assert_eq!(
             audit.reason.as_deref(),
@@ -764,7 +983,7 @@ mod feedback_outbox_tests {
             -0.5,
             -0.005,
             0.002,
-            closed_trade_audit_for_position(&position, "BNB-USDT"),
+            closed_trade_audit_for_position(&position, "BNB-USDT", None),
         );
         record_strategy_trade_outcome(
             &mut settings,

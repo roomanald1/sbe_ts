@@ -14,8 +14,19 @@ async fn prepare_market_match(
 ) -> Result<PreparedMarketMatch, (StatusCode, String)> {
     let mut timings = BTreeMap::new();
     let matching_started = Instant::now();
-    let matched =
-        paper_exchange_match(symbol, &request.side, request.quantity, options.limit_price).await?;
+    let mut matched = paper_exchange_match(
+        symbol,
+        &request.side,
+        request.quantity,
+        options.limit_price,
+        request.client_order_id.as_deref(),
+    )
+    .await?;
+    matched.source_reported_filled_quantity = Some(matched.filled_quantity);
+    for fill in &mut matched.fills {
+        fill.source_quantity = Some(fill.quantity);
+        fill.source_price = Some(fill.price);
+    }
     reject_crossing_post_only(request, options, matched.best_bid, matched.best_ask)?;
     let (decision_timestamp, decision_price, decision_mid_price) = execution_reference_prices(
         request,
@@ -48,6 +59,12 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
             fills.push(MatcherFill {
                 quantity: filled,
                 price: fill.price,
+                source_execution_id: fill.source_execution_id,
+                source_cursor: fill.source_cursor,
+                source_cursor_kind: fill.source_cursor_kind,
+                recorded_at_utc_ms: fill.recorded_at_utc_ms,
+                source_price: fill.source_price.or(Some(fill.price)),
+                source_quantity: fill.source_quantity.or(Some(fill.quantity)),
             });
             remaining -= filled;
         }
@@ -60,11 +77,169 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
         (filled_quantity > EPSILON).then_some(notional / filled_quantity);
 }
 
+fn source_match_identity_is_linked(
+    result: &MatcherResponse,
+    requested_order_id: Option<&str>,
+) -> bool {
+    let Some(order_id) = requested_order_id.filter(|value| !value.trim().is_empty()) else {
+        return false;
+    };
+    result.schema_version.as_deref() == Some("paper_exchange_match:v1")
+        && result.capture_complete == Some(true)
+        && result.order_id.as_deref() == Some(order_id)
+        && result
+            .request_fingerprint
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && result
+            .source_epoch
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        && result
+            .recorded_at_utc_ms
+            .is_some_and(|timestamp| timestamp > 0)
+        && result.source_cursor.is_some()
+        && result.source_cursor_kind.as_deref() == Some("match_request")
+}
+
+fn source_match_is_complete(
+    result: &MatcherResponse,
+    requested_order_id: Option<&str>,
+    requested_quantity: f64,
+) -> bool {
+    if !source_match_identity_is_linked(result, requested_order_id)
+        || result.source_reported_filled_quantity.is_none()
+    {
+        return false;
+    }
+
+    let Some(reported_filled_quantity) = result.source_reported_filled_quantity else {
+        return false;
+    };
+    if !reported_filled_quantity.is_finite()
+        || reported_filled_quantity < 0.0
+        || !requested_quantity.is_finite()
+        || reported_filled_quantity > requested_quantity + EPSILON
+        || !result.filled_quantity.is_finite()
+        || !result.remaining_quantity.is_finite()
+    {
+        return false;
+    }
+
+    let approximately_equal =
+        |left: f64, right: f64| (left - right).abs() <= 1e-9 * left.abs().max(right.abs()).max(1.0);
+    let mut source_ids = std::collections::HashSet::new();
+    let mut source_cursors = std::collections::HashSet::new();
+    let mut source_quantity_total = 0.0;
+    let mut applied_quantity_total = 0.0;
+    for fill in &result.fills {
+        let Some(source_execution_id) = fill
+            .source_execution_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return false;
+        };
+        if !source_ids.insert(source_execution_id)
+            || fill
+                .source_cursor
+                .is_none_or(|cursor| !source_cursors.insert(cursor))
+            || fill.source_cursor_kind.as_deref() != Some("match_fill")
+            || fill
+                .recorded_at_utc_ms
+                .is_none_or(|timestamp| timestamp == 0)
+            || !fill.quantity.is_finite()
+            || fill.quantity <= 0.0
+            || !fill.price.is_finite()
+            || fill.price <= 0.0
+        {
+            return false;
+        }
+        let Some(source_quantity) = fill.source_quantity else {
+            return false;
+        };
+        let Some(source_price) = fill.source_price else {
+            return false;
+        };
+        if !source_quantity.is_finite()
+            || source_quantity <= 0.0
+            || !approximately_equal(source_quantity, fill.quantity)
+            || !source_price.is_finite()
+            || source_price <= 0.0
+            || !approximately_equal(source_price, fill.price)
+        {
+            return false;
+        }
+        source_quantity_total += source_quantity;
+        applied_quantity_total += fill.quantity;
+    }
+
+    approximately_equal(source_quantity_total, reported_filled_quantity)
+        && approximately_equal(applied_quantity_total, result.filled_quantity)
+        && approximately_equal(result.filled_quantity, reported_filled_quantity)
+}
+
+fn paper_exchange_fill_evidence(
+    result: &MatcherResponse,
+    requested_order_id: Option<&str>,
+    requested_quantity: f64,
+) -> Vec<PaperExchangeFillEvidence> {
+    let identity_linked = source_match_identity_is_linked(result, requested_order_id);
+    let complete = source_match_is_complete(result, requested_order_id, requested_quantity);
+    let mut execution_id_counts = std::collections::HashMap::new();
+    let mut fill_cursor_counts = std::collections::HashMap::new();
+    for execution_id in result
+        .fills
+        .iter()
+        .filter_map(|fill| fill.source_execution_id.as_deref())
+        .filter(|value| !value.trim().is_empty())
+    {
+        *execution_id_counts
+            .entry(execution_id.to_owned())
+            .or_insert(0usize) += 1;
+    }
+    for cursor in result.fills.iter().filter_map(|fill| fill.source_cursor) {
+        *fill_cursor_counts.entry(cursor).or_insert(0usize) += 1;
+    }
+
+    result
+        .fills
+        .iter()
+        .map(|fill| {
+            let linked = identity_linked
+                && fill
+                    .source_execution_id
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .is_some_and(|value| execution_id_counts.get(value) == Some(&1))
+                && fill
+                    .source_cursor
+                    .is_some_and(|cursor| fill_cursor_counts.get(&cursor) == Some(&1));
+            let linked = linked
+                && fill.source_cursor_kind.as_deref() == Some("match_fill")
+                && fill
+                    .recorded_at_utc_ms
+                    .is_some_and(|timestamp| timestamp > 0);
+            PaperExchangeFillEvidence {
+                schema_version: linked.then(|| result.schema_version.clone()).flatten(),
+                source_epoch: linked.then(|| result.source_epoch.clone()).flatten(),
+                source_cursor: linked.then_some(fill.source_cursor).flatten(),
+                request_fingerprint: linked.then(|| result.request_fingerprint.clone()).flatten(),
+                execution_id: linked.then(|| fill.source_execution_id.clone()).flatten(),
+                source_quantity: linked.then_some(fill.source_quantity).flatten(),
+                source_price: linked.then_some(fill.source_price).flatten(),
+                complete: Some(complete),
+            }
+        })
+        .collect()
+}
+
 async fn paper_exchange_match(
     symbol: &str,
     side: &TradeSide,
     quantity: f64,
     limit_price: Option<f64>,
+    order_id: Option<&str>,
 ) -> Result<MatcherResponse, (StatusCode, String)> {
     let side = match side {
         TradeSide::Buy => "buy",
@@ -77,6 +252,7 @@ async fn paper_exchange_match(
             "side": side,
             "quantity": quantity,
             "limit_price": limit_price,
+            "order_id": order_id,
         }),
     )
     .await

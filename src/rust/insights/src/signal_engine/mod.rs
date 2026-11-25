@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use axum::{Json, Router, http::StatusCode, routing::get};
-use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
-use rusqlite::{Connection, params};
+use axum::{http::StatusCode, routing::get, Json, Router};
+use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::{
@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
 const TRADE_WINDOW_MS: u64 = 300_000;
@@ -163,6 +163,10 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
             // Do serialization and compression before taking SQLite's write lock.
             let mut signal_rows = Vec::new();
             let mut audit_rows = Vec::new();
+            let mut scout_registrations = Vec::new();
+            let mut scout_path_samples = Vec::new();
+            let mut failed_scout_paths = Vec::new();
+            let mut completed_scout_paths = Vec::new();
             for request in &batch {
                 match &request.operation {
                     WriteOperation::Records(records) => {
@@ -179,6 +183,12 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                         encoder.write_all(payload)?;
                         audit_rows.push((decision_id, stage, timestamp, symbol, encoder.finish()?));
                     }
+                    WriteOperation::ScoutRegistration { decision_id, symbol, signal_timestamp, direction, entry_price, entry_bid, entry_ask, entry_quote_timestamp } => {
+                        scout_registrations.push((decision_id, symbol, signal_timestamp, direction, entry_price, entry_bid, entry_ask, entry_quote_timestamp));
+                    }
+                    WriteOperation::ScoutPathSamples(samples) => scout_path_samples.extend(samples.iter()),
+                    WriteOperation::ScoutPathFailure(decision_ids) => failed_scout_paths.extend(decision_ids.iter()),
+                    WriteOperation::ScoutPathComplete(decision_id) => completed_scout_paths.push(decision_id),
                 }
             }
             let transaction = connection.transaction()?;
@@ -209,6 +219,100 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                     }
                     insert.execute(params![decision_id, stage, timestamp, symbol, payload])?;
                 }
+            }
+            if !scout_registrations.is_empty() {
+                const SCOUT_PATH_RETENTION_MS: u64 = 7 * 86_400_000;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let cutoff = now.saturating_sub(SCOUT_PATH_RETENTION_MS) as i64;
+                transaction.execute(
+                    "DELETE FROM scout_path_samples WHERE decision_id IN (SELECT decision_id FROM scout_path_registrations WHERE signal_timestamp < ?1)",
+                    [cutoff],
+                )?;
+                transaction.execute(
+                    "DELETE FROM scout_path_registrations WHERE signal_timestamp < ?1",
+                    [cutoff],
+                )?;
+                let mut insert = transaction.prepare(
+                    "INSERT INTO scout_path_registrations(decision_id, symbol, signal_timestamp, direction, entry_price, entry_bid, entry_ask, entry_quote_timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(decision_id) DO NOTHING",
+                )?;
+                for (decision_id, symbol, timestamp, direction, entry_price, entry_bid, entry_ask, quote_timestamp) in scout_registrations {
+                    insert.execute(params![decision_id, symbol, *timestamp as i64, direction, entry_price, entry_bid, entry_ask, quote_timestamp.map(|value| value as i64)])?;
+                    transaction.execute(
+                        "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1 AND (symbol<>?2 OR signal_timestamp<>?3 OR direction<>?4 OR abs(entry_price-?5)>1e-12 OR (?6 IS NOT NULL AND entry_bid IS NOT ?6) OR (?7 IS NOT NULL AND entry_ask IS NOT ?7) OR (?8 IS NOT NULL AND entry_quote_timestamp IS NOT ?8))",
+                        params![decision_id, symbol, *timestamp as i64, direction, entry_price, entry_bid, entry_ask, quote_timestamp.map(|value| value as i64)],
+                    )?;
+                }
+            }
+            if !scout_path_samples.is_empty() {
+                let mut insert = transaction.prepare(
+                    "INSERT OR IGNORE INTO scout_path_samples(decision_id, path_epoch, sequence, timestamp, bid, ask, freshness_ms, gap_ms, first_source_timestamp, maximum_gap_ms, source_timestamps_monotonic, maximum_favorable_excursion_percent, maximum_adverse_excursion_percent, sample_count, capture_complete) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                )?;
+                let mut touched_scout_paths = HashSet::new();
+                let mut inserted_per_path = HashMap::<&str, u64>::new();
+                for sample in scout_path_samples {
+                    let inserted = insert.execute(params![sample.decision_id, sample.path_epoch as i64, sample.sequence as i64, sample.timestamp as i64, sample.bid, sample.ask, sample.freshness_ms as i64, sample.gap_ms as i64, sample.first_source_timestamp.map(|value| value as i64), sample.maximum_gap_ms as i64, sample.source_timestamps_monotonic, sample.maximum_favorable_excursion_percent, sample.maximum_adverse_excursion_percent, sample.sample_count as i64, sample.capture_complete])?;
+                    touched_scout_paths.insert(sample.decision_id.as_str());
+                    if !sample.capture_complete {
+                        transaction.execute(
+                            "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
+                            [&sample.decision_id],
+                        )?;
+                    }
+                    if inserted != 0 {
+                        *inserted_per_path.entry(sample.decision_id.as_str()).or_default() += 1;
+                    }
+                }
+                drop(insert);
+                for decision_id in touched_scout_paths {
+                    let inserted_count = inserted_per_path.get(decision_id).copied().unwrap_or(0);
+                    if inserted_count > 0 {
+                        transaction.execute(
+                            "UPDATE scout_path_registrations SET sample_count=sample_count+?2 WHERE decision_id=?1",
+                            params![decision_id, inserted_count as i64],
+                        )?;
+                    }
+                    let count: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM scout_path_samples WHERE decision_id=?1",
+                        [decision_id],
+                        |row| row.get(0),
+                    )?;
+                    if count > 4_096 {
+                        transaction.execute("UPDATE scout_path_registrations SET truncated=1 WHERE decision_id=?1", [decision_id])?;
+                        transaction.execute(
+                            "DELETE FROM scout_path_samples WHERE rowid IN (SELECT rowid FROM scout_path_samples WHERE decision_id=?1 ORDER BY path_epoch DESC, sequence DESC LIMIT -1 OFFSET 4096)",
+                            [decision_id],
+                        )?;
+                    }
+                }
+                const MAX_DURABLE_SCOUT_PATH_ROWS: i64 = 262_144;
+                let total_rows: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM scout_path_samples",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let excess = total_rows.saturating_sub(MAX_DURABLE_SCOUT_PATH_ROWS);
+                if excess > 0 {
+                    transaction.execute(
+                        "UPDATE scout_path_registrations SET truncated=1 WHERE decision_id IN (SELECT decision_id FROM scout_path_samples ORDER BY timestamp, path_epoch, sequence LIMIT ?1)",
+                        [excess],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM scout_path_samples WHERE rowid IN (SELECT rowid FROM scout_path_samples ORDER BY timestamp, path_epoch, sequence LIMIT ?1)",
+                        [excess],
+                    )?;
+                }
+            }
+            for decision_id in completed_scout_paths {
+                transaction.execute("UPDATE scout_path_registrations SET active=0 WHERE decision_id=?1", [&decision_id])?;
+            }
+            for decision_id in failed_scout_paths {
+                transaction.execute(
+                    "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
+                    [&decision_id],
+                )?;
             }
             transaction.commit()?;
             Ok(())
@@ -330,33 +434,27 @@ mod granular_live_feature_tests {
 
         let snapshot = engine.snapshot("ETH-USDT", 121_000).unwrap();
         let components = snapshot.components;
-        assert!(
-            components
-                .momentum_by_window
-                .iter()
-                .any(|feature| { feature.window_seconds == 10 && feature.value.is_some() })
-        );
+        assert!(components
+            .momentum_by_window
+            .iter()
+            .any(|feature| { feature.window_seconds == 10 && feature.value.is_some() }));
         assert!(components.trade_flow_by_window.iter().any(|feature| {
             feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count > 0
         }));
-        assert!(
-            components
-                .book_imbalance_by_depth
-                .iter()
-                .any(|feature| { feature.depth_levels == 5 && feature.value.is_some() })
-        );
+        assert!(components
+            .book_imbalance_by_depth
+            .iter()
+            .any(|feature| { feature.depth_levels == 5 && feature.value.is_some() }));
         assert!(components.vwap_dislocation_by_window.iter().any(|feature| {
             feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count >= 5
         }));
-        assert!(
-            components
-                .absorption_pressure_by_window
-                .iter()
-                .any(|feature| {
-                    feature.window_seconds == 30
-                        && feature.replenishment_window_ms == 2_000
-                        && feature.touch_tolerance_bps == 2.0
-                })
-        );
+        assert!(components
+            .absorption_pressure_by_window
+            .iter()
+            .any(|feature| {
+                feature.window_seconds == 30
+                    && feature.replenishment_window_ms == 2_000
+                    && feature.touch_tolerance_bps == 2.0
+            }));
     }
 }

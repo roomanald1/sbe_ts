@@ -22,9 +22,8 @@ async fn main() -> anyhow::Result<()> {
     });
     let (news_tx, news_rx) = watch::channel(initial_news);
     tokio::spawn(poll_news_feed(news_tx));
-    let (browser_news_tx, browser_news_rx) = watch::channel(Arc::new(
-        serde_json::to_value(news_rx.borrow().as_ref())?,
-    ));
+    let (browser_news_tx, browser_news_rx) =
+        watch::channel(Arc::new(serde_json::to_value(news_rx.borrow().as_ref())?));
     let mut news_for_browser = news_rx.clone();
     tokio::spawn(async move {
         while news_for_browser.changed().await.is_ok() {
@@ -50,10 +49,18 @@ async fn main() -> anyhow::Result<()> {
     let latest_compressed_strategy_signal_updates = Arc::new(DashMap::new());
     let latest_daily_strategy_update = Arc::new(std::sync::RwLock::new(None));
     let signal_runtime = Arc::new(SignalRuntime {
+        signal_process_started_at_ms: crate::now_ms(),
+        signal_store: Some(signal_store.clone()),
         active_symbols: DashMap::new(),
         symbol_admission_gate: Mutex::new(()),
-        max_active_symbols: configured_positive_usize("INSIGHTS_MAX_ACTIVE_SYMBOLS", DEFAULT_MAX_ACTIVE_SYMBOLS),
-        symbol_idle_ttl_ms: configured_positive_u64("INSIGHTS_SYMBOL_IDLE_TTL_MS", DEFAULT_SYMBOL_IDLE_TTL_MS),
+        max_active_symbols: configured_positive_usize(
+            "INSIGHTS_MAX_ACTIVE_SYMBOLS",
+            DEFAULT_MAX_ACTIVE_SYMBOLS,
+        ),
+        symbol_idle_ttl_ms: configured_positive_u64(
+            "INSIGHTS_SYMBOL_IDLE_TTL_MS",
+            DEFAULT_SYMBOL_IDLE_TTL_MS,
+        ),
         engines: DashMap::new(),
         research_record_sender,
         signal_event_sender: signal_event_sender.clone(),
@@ -113,7 +120,22 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(run_feed_ticker_consumer(signal_event_sender.clone()));
     tokio::spawn(run_feed_signal_consumer(signal_event_sender));
     let service_name = "Insights";
+    let insights_process_epoch = crate::process_epoch_id(
+        std::process::id(),
+        signal_runtime.signal_process_started_at_ms,
+    );
     let domain_router = Router::new()
+        .route(
+            "/internal/process-epoch",
+            get(move || {
+                let process_epoch = insights_process_epoch.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "process_epoch": process_epoch
+                    }))
+                }
+            }),
+        )
         .route(
             "/internal/live-news-context",
             get(live_news_context).with_state(Arc::clone(&signal_runtime)),
@@ -132,11 +154,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/internal/signals/scout-strategy-status",
-            axum::routing::post(update_scout_strategy_status).with_state(Arc::clone(&signal_runtime)),
+            axum::routing::post(update_scout_strategy_status)
+                .with_state(Arc::clone(&signal_runtime)),
         )
         .merge(signal_store.router());
-    let scout_rpc_port = std::env::var("INSIGHTS_RPC_RSOCKET_PORT")
-        .unwrap_or_else(|_| "10007".to_owned());
+    let scout_rpc_port =
+        std::env::var("INSIGHTS_RPC_RSOCKET_PORT").unwrap_or_else(|_| "10007".to_owned());
     tokio::spawn(run_insights_scout_rpc_server(
         domain_router,
         format!("0.0.0.0:{scout_rpc_port}"),
@@ -169,7 +192,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/process-memory-bytes", get(process_memory_bytes));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3004)).await?;
-    crate::service_log!("INFO", "{service_name} service listening on http://0.0.0.0:3004");
+    crate::service_log!(
+        "INFO",
+        "{service_name} service listening on http://0.0.0.0:3004"
+    );
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -189,7 +215,15 @@ async fn live_news_context(
 async fn process_memory_bytes() -> String {
     std::fs::read_to_string("/proc/self/status")
         .ok()
-        .and_then(|status| status.lines().find_map(|line| line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()))
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
         .map(|kilobytes| (kilobytes * 1024).to_string())
         .unwrap_or_else(|| "0".to_owned())
 }

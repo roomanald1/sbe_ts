@@ -369,7 +369,13 @@ impl SignalEngine {
                                     .saturating_add(pending.horizon_seconds.saturating_mul(1_000));
                                 last.abs_diff(target) <= MAX_BOOK_AGE_MS
                             });
-                        let completeness_reason = if pending.entry_quote_timestamp.is_none() {
+                        let completeness_reason = if path.interrupted_by_process_restart {
+                            "process_restart_interrupted"
+                        } else if path.capture_failed {
+                            "durable_capture_failed"
+                        } else if path.truncated {
+                            "retained_path_truncated"
+                        } else if pending.entry_quote_timestamp.is_none() {
                             "missing_entry_quote"
                         } else if path.sample_count == 0 {
                             "no_book_samples"
@@ -495,10 +501,8 @@ mod completed_scout_id_tests {
             MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
         );
         assert!(!engine.completed_scout_ids.contains("sample-0"));
-        assert!(
-            engine
-                .completed_scout_ids
-                .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}"))
-        );
+        assert!(engine
+            .completed_scout_ids
+            .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}")));
     }
 }

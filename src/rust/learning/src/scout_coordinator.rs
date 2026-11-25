@@ -43,6 +43,9 @@ const MAX_REPLAY_SIGNAL_GAP_MS: u64 = 30_000;
 const MAX_WORKER_SCOUT_VARIANTS: usize = 2_000;
 const MAX_AUTOTRADER_SCOUT_VARIANTS: usize = 5_000;
 const MAX_EVIDENCE_REQUESTS_PER_BATCH: usize = 32;
+const MAX_CONTEXT_COVERAGE_ROWS: usize = 2_048;
+const MAX_CONTEXT_EVIDENCE_REQUEST_ROWS: usize = 4_096;
+const MAX_CONTEXT_MATCHING_REQUESTS_PER_ROW: usize = 32;
 const MAX_ACTIVE_SCOUT_ACTIVITY_ITEMS: usize = 512;
 const MAX_REPLAY_ATTEMPTS: u32 = 5;
 const REPLAY_RETRY_BASE_MS: u64 = 5_000;
@@ -1035,10 +1038,26 @@ impl ScoutCoordinator {
                         .as_u64()
                         .map(|value| value.to_string())
                         .unwrap_or_else(|| "default".into());
-                    let cohort_key = format!(
+                    let direction_scope = candidate
+                        .get("direction")
+                        .or_else(|| signal.get("direction"))
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(context_direction_scope);
+                    let cohort_key = match direction_scope {
+                        Some(direction) => format!(
+                            "{}|{}|profile:{}|regime:{}|horizon:{}|direction:{}",
+                            profile.symbol,
+                            profile.strategy,
+                            profile.profile_id,
+                            regime,
+                            horizon,
+                            direction
+                        ),
+                        None => format!(
                         "{}|{}|profile:{}|regime:{}|horizon:{}",
                         profile.symbol, profile.strategy, profile.profile_id, regime, horizon
-                    );
+                        ),
+                    };
                     let freshness = priority_snapshot
                         .get(&cohort_key)
                         .and_then(|coverage| coverage["freshnessStatus"].as_str())
@@ -1051,30 +1070,41 @@ impl ScoutCoordinator {
                     } else {
                         None
                     };
-                    let evidence_request_id = if request.mode == ScoutWorkMode::Evaluate
-                        && evidence_permit.is_some()
-                        && evidence_requests_scheduled < MAX_EVIDENCE_REQUESTS_PER_BATCH
-                    {
-                        let key = crate::evidence_request_key(
+                    let evidence_key = crate::evidence_request_key_with_direction(
                             &profile.symbol,
                             &profile.strategy,
                             &profile.profile_id,
                             regime,
                             &horizon,
+                        direction_scope,
                         );
-                        let previous_request = state.evidence_requests.get(&key).cloned();
-                        let id = crate::schedule_evidence_request(
+                    let should_schedule_evidence = evidence_permit.is_some()
+                        && evidence_requests_scheduled < MAX_EVIDENCE_REQUESTS_PER_BATCH;
+                    let should_reconcile_fresh_evidence = freshness == "fresh";
+                    let evidence_request_id = if request.mode == ScoutWorkMode::Evaluate
+                        && (should_schedule_evidence || should_reconcile_fresh_evidence)
+                    {
+                        let previous_request = state.evidence_requests.get(&evidence_key).cloned();
+                        let id = crate::schedule_evidence_request_with_direction(
                             &mut state,
                             &profile.symbol,
                             &profile.strategy,
                             &profile.profile_id,
                             regime,
                             &horizon,
+                            direction_scope,
                             freshness,
                             crate::now_ms(),
                         );
                         let mut changed =
-                            state.evidence_requests.get(&key) != previous_request.as_ref();
+                            state.evidence_requests.get(&evidence_key) != previous_request.as_ref();
+                        if freshness == "fresh" {
+                            changed |= crate::record_evidence_gain_request_completion(
+                                &mut state,
+                                &evidence_key,
+                                crate::now_ms(),
+                            );
+                        }
                         if id.is_some() {
                             evidence_requests_scheduled += 1;
                         }
@@ -2198,9 +2228,44 @@ impl ScoutCoordinator {
                 }
             }
         }
-        Ok(
-            serde_json::json!({"profiles": profiles, "scout_parameter_variants": scout_parameter_variants, "walk_forward_evidence": walk_forward_evidence}),
-        )
+        let context_learning = serde_json::to_value(&state.context_learning)?;
+        let mut evidence_request_entries = state
+            .evidence_requests
+            .iter()
+            .filter(|(key, _)| {
+                let mut parts = key.split('|');
+                let request_symbol = parts.next();
+                let request_strategy = parts.next();
+                request_symbol.is_some_and(|symbol| profile_symbols.contains(symbol))
+                    && request_strategy.is_some_and(|strategy| {
+                        strategies.iter().any(|requested| requested == strategy)
+                    })
+            })
+            .collect::<Vec<_>>();
+        evidence_request_entries.sort_by(|left, right| left.0.cmp(right.0));
+        let evidence_request_rows = evidence_request_entries
+            .into_iter()
+            .take(MAX_CONTEXT_EVIDENCE_REQUEST_ROWS + 1)
+            .map(|(key, request)| {
+                Ok(serde_json::json!({
+                    "request_key": key,
+                    "request": serde_json::to_value(request)?,
+                }))
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()?;
+        let context_walk_forward_coverage = context_walk_forward_coverage(
+            &context_learning,
+            &evidence_request_rows,
+            &walk_forward_evidence,
+            &profile_symbols,
+            &strategies,
+        );
+        Ok(serde_json::json!({
+            "profiles": profiles,
+            "scout_parameter_variants": scout_parameter_variants,
+            "walk_forward_evidence": walk_forward_evidence,
+            "context_walk_forward_coverage": context_walk_forward_coverage,
+        }))
     }
 
     async fn dispatch_route(
@@ -2959,10 +3024,12 @@ fn aggregate_outcomes(
                 "flats",
                 "unavailable",
             ] {
-                summaries[group][key] = serde_json::json!(summaries[group][key]
+                summaries[group][key] = serde_json::json!(
+                    summaries[group][key]
                     .as_u64()
                     .unwrap_or_default()
-                    .saturating_add(body["summary"][group][key].as_u64().unwrap_or_default()));
+                        .saturating_add(body["summary"][group][key].as_u64().unwrap_or_default())
+                );
             }
         }
     }
@@ -3153,9 +3220,11 @@ fn candidates_for_profile(
             Strategy::LiveTradeFlow => vec![components["trade_flow_imbalance"].as_f64()],
             Strategy::LiveOrderBook => vec![components["book_imbalance"].as_f64()],
             Strategy::LiveVwapDislocation => vec![components["mispricing_vs_vwap_bps"].as_f64()],
-            Strategy::LiveAbsorptionPressure => vec![components["pressure_without_price_move"]
+            Strategy::LiveAbsorptionPressure => vec![
+                components["pressure_without_price_move"]
                 .as_f64()
-                .map(|value| -value)],
+                    .map(|value| -value),
+            ],
             _ => Vec::new(),
         };
         let directions = values
@@ -3193,6 +3262,183 @@ fn candidates_for_profile(
     );
     candidate["strategy_decision"] = serde_json::Value::Object(decision);
     Ok(vec![candidate])
+}
+
+fn context_direction_scope(direction: &str) -> Option<&'static str> {
+    if ["long", "bullish", "up", "buy"]
+        .iter()
+        .any(|candidate| direction.eq_ignore_ascii_case(candidate))
+    {
+        Some("long")
+    } else if ["short", "bearish", "down", "sell"]
+        .iter()
+        .any(|candidate| direction.eq_ignore_ascii_case(candidate))
+    {
+        Some("short")
+    } else {
+        None
+    }
+}
+
+fn context_walk_forward_coverage(
+    context_learning: &serde_json::Value,
+    evidence_requests: &[serde_json::Value],
+    scout_priority: &BTreeMap<String, serde_json::Value>,
+    profile_symbols: &BTreeSet<String>,
+    strategies: &[String],
+) -> serde_json::Value {
+    let mut context_ids = context_learning
+        .as_object()
+        .map(|contexts| contexts.keys().cloned().collect::<Vec<_>>())
+        .or_else(|| {
+            context_learning.as_array().map(|contexts| {
+                contexts
+                    .iter()
+                    .filter_map(|row| {
+                        row.get("context")
+                            .or_else(|| row.get("context_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    context_ids.sort();
+    context_ids.dedup();
+
+    let mut rows = Vec::new();
+    let mut unclassified_context_count = 0;
+    for context_id in &context_ids {
+        let scout_context = context_id.starts_with("scout:");
+        let context_dimensions = if let Some(context) = context_id.strip_prefix("scout:v1:") {
+            context.strip_suffix(":trade").unwrap_or(context)
+        } else if let Some(context) = context_id.strip_prefix("scout:") {
+            context.strip_suffix(":trade").unwrap_or(context)
+        } else {
+            context_id.as_str()
+        };
+        let parts = context_dimensions.split(':').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            unclassified_context_count += 1;
+            continue;
+        }
+        let (direction, market_regime, symbol, strategy) = (parts[0], parts[1], parts[2], parts[3]);
+        let Some(direction_scope) = context_direction_scope(direction) else {
+            unclassified_context_count += 1;
+            continue;
+        };
+        if !profile_symbols.contains(symbol)
+            || !strategies.iter().any(|name| name.as_str() == strategy)
+        {
+            continue;
+        }
+
+        let mut matching_requests = evidence_requests
+            .iter()
+            .filter_map(|row| {
+                let request_key = row.get("request_key")?.as_str()?;
+                let mut dimensions = request_key.split('|');
+                let request_symbol = dimensions.next()?;
+                let request_strategy = dimensions.next()?;
+                let dimensions = dimensions.collect::<Vec<_>>();
+                let regime_matches = dimensions
+                    .iter()
+                    .any(|part| part.strip_prefix("regime:") == Some(market_regime));
+                if request_symbol != symbol || request_strategy != strategy || !regime_matches {
+                    return None;
+                }
+                let request_direction_scope = row["request"]["direction_scope"].as_str();
+                if request_direction_scope.is_some_and(|scope| scope != direction_scope) {
+                    return None;
+                }
+                let profile_id = dimensions
+                    .iter()
+                    .find_map(|part| part.strip_prefix("profile:"));
+                let horizon_seconds = dimensions
+                    .iter()
+                    .find_map(|part| part.strip_prefix("horizon:"));
+                Some(serde_json::json!({
+                    "request_key": request_key,
+                    "request_id": row["request"]["request_id"],
+                    "request_status": row["request"]["status"],
+                    "profile_id": profile_id,
+                    "market_regime": market_regime,
+                    "horizon_seconds": horizon_seconds,
+                    "direction_scope": request_direction_scope.unwrap_or("unscoped"),
+                }))
+            })
+            .collect::<Vec<_>>();
+        matching_requests.sort_by(|left, right| {
+            left["request_key"]
+                .as_str()
+                .cmp(&right["request_key"].as_str())
+        });
+        let matching_request_count = matching_requests.len();
+        matching_requests.truncate(MAX_CONTEXT_MATCHING_REQUESTS_PER_ROW);
+        let directional_scout_coverage = scout_priority
+            .iter()
+            .filter(|(key, _)| {
+                key.starts_with(&format!("{symbol}|{strategy}|profile:"))
+                    && key.contains(&format!("|regime:{market_regime}|"))
+                    && key.ends_with(&format!("|direction:{direction_scope}"))
+            })
+            .map(|(key, evidence)| {
+                serde_json::json!({
+                    "cohort_key": key,
+                    "sample_count": evidence["sampleCount"],
+                    "effective_sample_size": evidence["effectiveSampleSize"],
+                    "freshness_status": evidence["freshnessStatus"],
+                })
+            })
+            .collect::<Vec<_>>();
+        let has_directional_request = matching_requests
+            .iter()
+            .any(|row| row["direction_scope"] == direction_scope);
+        let has_unscoped_request = matching_requests
+            .iter()
+            .any(|row| row["direction_scope"] == "unscoped");
+        rows.push(serde_json::json!({
+            "context_id": context_id,
+            "context_source": if scout_context { "scout" } else { "realized_trade" },
+            "context_dimensions": {
+                "direction": direction_scope,
+                "market_regime": market_regime,
+                "symbol": symbol,
+                "strategy": strategy,
+                "required_horizon_seconds": null,
+            },
+            "walk_forward_history_status": "not_validated_by_scout_priority_coverage",
+            "context_acquisition_status": if has_directional_request {
+                "direction_scoped_request_present"
+            } else if has_unscoped_request {
+                "profile_regime_request_present_direction_unscoped"
+            } else {
+                "no_matching_profile_regime_request"
+            },
+            "direction_scoped_request_supported": true,
+            "matching_profile_request_count": matching_request_count,
+            "matching_profile_requests_truncated": matching_request_count > matching_requests.len(),
+            "matching_profile_requests": matching_requests,
+            "directional_scout_coverage": directional_scout_coverage,
+        }));
+    }
+    let total_matching_contexts = rows.len();
+    rows.truncate(MAX_CONTEXT_COVERAGE_ROWS);
+    serde_json::json!({
+        "schema_version": 1,
+        "context_history_scope": "directional_scout_priority_only",
+        "context_history_reason": "direction-scoped Scout coverage is not validated walk-forward fold or holdout history",
+        "evidence_request_dimensions": ["symbol", "strategy", "profile", "market_regime", "horizon_seconds", "direction"],
+        "unsupported_evidence_request_dimensions": [],
+        "quantitative_eligibility": "blocked_pending_directional_fold_validation",
+        "context_count": total_matching_contexts,
+        "returned_context_count": rows.len(),
+        "context_rows_truncated": total_matching_contexts > rows.len(),
+        "unclassified_context_count": unclassified_context_count,
+        "evidence_request_rows_truncated": evidence_requests.len() > MAX_CONTEXT_EVIDENCE_REQUEST_ROWS,
+        "contexts": rows,
+    })
 }
 
 fn walk_forward_evidence(
@@ -3506,7 +3752,7 @@ impl RSocket for CoordinatorResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{variant_key, LearningState, RegisteredProfile};
+    use crate::{LearningState, RegisteredProfile, variant_key};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
     use strategy::StrategyProfile;
@@ -3613,6 +3859,118 @@ mod tests {
             result.body["active_assignments"][0]["assignment_id"],
             "assignment-1"
         );
+    }
+
+    #[test]
+    fn context_coverage_separates_directional_history_and_request_states() {
+        assert_eq!(context_direction_scope("BULLISH"), Some("long"));
+        assert_eq!(context_direction_scope("short"), Some("short"));
+        assert_eq!(context_direction_scope("neutral"), None);
+        let context_learning = serde_json::json!({
+            "long:trend:BTC-USDT:live-momentum": {"learning_samples": 4},
+            "short:trend:BTC-USDT:live-momentum": {"learning_samples": 2},
+            "long:range:ETH-USDT:live-range-mean-reversion": {"learning_samples": 1},
+            "scout:v1:long:trend:BTC-USDT:live-momentum:trade": {"learning_samples": 3},
+        });
+        let evidence_requests = vec![
+            serde_json::json!({
+                "request_key": "BTC-USDT|live-momentum|profile:btc-v1|regime:trend|horizon:60",
+                "request": {"request_id": "request-1", "status": "queued"},
+            }),
+            serde_json::json!({
+                "request_key": "BTC-USDT|live-momentum|profile:btc-v1|regime:trend|horizon:60|direction:4:long",
+                "request": {"request_id": "request-2", "status": "completed", "direction_scope": "long"},
+            }),
+        ];
+        let walk_forward = BTreeMap::from([(
+            "BTC-USDT|live-momentum|profile:btc-v1|regime:trend|horizon:60|direction:long".into(),
+            serde_json::json!({"sampleCount": 3, "effectiveSampleSize": 2.5, "freshnessStatus": "fresh"}),
+        )]);
+        let symbols = BTreeSet::from(["BTC-USDT".to_owned(), "ETH-USDT".to_owned()]);
+        let strategies = vec![
+            "live-momentum".to_owned(),
+            "live-range-mean-reversion".to_owned(),
+        ];
+
+        let coverage = context_walk_forward_coverage(
+            &context_learning,
+            &evidence_requests,
+            &walk_forward,
+            &symbols,
+            &strategies,
+        );
+
+        let contexts = coverage["contexts"].as_array().unwrap();
+        assert_eq!(
+            coverage["context_history_scope"],
+            "directional_scout_priority_only"
+        );
+        assert_eq!(
+            coverage["quantitative_eligibility"],
+            "blocked_pending_directional_fold_validation"
+        );
+        assert!(
+            coverage["evidence_request_dimensions"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("direction"))
+        );
+        let long = contexts
+            .iter()
+            .find(|row| row["context_id"] == "long:trend:BTC-USDT:live-momentum")
+            .unwrap();
+        let short = contexts
+            .iter()
+            .find(|row| row["context_id"] == "short:trend:BTC-USDT:live-momentum")
+            .unwrap();
+        let range = contexts
+            .iter()
+            .find(|row| row["context_id"] == "long:range:ETH-USDT:live-range-mean-reversion")
+            .unwrap();
+
+        assert_eq!(coverage["context_count"], 4);
+        assert_eq!(long["context_dimensions"]["direction"], "long");
+        assert_eq!(short["context_dimensions"]["direction"], "short");
+        assert_eq!(long["context_dimensions"]["market_regime"], "trend");
+        assert_eq!(
+            long["walk_forward_history_status"],
+            "not_validated_by_scout_priority_coverage"
+        );
+        assert_eq!(
+            long["context_acquisition_status"],
+            "direction_scoped_request_present"
+        );
+        assert_eq!(long["directional_scout_coverage"][0]["sample_count"], 3);
+        assert_eq!(
+            short["context_acquisition_status"],
+            "profile_regime_request_present_direction_unscoped"
+        );
+        assert_eq!(long["matching_profile_request_count"], 2);
+        assert!(
+            long["matching_profile_requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["direction_scope"] == "long"
+                    && request["horizon_seconds"] == "60")
+        );
+        assert!(
+            long["matching_profile_requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|request| request["direction_scope"] == "unscoped")
+        );
+        assert_eq!(
+            range["context_acquisition_status"],
+            "no_matching_profile_regime_request"
+        );
+        let scout = contexts
+            .iter()
+            .find(|row| row["context_id"] == "scout:v1:long:trend:BTC-USDT:live-momentum:trade")
+            .unwrap();
+        assert_eq!(scout["context_source"], "scout");
+        assert_eq!(scout["context_dimensions"]["direction"], "long");
     }
 
     #[test]
@@ -4143,14 +4501,15 @@ mod tests {
         );
         assert_eq!(response.assignments[0].candidate["timestamp"], 123);
         assert_eq!(
-            response.assignments[0].candidate["strategy_decision"]["strategy_parameters"]
-                ["minimum_momentum"],
+            response.assignments[0].candidate["strategy_decision"]["strategy_parameters"]["minimum_momentum"],
             0.6
         );
-        assert!(response.assignments[0]
+        assert!(
+            response.assignments[0]
             .candidate
             .get("components")
-            .is_none());
+                .is_none()
+        );
     }
 
     #[tokio::test]
