@@ -22,6 +22,7 @@
     "account": "/positions/account",
     "realized-pnl": "/positions/realized-pnl",
     "fee-summary": "/positions/fee-summary",
+    "financial-snapshot": "/positions/financial-snapshot",
     "fee-rates": "/positions/fee-rates",
     "usd-rates": "/positions/usd-rates",
     "barriers": "/positions/barriers",

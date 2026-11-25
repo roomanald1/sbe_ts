@@ -10,17 +10,35 @@ async fn maybe_place_portfolio_hedge(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let (holdings, fallback_marks, unknown_marks) = calculate_risk_holdings(&positions, rates);
-    update_risk_coverage_note(state, positions.len(), fallback_marks, unknown_marks).await;
-    if holdings.is_empty() || unknown_marks > 0 {
-        return Ok(None);
-    }
+    let now_ms = current_time_ms();
+    let (holdings, fallback_marks, unknown_marks) =
+        calculate_risk_holdings(&positions, rates, now_ms);
+    let unknown_position_records = candidates["unknown_position_records"]
+        .as_u64()
+        .unwrap_or(0) as usize;
     let pair_correlations: Vec<HedgePairCorrelationData> = serde_json::from_value(
         candidates["pair_correlations"].clone(),
     )
     .unwrap_or_default();
-    let portfolio_variance = calculate_portfolio_variance(&holdings, &pair_correlations);
-    let portfolio_shock_risk = portfolio_variance.max(0.0).sqrt() * PORTFOLIO_SHOCK_PERCENT;
+    let variance_estimate = calculate_portfolio_variance(&holdings, &pair_correlations, now_ms);
+    update_risk_coverage_note(
+        state,
+        positions.len(),
+        fallback_marks,
+        unknown_marks,
+        unknown_position_records,
+        variance_estimate.unknown_pair_count,
+        variance_estimate.used_worst_case_bound,
+    )
+    .await;
+    if holdings.is_empty()
+        || fallback_marks > 0
+        || unknown_marks > 0
+        || unknown_position_records > 0
+    {
+        return Ok(None);
+    }
+    let portfolio_shock_risk = variance_estimate.variance.sqrt() * PORTFOLIO_SHOCK_PERCENT;
     let settings_snapshot = state.settings.lock().await.clone();
     let hedge_execution = settings_snapshot
         .learning
@@ -40,10 +58,6 @@ async fn maybe_place_portfolio_hedge(
     if portfolio_shock_risk <= risk_trigger {
         return Ok(None);
     }
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
     let best = select_portfolio_hedge_candidate(
         &holdings,
         &positions,

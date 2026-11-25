@@ -49,6 +49,7 @@ const allowedRoutes = {
     "/positions/account",
     "/positions/realized-pnl",
     "/positions/fee-summary",
+    "/positions/financial-snapshot",
     "/positions/fee-rates",
     "/positions/usd-rates",
     "/positions/barriers",

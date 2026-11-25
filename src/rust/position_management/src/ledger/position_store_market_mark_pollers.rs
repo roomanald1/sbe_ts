@@ -11,7 +11,10 @@ impl PositionStore {
             if market_mark_pollers.contains(&symbol) {
                 false
             } else if market_mark_pollers.len() >= MAX_MARKET_MARKS {
-                crate::service_log!("WARN", "Market mark cache is full; not subscribing to {symbol}");
+                crate::service_log!(
+                    "WARN",
+                    "Market mark cache is full; not subscribing to {symbol}"
+                );
                 false
             } else {
                 market_mark_pollers.insert(symbol.clone())
@@ -27,13 +30,20 @@ impl PositionStore {
                 match paper_exchange_client::paper_exchange_get(&path).await {
                     Ok(value) => {
                         if let Ok(mark) = serde_json::from_value::<MarketMark>(value) {
-                            let is_new = store.market_mark(&symbol)
-                                .is_none_or(|previous| previous.updated_at_ms != mark.updated_at_ms);
-                            store.market_marks.write().expect("market mark map poisoned")
+                            let is_new = store.market_mark(&symbol).is_none_or(|previous| {
+                                previous.updated_at_ms != mark.updated_at_ms
+                            });
+                            store
+                                .market_marks
+                                .write()
+                                .expect("market mark map poisoned")
                                 .insert(symbol.clone(), mark);
                             if is_new {
                                 if let Err(error) = store.match_resting(&symbol).await {
-                                    crate::service_log!("ERROR", "Unable to process resting orders for {symbol}: {error:#}");
+                                    crate::service_log!(
+                                        "ERROR",
+                                        "Unable to process resting orders for {symbol}: {error:#}"
+                                    );
                                 }
                             }
                         }
@@ -60,8 +70,12 @@ impl PositionStore {
         // later crossing book is a fill opportunity, not a reason to cancel.
         let orders = {
             let ledger = self.ledger.lock().await;
-            ledger.orders.iter().filter(|order| order.symbol == symbol)
-                .cloned().collect::<Vec<_>>()
+            ledger
+                .orders
+                .iter()
+                .filter(|order| order.symbol == symbol)
+                .cloned()
+                .collect::<Vec<_>>()
         };
         if orders.is_empty() {
             return Ok(());
@@ -72,14 +86,25 @@ impl PositionStore {
             let match_quantity = if order.reduce_only {
                 let ledger = self.ledger.lock().await;
                 let current_quantity = indexed_position_summary(self, &ledger, Some(&order.source))
-                    .positions.into_iter().find(|position| position.symbol == symbol)
-                    .map(|position| position.quantity).unwrap_or(0.0);
+                    .positions
+                    .into_iter()
+                    .find(|position| position.symbol == symbol)
+                    .map(|position| position.quantity)
+                    .unwrap_or(0.0);
                 let closes = (matches!(&order.side, TradeSide::Sell) && current_quantity > EPSILON)
                     || (matches!(&order.side, TradeSide::Buy) && current_quantity < -EPSILON);
-                if !closes { 0.0 } else { order.remaining_quantity.min(current_quantity.abs()) }
-            } else { order.remaining_quantity };
+                if !closes {
+                    0.0
+                } else {
+                    order.remaining_quantity.min(current_quantity.abs())
+                }
+            } else {
+                order.remaining_quantity
+            };
             if match_quantity <= EPSILON {
-                if order.reduce_only { stale_reduce_only_orders.push(order.id); }
+                if order.reduce_only {
+                    stale_reduce_only_orders.push(order.id);
+                }
                 continue;
             }
             let mut response = paper_exchange_match(
@@ -89,7 +114,9 @@ impl PositionStore {
                 Some(order.limit_price),
             )
             .await
-            .map_err(|(status, message)| anyhow::anyhow!("paper exchange returned {status}: {message}"))?;
+            .map_err(|(status, message)| {
+                anyhow::anyhow!("paper exchange returned {status}: {message}")
+            })?;
             // This order was already resting: its maker fills execute at
             // its own limit, even if the next observed book gaps through it.
             for fill in &mut response.fills {
@@ -108,12 +135,21 @@ impl PositionStore {
         }
         let mut fills = Vec::new();
         for (id, result) in matches {
-            let reduce_allowance = ledger.orders.iter().find(|order| order.id == id)
-                .filter(|order| order.reduce_only).map(|order| {
-                    let current_quantity = indexed_position_summary(self, &ledger, Some(&order.source))
-                        .positions.into_iter().find(|position| position.symbol == symbol)
-                        .map(|position| position.quantity).unwrap_or(0.0);
-                    let closes = (matches!(&order.side, TradeSide::Sell) && current_quantity > EPSILON)
+            let reduce_allowance = ledger
+                .orders
+                .iter()
+                .find(|order| order.id == id)
+                .filter(|order| order.reduce_only)
+                .map(|order| {
+                    let current_quantity =
+                        indexed_position_summary(self, &ledger, Some(&order.source))
+                            .positions
+                            .into_iter()
+                            .find(|position| position.symbol == symbol)
+                            .map(|position| position.quantity)
+                            .unwrap_or(0.0);
+                    let closes = (matches!(&order.side, TradeSide::Sell)
+                        && current_quantity > EPSILON)
                         || (matches!(&order.side, TradeSide::Buy) && current_quantity < -EPSILON);
                     if closes { current_quantity.abs() } else { 0.0 }
                 });
@@ -143,6 +179,8 @@ impl PositionStore {
                         fee_rate,
                         order.source.clone(),
                         order.parent_order_id.clone(),
+                        order.client_order_id.clone(),
+                        order.lifecycle.clone(),
                     )
                 }));
             }
@@ -153,13 +191,27 @@ impl PositionStore {
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let offset = ledger.trades.len();
+            let mut canonical_lifecycle_fill = false;
             for (
                 index,
-                (order_id, side, quantity, execution_price, fee_rate, source, parent_order_id),
+                (
+                    order_id,
+                    side,
+                    quantity,
+                    execution_price,
+                    fee_rate,
+                    source,
+                    parent_order_id,
+                    client_order_id,
+                    lifecycle,
+                ),
             ) in fills.into_iter().enumerate()
             {
+                canonical_lifecycle_fill |= lifecycle.is_some();
+                let fill_id = allocate_fill_id(&mut ledger, timestamp);
                 ledger.trades.push(PositionTrade {
                     id: format!("{timestamp}-{index}-{offset}"),
+                    fill_id: Some(fill_id),
                     symbol: symbol.to_owned(),
                     side,
                     quantity,
@@ -168,6 +220,8 @@ impl PositionStore {
                     timestamp,
                     source,
                     parent_order_id,
+                    client_order_id,
+                    lifecycle,
                     fee: -quantity * execution_price * fee_rate.abs(),
                     fee_known: true,
                     fee_currency: symbol
@@ -183,6 +237,13 @@ impl PositionStore {
                     slippage: None,
                     slippage_bps: None,
                 });
+            }
+            if canonical_lifecycle_fill {
+                // Do not let a maker fill advance its order state while its
+                // canonical ledger row is still only queued for persistence.
+                drop(ledger);
+                self.persist_durable_snapshot(None).await?;
+                return Ok(());
             }
             self.persist(&ledger).await?;
         } else if ledger.orders.len() != original_order_count {

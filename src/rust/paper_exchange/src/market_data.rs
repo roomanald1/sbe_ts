@@ -25,6 +25,9 @@ const MAX_TICKER_HISTORY_SYMBOLS: usize = 128;
 const FEED_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOK_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TICKER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const TICKER_HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+const TICKER_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 60);
+const MARKET_MARK_FRESHNESS: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BookLevel {
@@ -225,10 +228,15 @@ impl MarketData {
             let samples = histories.by_symbol.entry(symbol).or_default();
             if samples
                 .last()
-                .is_none_or(|(last, _)| timestamp.saturating_sub(*last) >= 10_000)
+                .is_none_or(|(last, _)| {
+                    timestamp.saturating_sub(*last)
+                        >= TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64
+                })
             {
                 samples.push((timestamp, price));
-                samples.retain(|(time, _)| timestamp.saturating_sub(*time) <= 30 * 60_000);
+                samples.retain(|(time, _)| {
+                    timestamp.saturating_sub(*time) <= TICKER_HISTORY_RETENTION.as_millis() as u64
+                });
             }
         }
     }
@@ -287,7 +295,10 @@ async fn get_market_mark(
     let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     let book = data
         .book(&symbol)
-        .filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
+        .filter(|book| {
+            now.saturating_sub(book.updated_at_ms)
+                <= MARKET_MARK_FRESHNESS.as_millis() as u64
+        })
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             format!("No fresh market mark for {symbol}"),
@@ -319,7 +330,10 @@ async fn get_market_book(
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     data.book(&symbol)
-        .filter(|book| now.saturating_sub(book.updated_at_ms) <= 5_000)
+        .filter(|book| {
+            now.saturating_sub(book.updated_at_ms)
+                <= MARKET_MARK_FRESHNESS.as_millis() as u64
+        })
         .map(|book| Json((*book).clone()))
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -398,11 +412,60 @@ async fn get_insights_inputs(
 #[derive(Serialize)]
 struct MarketHistories {
     histories: HashMap<String, Vec<(u64, f64)>>,
+    market_marks: HashMap<String, MarketMarkSnapshot>,
+    timing_contract: MarketHistoryTimingContract,
+}
+
+#[derive(Serialize)]
+struct MarketMarkSnapshot {
+    mid: Option<f64>,
+    updated_at_ms: u64,
+}
+
+#[derive(Serialize)]
+struct MarketHistoryTimingContract {
+    version: u16,
+    sample_interval_ms: u64,
+    retention_ms: u64,
+    ticker_stream_idle_timeout_ms: u64,
+    market_mark_freshness_ms: u64,
+}
+
+impl MarketHistoryTimingContract {
+    fn current() -> Self {
+        Self {
+            version: 1,
+            sample_interval_ms: TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64,
+            retention_ms: TICKER_HISTORY_RETENTION.as_millis() as u64,
+            ticker_stream_idle_timeout_ms: TICKER_STREAM_IDLE_TIMEOUT.as_millis() as u64,
+            market_mark_freshness_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
+        }
+    }
 }
 
 async fn get_market_histories(State(data): State<Arc<MarketData>>) -> Json<MarketHistories> {
+    let histories = data.histories().await;
+    let market_marks = data
+        .books
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|(symbol, book)| {
+            let bid = book.bids.first().map(|level| level.price);
+            let ask = book.asks.first().map(|level| level.price);
+            (
+                symbol.clone(),
+                MarketMarkSnapshot {
+                    mid: bid.zip(ask).map(|(bid, ask)| (bid + ask) / 2.0),
+                    updated_at_ms: book.updated_at_ms,
+                },
+            )
+        })
+        .collect();
     Json(MarketHistories {
-        histories: data.histories().await,
+        histories,
+        market_marks,
+        timing_contract: MarketHistoryTimingContract::current(),
     })
 }
 
@@ -512,6 +575,37 @@ mod tests {
         assert_eq!(
             data.histories.lock().await.by_symbol.len(),
             MAX_TICKER_HISTORY_SYMBOLS
+        );
+    }
+
+    #[test]
+    fn market_histories_serializes_versioned_timing_contract() {
+        let response = MarketHistories {
+            histories: HashMap::from([("BTC-USDT".to_owned(), vec![(1_000, 42.5)])]),
+            market_marks: HashMap::from([(
+                "BTC-USDT".to_owned(),
+                MarketMarkSnapshot {
+                    mid: Some(42.5),
+                    updated_at_ms: 1_100,
+                },
+            )]),
+            timing_contract: MarketHistoryTimingContract::current(),
+        };
+
+        let serialized = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "histories": { "BTC-USDT": [[1000, 42.5]] },
+                "market_marks": { "BTC-USDT": { "mid": 42.5, "updated_at_ms": 1100 } },
+                "timing_contract": {
+                    "version": 1,
+                    "sample_interval_ms": 10_000,
+                    "retention_ms": 1_800_000,
+                    "ticker_stream_idle_timeout_ms": 60_000,
+                    "market_mark_freshness_ms": 5_000
+                }
+            })
         );
     }
 

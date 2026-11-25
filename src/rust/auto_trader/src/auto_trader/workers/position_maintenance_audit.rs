@@ -251,6 +251,7 @@ fn external_close_order(payload: &serde_json::Value) -> Option<TraderOrder> {
         exploratory: false,
         strategy: Some(strategy),
         decision_id,
+        revalidation_snapshot: None,
         strength: 0.0,
         ioc_fallback_for: None,
         quantity,

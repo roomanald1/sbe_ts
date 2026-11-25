@@ -40,7 +40,9 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
             let Some(mark) = marks.get(&barrier.symbol) else {
                 continue;
             };
-            if barrier.retry_after.is_some_and(|retry_after| now < retry_after)
+            if barrier
+                .retry_after
+                .is_some_and(|retry_after| now < retry_after)
                 || now.saturating_sub(mark.updated_at_ms) > 5_000
             {
                 continue;
@@ -105,14 +107,22 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                     continue;
                 };
                 let is_auto_stop = barrier.source == "auto"
-                    && barrier.parent_order_id.as_deref().is_some_and(|id| id.starts_with("auto-stop-"));
-                let superseded_auto_stop = is_auto_stop && ledger.trades.iter()
-                    .filter(|trade| trade.symbol == barrier.symbol && trade.source == barrier.source)
-                    .max_by_key(|trade| trade.timestamp)
-                    .is_some_and(|trade| {
-                        trade.timestamp > barrier.created_at
-                            && trade.parent_order_id.as_deref() != Some(barrier.id.as_str())
-                    });
+                    && barrier
+                        .parent_order_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("auto-stop-"));
+                let superseded_auto_stop = is_auto_stop
+                    && ledger
+                        .trades
+                        .iter()
+                        .filter(|trade| {
+                            trade.symbol == barrier.symbol && trade.source == barrier.source
+                        })
+                        .max_by_key(|trade| trade.timestamp)
+                        .is_some_and(|trade| {
+                            trade.timestamp > barrier.created_at
+                                && trade.parent_order_id.as_deref() != Some(barrier.id.as_str())
+                        });
                 if superseded_auto_stop {
                     // A later trade means this barrier belongs to an older
                     // position generation. Reduce-only alone is insufficient:
@@ -167,6 +177,7 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                     measure_execution_quality: false,
                     source: claimed.source.clone(),
                     client_order_id: Some(claimed.id.clone()),
+                    lifecycle: claimed.lifecycle.clone(),
                     reduce_only: claimed.source == "auto"
                         && claimed
                             .parent_order_id
@@ -222,7 +233,13 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                     }
                 }
             }
-            if let Err(error) = store.persist(&ledger).await {
+            let persistence = if claimed.lifecycle.is_some() {
+                drop(ledger);
+                store.persist_durable_snapshot(None).await
+            } else {
+                store.persist(&ledger).await
+            };
+            if let Err(error) = persistence {
                 crate::service_log!(
                     "ERROR",
                     "Could not persist barrier execution {}: {error}",
@@ -232,4 +249,3 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
         }
     }
 }
-

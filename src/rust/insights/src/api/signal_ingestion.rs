@@ -807,6 +807,102 @@ async fn publish_scout_markouts(
 mod signal_ingestion_tests {
     use super::*;
 
+    const INGEST_BENCHMARK_SAMPLES: usize = 128;
+    const INGEST_BENCHMARK_WARMUP_EVENTS: usize = 40;
+    const INGEST_BENCHMARK_START_MS: u64 = 1_800_000_000_000;
+    const INGEST_BENCHMARK_STEP_MS: u64 = 2_000;
+
+    fn benchmark_event(index: usize) -> Vec<u8> {
+        let timestamp = INGEST_BENCHMARK_START_MS + index as u64 * INGEST_BENCHMARK_STEP_MS;
+        raw_price_event(timestamp, 100.0 + index as f64 * 0.01)
+    }
+
+    fn raw_price_event(timestamp_ms: u64, price: f64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(56);
+        bytes.extend_from_slice(&48_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&9_u16.to_le_bytes());
+        let mut symbol = [b' '; 32];
+        symbol[..8].copy_from_slice(b"BTC-USDT");
+        bytes.extend_from_slice(&symbol);
+        bytes.extend_from_slice(&price.to_le_bytes());
+        bytes.extend_from_slice(&timestamp_ms.to_le_bytes());
+        bytes
+    }
+
+    fn benchmark_input_hash() -> String {
+        // FNV-1a keeps this fixture hash stable across Rust versions and hosts.
+        let mut hash = 0xcbf29ce484222325_u64;
+        let mut add = |bytes: &[u8]| {
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        };
+        add(b"insights-raw-price-to-strategy-signal-v1");
+        add(&(INGEST_BENCHMARK_WARMUP_EVENTS as u64).to_le_bytes());
+        add(&(INGEST_BENCHMARK_SAMPLES as u64).to_le_bytes());
+        add(&INGEST_BENCHMARK_START_MS.to_le_bytes());
+        add(&INGEST_BENCHMARK_STEP_MS.to_le_bytes());
+        for index in 0..INGEST_BENCHMARK_WARMUP_EVENTS + INGEST_BENCHMARK_SAMPLES {
+            add(&benchmark_event(index));
+        }
+        format!("fnv1a64:{hash:016x}")
+    }
+
+    fn benchmark_runtime() -> (
+        Arc<SignalRuntime>,
+        tokio::sync::mpsc::Receiver<Vec<StoredSignalRecord>>,
+    ) {
+        let (research_record_sender, research_records) = tokio::sync::mpsc::channel(256);
+        let (signal_event_sender, _) = tokio::sync::mpsc::channel(1);
+        let (news_tx, news) = tokio::sync::watch::channel(Arc::new(NewsFeedSnapshot::default()));
+        drop(news_tx);
+        let (enriched_market_events, _) = broadcast::channel(256);
+        let (strategy_signal_events, _) = broadcast::channel(256);
+        let (compressed_strategy_signal_events, _) = broadcast::channel(256);
+        let (strategy_maintenance_events, _) = broadcast::channel(16);
+        let (legacy_strategy_signal_events, _) = broadcast::channel(256);
+        (
+            Arc::new(SignalRuntime {
+                active_symbols: DashMap::new(),
+                symbol_admission_gate: Mutex::new(()),
+                max_active_symbols: 1,
+                symbol_idle_ttl_ms: 60_000,
+                engines: DashMap::new(),
+                research_record_sender,
+                signal_event_sender,
+                signal_event_shards: Arc::new(std::sync::RwLock::new(Vec::new())),
+                market_cache: Arc::new(DashMap::new()),
+                ui_snapshot_cache: Arc::new(DashMap::new()),
+                ui_snapshot_notify: Arc::new(Notify::new()),
+                news,
+                news_learning: Mutex::new(NewsLearning::default()),
+                snapshot_diagnostic_at: DashMap::new(),
+                latest_prices: DashMap::new(),
+                rolling_volatility: DashMap::new(),
+                enriched_market_events,
+                strategy_signal_events,
+                compressed_strategy_signal_events,
+                strategy_maintenance_events,
+                legacy_strategy_signal_events,
+                latest_strategy_signal_updates: Arc::new(DashMap::new()),
+                latest_compressed_strategy_signal_updates: Arc::new(DashMap::new()),
+            }),
+            research_records,
+        )
+    }
+
+    fn exact_percentile(sorted_ns: &[u128], percentile_basis_points: usize) -> u128 {
+        let rank = sorted_ns
+            .len()
+            .saturating_mul(percentile_basis_points)
+            .div_ceil(10_000)
+            .max(1);
+        sorted_ns[rank.saturating_sub(1)]
+    }
+
     fn sample() -> ScoutScoutRegistration {
         serde_json::from_value(serde_json::json!({
             "decision_id":"decision-1", "symbol":"BTC-USDT", "timestamp":1000,
@@ -835,6 +931,78 @@ mod signal_ingestion_tests {
         assert_eq!(value["updated_at_ms"], 42);
         assert_eq!(value["bids"][0], serde_json::json!({"price":99.0,"size":1.0}));
         assert_eq!(value["asks"][0], serde_json::json!({"price":100.0,"size":2.0}));
+    }
+
+    #[tokio::test]
+    async fn raw_market_ingress_to_strategy_signal_benchmark_fixture() {
+        let (runtime, _research_records) = benchmark_runtime();
+        let mut published = runtime.strategy_signal_events.subscribe();
+        let mut elapsed_ns = Vec::with_capacity(INGEST_BENCHMARK_SAMPLES);
+        let input_hash = benchmark_input_hash();
+
+        // The directional feature requires a 60-second return window. Prime
+        // that state through the same raw decoder and production handler, but
+        // exclude warm-up events and their possible publications from timing.
+        for index in 0..INGEST_BENCHMARK_WARMUP_EVENTS {
+            let request = decode_signal_event(&benchmark_event(index))
+                .expect("deterministic warm-up event decodes through production codec");
+            let result = ingest_signal_event(
+                axum::extract::State(Arc::clone(&runtime)),
+                Json(request),
+            )
+            .await;
+            assert!(result.is_ok(), "production ingress should accept warm-up event");
+        }
+        while published.try_recv().is_ok() {}
+
+        let workload_started = Instant::now();
+        for index in INGEST_BENCHMARK_WARMUP_EVENTS
+            ..INGEST_BENCHMARK_WARMUP_EVENTS + INGEST_BENCHMARK_SAMPLES
+        {
+            let raw_event = benchmark_event(index);
+            let timestamp = INGEST_BENCHMARK_START_MS + index as u64 * INGEST_BENCHMARK_STEP_MS;
+            // The measured path begins with the real feed codec payload and uses
+            // the production decoder, ingestion/evaluation handler and publisher.
+            let ingress_started = Instant::now();
+            let mut request = decode_signal_event(&raw_event)
+                .expect("deterministic raw market event decodes through production codec");
+            request.queued_at = Some(ingress_started);
+            let result = ingest_signal_event(
+                axum::extract::State(Arc::clone(&runtime)),
+                Json(request),
+            )
+            .await;
+            assert!(result.is_ok(), "production market ingress should accept fixture event");
+            let update = published
+                .recv();
+            let update = tokio::time::timeout(Duration::from_secs(1), update)
+                .await
+                .expect("production signal publication should complete within one second")
+                .expect("accepted raw price event publishes a strategy signal update");
+            let value: serde_json::Value = serde_json::from_slice(&update).unwrap();
+            assert_eq!(value["event_id"], format!("BTC-USDT:{timestamp}"));
+            assert_eq!(value["signal"]["timestamp"], timestamp);
+            assert!(!value["signal"].is_null());
+            elapsed_ns.push(ingress_started.elapsed().as_nanos());
+        }
+
+        let workload_elapsed = workload_started.elapsed();
+        elapsed_ns.sort_unstable();
+        let signals_per_second = elapsed_ns.len() as f64 / workload_elapsed.as_secs_f64();
+        println!(
+            "INSIGHTS_RAW_INGRESS_BENCHMARK {{\"input_config_hash\":\"{input_hash}\",\"warmup_event_count\":{},\"event_count\":{},\"published_signal_count\":{},\"elapsed_ms\":{},\"signals_per_second\":{},\"p50_ns\":{},\"p95_ns\":{},\"p99_ns\":{},\"p99_9_ns\":{},\"scope\":\"raw market decode + feature evaluation + local StrategyMarketSignal update publication\",\"excludes\":\"downstream AutoTrader risk/order-ready, exchange submission, acknowledgement and fills\"}}",
+            INGEST_BENCHMARK_WARMUP_EVENTS,
+            INGEST_BENCHMARK_SAMPLES,
+            elapsed_ns.len(),
+            workload_elapsed.as_secs_f64() * 1_000.0,
+            signals_per_second,
+            exact_percentile(&elapsed_ns, 5_000),
+            exact_percentile(&elapsed_ns, 9_500),
+            exact_percentile(&elapsed_ns, 9_900),
+            exact_percentile(&elapsed_ns, 9_990),
+        );
+        assert_eq!(elapsed_ns.len(), INGEST_BENCHMARK_SAMPLES);
+        assert_eq!(benchmark_input_hash(), input_hash);
     }
 
     #[test]

@@ -99,6 +99,20 @@ async fn submit_barrier_order(
         .as_deref()
         .and_then(|id| existing_order_response(&store, &ledger, id))
     {
+        let client_order_id = request.client_order_id.as_deref().unwrap();
+        let needs_durable_commit = store.client_order_commit_pending(client_order_id);
+        drop(ledger);
+        if needs_durable_commit {
+            store
+                .persist_durable_snapshot(Some(client_order_id))
+                .await
+                .map_err(|error| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Unable to persist barrier order: {error}"),
+                    )
+                })?;
+        }
         return Ok(Json(response));
     }
     ensure_paper_capacity_with_rates(
@@ -145,14 +159,26 @@ async fn submit_barrier_order(
         extreme_price,
         source: request.source.clone(),
         parent_order_id: request.client_order_id.clone(),
+        client_order_id: request.client_order_id.clone(),
+        lifecycle: request.lifecycle.clone(),
     };
     ledger.barrier_orders.push(barrier_order.clone());
-    if let Err(error) = store.persist(&ledger).await {
+    if request.client_order_id.is_some() {
+        let client_order_id = request.client_order_id.as_deref().unwrap();
+        store.mark_client_order_commit_pending(client_order_id);
+        drop(ledger);
+        store
+            .persist_durable_snapshot(Some(client_order_id))
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Unable to persist barrier order: {error}"),
+                )
+            })?;
+    } else if let Err(error) = store.persist(&ledger).await {
         ledger.barrier_orders.pop();
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Unable to persist barrier order: {error}"),
-        ));
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist barrier order: {error}")));
     }
     return Ok(Json(OrderResponse {
         estimated_fee: 0.0,

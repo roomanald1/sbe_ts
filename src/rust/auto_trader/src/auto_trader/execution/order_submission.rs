@@ -19,6 +19,7 @@ async fn submit_and_record_selected_order(
         execution_params,
         timestamp,
         decision_id,
+        lifecycle_identity,
         learning_context,
         exploration_risk_adjustment,
         horizon_take_profit_percent,
@@ -72,8 +73,9 @@ async fn submit_and_record_selected_order(
         ask,
         order_type,
         execution_params,
-        timestamp.to_string(),
+        lifecycle_identity.opportunity_id.clone(),
         false,
+        Some(&lifecycle_identity),
     )
     .await
     {
@@ -276,9 +278,10 @@ async fn submit_and_record_selected_order(
     let realized_delta_usd = realized_usd(&settings, &signal.symbol, realized_delta);
     settings.realized_pnl += realized_delta_usd;
     settings.daily_realized_pnl += realized_delta_usd;
+    let mut trade_feedback_enqueued = false;
     if let Some((strategy, learning_context, scout_entry, total_pnl, net_return_percent, decision, trade_id, replay_context)) = completed_strategy_trade {
         let total_pnl_usd = realized_usd(&settings, &signal.symbol, total_pnl);
-        record_strategy_trade_outcome(
+        trade_feedback_enqueued = record_strategy_trade_outcome(
             &mut settings,
             &signal.symbol,
             Some(&strategy),
@@ -362,6 +365,11 @@ async fn submit_and_record_selected_order(
     });
     request_settings_persist(state)?;
     drop(settings);
+    if trade_feedback_enqueued {
+        if let Err(error) = persist_settings_snapshot_durable(state).await {
+            crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
+        }
+    }
     drop(cycle_guard);
     let mut audit_payload = signal_audit_payload(
         signal,

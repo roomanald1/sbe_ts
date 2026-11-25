@@ -135,6 +135,7 @@ mod ledger_helper_tests {
     fn unknown_fees_are_excluded_but_known_zero_fees_remain_known() {
         let make_trade = |fee_known| PositionTrade {
             id: "fee-test".to_owned(),
+            fill_id: None,
             symbol: "BTC-USDT".to_owned(),
             side: TradeSide::Buy,
             quantity: 1.0,
@@ -143,6 +144,8 @@ mod ledger_helper_tests {
             timestamp: 1,
             source: "manual".to_owned(),
             parent_order_id: None,
+            client_order_id: None,
+            lifecycle: None,
             fee: 0.0,
             fee_known,
             fee_currency: "USDT".to_owned(),
@@ -157,10 +160,16 @@ mod ledger_helper_tests {
         };
 
         let mut unknown_position = Position {
-            symbol: "BTC-USDT".to_owned(), quantity: 0.0,
-            average_entry_price: 0.0, realized_pnl: 0.0, entry_fees: 0.0,
-            fees_paid: 0.0, known_fee_fills: 0, unknown_fee_fills: 0,
-            estimated_exit_fee_rate: 0.0, last_trade_timestamp: 0,
+            symbol: "BTC-USDT".to_owned(),
+            quantity: 0.0,
+            average_entry_price: 0.0,
+            realized_pnl: 0.0,
+            entry_fees: 0.0,
+            fees_paid: 0.0,
+            known_fee_fills: 0,
+            unknown_fee_fills: 0,
+            estimated_exit_fee_rate: 0.0,
+            last_trade_timestamp: 0,
         };
         apply_trade(&mut unknown_position, &make_trade(false));
         assert_eq!(unknown_position.fees_paid, 0.0);
@@ -172,10 +181,16 @@ mod ledger_helper_tests {
         assert_eq!(unknown_json["fees_paid"], 0.0);
 
         let mut known_zero_position = Position {
-            symbol: "BTC-USDT".to_owned(), quantity: 0.0,
-            average_entry_price: 0.0, realized_pnl: 0.0, entry_fees: 0.0,
-            fees_paid: 0.0, known_fee_fills: 0, unknown_fee_fills: 0,
-            estimated_exit_fee_rate: 0.0, last_trade_timestamp: 0,
+            symbol: "BTC-USDT".to_owned(),
+            quantity: 0.0,
+            average_entry_price: 0.0,
+            realized_pnl: 0.0,
+            entry_fees: 0.0,
+            fees_paid: 0.0,
+            known_fee_fills: 0,
+            unknown_fee_fills: 0,
+            estimated_exit_fee_rate: 0.0,
+            last_trade_timestamp: 0,
         };
         apply_trade(&mut known_zero_position, &make_trade(true));
         assert_eq!(known_zero_position.fees_paid, 0.0);

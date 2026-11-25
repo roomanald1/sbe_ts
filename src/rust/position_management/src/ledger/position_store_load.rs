@@ -17,6 +17,9 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64, 
         orders: guard.orders.clone(),
         barrier_orders: guard.barrier_orders.clone(),
         scheduled_runs: guard.scheduled_runs.clone(),
+        no_fill_order_responses: guard.no_fill_order_responses.clone(),
+        fill_id_epoch: guard.fill_id_epoch.clone(),
+        fill_id_sequence: guard.fill_id_sequence,
     };
     copy_ms += copy_started.elapsed().as_secs_f64() * 1_000.0;
     drop(guard);
@@ -85,6 +88,18 @@ impl PositionStore {
     }
 
     async fn load_from_path(path: PathBuf) -> anyhow::Result<Self> {
+        Self::load_from_path_with_writer(path, true).await
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn load_from_path_without_writer(path: PathBuf) -> anyhow::Result<Self> {
+        Self::load_from_path_with_writer(path, false).await
+    }
+
+    async fn load_from_path_with_writer(
+        path: PathBuf,
+        start_background_writer: bool,
+    ) -> anyhow::Result<Self> {
         let mut ledger = tokio::task::spawn_blocking({
             let path = path.clone();
             move || load_sqlite_ledger(&path)
@@ -121,7 +136,7 @@ impl PositionStore {
         for run in &mut ledger.scheduled_runs {
             if run.status == "running" {
                 run.status = "interrupted".to_owned();
-                run.error = Some("Position manager restarted; scheduled execution stopped. Persisted fills are retained.".to_owned());
+                run.error = Some("Recoverable scheduled execution requires review after Position Manager restart; automatic replay is disabled to prevent duplicate fills. Persisted cumulative progress and fills are retained.".to_owned());
                 ledger_migrated = true;
             }
             vwap_runs.insert(
@@ -144,6 +159,8 @@ impl PositionStore {
             path,
             ledger: Arc::new(Mutex::new(ledger)),
             persistence_notify: Arc::new(Notify::new()),
+            persistence_write_lock: Arc::new(Mutex::new(())),
+            pending_client_order_commits: StdMutex::new(HashSet::new()),
             state_updates,
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
@@ -156,73 +173,91 @@ impl PositionStore {
             let ledger = store.ledger.lock().await;
             with_ledger_trade_index(&store, &ledger, |_| ());
         }
-        let writer_ledger = Arc::clone(&store.ledger);
-        let writer_notify = Arc::clone(&store.persistence_notify);
-        let writer_timings = Arc::clone(&store.persistence_timings_ms);
-        let writer_path = store.path.clone();
-        tokio::spawn(async move {
-            loop {
-                writer_notify.notified().await;
-                // Let a burst of fills and book updates collapse into one current snapshot.
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                let (ledger_snapshot, wait_ms, max_hold_ms, copy_ms) =
-                    snapshot_position_ledger(&writer_ledger).await;
-                record_position_persistence_sample(&writer_timings, "snapshot_lock_wait", wait_ms);
-                record_position_persistence_sample(
-                    &writer_timings,
-                    "snapshot_max_lock_hold",
-                    max_hold_ms,
-                );
-                record_position_persistence_sample(&writer_timings, "snapshot_copy", copy_ms);
-                let serialization_started = Instant::now();
-                let snapshot = match tokio::task::spawn_blocking(move || ledger_snapshot).await {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        crate::service_log!("ERROR", "Position ledger serializer failed: {error}");
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        writer_notify.notify_one();
-                        continue;
-                    }
-                };
-                record_position_persistence_sample(
-                    &writer_timings,
-                    "snapshot_serialize",
-                    serialization_started.elapsed().as_secs_f64() * 1_000.0,
-                );
-                let path = writer_path.clone();
-                let write_started = Instant::now();
-                match tokio::task::spawn_blocking(move || save_sqlite_ledger(&path, &snapshot))
-                    .await
-                {
-                    Ok(Ok(())) => {
-                        record_position_persistence_sample(
-                            &writer_timings,
-                            "snapshot_write",
-                            write_started.elapsed().as_secs_f64() * 1_000.0,
-                        );
-                    }
-                    Ok(Err(error)) => {
-                        crate::service_log!(
-                            "ERROR",
-                            "Position ledger snapshot write failed: {error:#}"
-                        );
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        writer_notify.notify_one();
-                    }
-                    Err(error) => {
-                        crate::service_log!(
-                            "ERROR",
-                            "Position ledger snapshot writer failed: {error}"
-                        );
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        writer_notify.notify_one();
+        if start_background_writer {
+            let writer_ledger = Arc::clone(&store.ledger);
+            let writer_notify = Arc::clone(&store.persistence_notify);
+            let writer_write_lock = Arc::clone(&store.persistence_write_lock);
+            let writer_timings = Arc::clone(&store.persistence_timings_ms);
+            let writer_path = store.path.clone();
+            tokio::spawn(async move {
+                loop {
+                    writer_notify.notified().await;
+                    // Let a burst of fills and book updates collapse into one current snapshot.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    // Serialize before snapshotting: a queued background write must
+                    // never capture stale state and overwrite a durable commit.
+                    let _write_guard = writer_write_lock.lock().await;
+                    let (ledger_snapshot, wait_ms, max_hold_ms, copy_ms) =
+                        snapshot_position_ledger(&writer_ledger).await;
+                    record_position_persistence_sample(
+                        &writer_timings,
+                        "snapshot_lock_wait",
+                        wait_ms,
+                    );
+                    record_position_persistence_sample(
+                        &writer_timings,
+                        "snapshot_max_lock_hold",
+                        max_hold_ms,
+                    );
+                    record_position_persistence_sample(&writer_timings, "snapshot_copy", copy_ms);
+                    let serialization_started = Instant::now();
+                    let snapshot = match tokio::task::spawn_blocking(move || ledger_snapshot).await
+                    {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            crate::service_log!(
+                                "ERROR",
+                                "Position ledger serializer failed: {error}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            writer_notify.notify_one();
+                            continue;
+                        }
+                    };
+                    record_position_persistence_sample(
+                        &writer_timings,
+                        "snapshot_serialize",
+                        serialization_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                    let path = writer_path.clone();
+                    let write_started = Instant::now();
+                    match tokio::task::spawn_blocking(move || save_sqlite_ledger(&path, &snapshot))
+                        .await
+                    {
+                        Ok(Ok(())) => {
+                            record_position_persistence_sample(
+                                &writer_timings,
+                                "snapshot_write",
+                                write_started.elapsed().as_secs_f64() * 1_000.0,
+                            );
+                        }
+                        Ok(Err(error)) => {
+                            crate::service_log!(
+                                "ERROR",
+                                "Position ledger snapshot write failed: {error:#}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            writer_notify.notify_one();
+                        }
+                        Err(error) => {
+                            crate::service_log!(
+                                "ERROR",
+                                "Position ledger snapshot writer failed: {error}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            writer_notify.notify_one();
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
         if ledger_migrated {
-            let ledger = store.ledger.lock().await;
-            store.persist(&ledger).await?;
+            if start_background_writer {
+                let ledger = store.ledger.lock().await;
+                store.persist(&ledger).await?;
+            } else {
+                store.persist_durable_snapshot(None).await?;
+            }
         }
         Ok(store)
     }
@@ -230,6 +265,56 @@ impl PositionStore {
         // Snapshotting and disk I/O are handled by one coalescing background writer.
         // It reads the latest ledger after the caller releases its ledger lock.
         self.persistence_notify.notify_one();
+        let _ = self.state_updates.send(());
+        Ok(())
+    }
+
+    fn mark_client_order_commit_pending(&self, client_order_id: &str) {
+        self.pending_client_order_commits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(client_order_id.to_owned());
+    }
+
+    fn client_order_commit_pending(&self, client_order_id: &str) -> bool {
+        self.pending_client_order_commits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(client_order_id)
+    }
+
+    async fn persist_durable_snapshot(
+        &self,
+        committed_client_order_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let _write_guard = self.persistence_write_lock.lock().await;
+        let (snapshot, wait_ms, max_hold_ms, copy_ms) =
+            snapshot_position_ledger(&self.ledger).await;
+        record_position_persistence_sample(
+            &self.persistence_timings_ms,
+            "snapshot_lock_wait",
+            wait_ms,
+        );
+        record_position_persistence_sample(
+            &self.persistence_timings_ms,
+            "snapshot_max_lock_hold",
+            max_hold_ms,
+        );
+        record_position_persistence_sample(&self.persistence_timings_ms, "snapshot_copy", copy_ms);
+        let path = self.path.clone();
+        let write_started = Instant::now();
+        tokio::task::spawn_blocking(move || save_sqlite_ledger(&path, &snapshot)).await??;
+        record_position_persistence_sample(
+            &self.persistence_timings_ms,
+            "snapshot_write",
+            write_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+        if let Some(client_order_id) = committed_client_order_id {
+            self.pending_client_order_commits
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(client_order_id);
+        }
         let _ = self.state_updates.send(());
         Ok(())
     }
@@ -261,6 +346,24 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
             .as_f64()
             .unwrap_or_else(default_account_cash);
         ledger.max_leverage = meta["max_leverage"].as_f64();
+        ledger.no_fill_order_responses = meta
+            .get("no_fill_order_responses")
+            .cloned()
+            .map(serde_json::from_value::<Vec<NoFillOrderResponse>>)
+            .transpose()?
+            .unwrap_or_default();
+        ledger.fill_id_epoch = meta
+            .get("fill_id_epoch")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        ledger.fill_id_sequence = meta
+            .get("fill_id_sequence")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        if ledger.no_fill_order_responses.len() > NO_FILL_IDEMPOTENCY_CAPACITY {
+            let excess = ledger.no_fill_order_responses.len() - NO_FILL_IDEMPOTENCY_CAPACITY;
+            ledger.no_fill_order_responses.drain(..excess);
+        }
     }
     macro_rules! read_rows {
         ($table:literal, $field:ident, $ty:ty) => {{
@@ -273,7 +376,11 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
         }};
     }
     read_rows!("trades", trades, PositionTrade);
-    read_rows!("dated_carry_positions", dated_carry_positions, DatedCarryLedgerPosition);
+    read_rows!(
+        "dated_carry_positions",
+        dated_carry_positions,
+        DatedCarryLedgerPosition
+    );
     read_rows!("topups", topups, AccountTopup);
     read_rows!("resting_orders", orders, RestingOrder);
     read_rows!("barrier_orders", barrier_orders, BarrierOrder);
@@ -291,7 +398,16 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
     let mut db = rusqlite::Connection::open(path)?;
     db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ledger_meta(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS trades(id TEXT PRIMARY KEY, symbol TEXT NOT NULL, timestamp INTEGER NOT NULL, side TEXT NOT NULL, quantity REAL NOT NULL, execution_price REAL NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trades_symbol_time ON trades(symbol,timestamp); CREATE TABLE IF NOT EXISTS dated_carry_positions(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS resting_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS barrier_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS scheduled_runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL);")?;
     let tx = db.transaction()?;
-    tx.execute("INSERT OR REPLACE INTO ledger_meta(id,payload) VALUES(1,?1)",[serde_json::to_string(&serde_json::json!({"initial_cash":ledger.initial_cash,"max_leverage":ledger.max_leverage}))?])?;
+    tx.execute(
+        "INSERT OR REPLACE INTO ledger_meta(id,payload) VALUES(1,?1)",
+        [serde_json::to_string(&serde_json::json!({
+            "initial_cash": ledger.initial_cash,
+            "max_leverage": ledger.max_leverage,
+            "no_fill_order_responses": ledger.no_fill_order_responses,
+            "fill_id_epoch": ledger.fill_id_epoch,
+            "fill_id_sequence": ledger.fill_id_sequence,
+        }))?],
+    )?;
     tx.execute("DELETE FROM trades", [])?;
     tx.execute("DELETE FROM dated_carry_positions", [])?;
     tx.execute("DELETE FROM topups", [])?;
@@ -320,7 +436,10 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
         tx.execute(
             "INSERT INTO dated_carry_positions(id,payload) VALUES(?1,?2)",
             rusqlite::params![
-                format!("{}:{}:{}", position.future_symbol, position.expiry_ms, position.entry_ms),
+                format!(
+                    "{}:{}:{}",
+                    position.future_symbol, position.expiry_ms, position.entry_ms
+                ),
                 serde_json::to_string(position)?
             ],
         )?;
@@ -380,16 +499,25 @@ mod ledger_snapshot_tests {
         let path = std::env::temp_dir().join(format!(
             "position-management-coverage-{}-{}.sqlite",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         let trade: PositionTrade = serde_json::from_value(serde_json::json!({
             "id": "round-trip", "symbol": "BTC-USDT", "side": "buy",
             "quantity": 0.25, "execution_price": 40000.0, "timestamp": 123
-        })).unwrap();
+        }))
+        .unwrap();
         let ledger = Ledger {
-            trades: vec![trade], initial_cash: 12_345.0,
-            topups: vec![AccountTopup { amount: 50.0, timestamp: 456 }],
-            max_leverage: Some(3.0), ..Ledger::default()
+            trades: vec![trade],
+            initial_cash: 12_345.0,
+            topups: vec![AccountTopup {
+                amount: 50.0,
+                timestamp: 456,
+            }],
+            max_leverage: Some(3.0),
+            ..Ledger::default()
         };
         save_sqlite_ledger(&path, &ledger).unwrap();
         let restored = load_sqlite_ledger(&path).unwrap();
@@ -404,44 +532,206 @@ mod ledger_snapshot_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
+    #[test]
+    fn sqlite_fill_allocator_and_fill_ids_survive_restart_without_reuse() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-fill-id-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut ledger = Ledger::default();
+        let first_fill_id = allocate_fill_id(&mut ledger, 100);
+        let mut first_fill: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": "row-1", "symbol": "BTC-USDT", "side": "buy", "quantity": 0.25,
+            "execution_price": 40000.0, "timestamp": 100, "parent_order_id": "parent-1"
+        }))
+        .unwrap();
+        first_fill.fill_id = Some(first_fill_id.clone());
+        ledger.trades.push(first_fill);
+
+        save_sqlite_ledger(&path, &ledger).unwrap();
+        let mut restarted = load_sqlite_ledger(&path).unwrap();
+        assert_eq!(restarted.fill_id_epoch, ledger.fill_id_epoch);
+        assert_eq!(restarted.fill_id_sequence, 1);
+        assert_eq!(
+            restarted.trades[0].fill_id.as_deref(),
+            Some(first_fill_id.as_str())
+        );
+
+        let second_fill_id = allocate_fill_id(&mut restarted, 101);
+        assert_ne!(first_fill_id, second_fill_id);
+        let mut second_fill: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": "row-2", "symbol": "BTC-USDT", "side": "buy", "quantity": 0.25,
+            "execution_price": 40001.0, "timestamp": 101, "parent_order_id": "parent-1"
+        }))
+        .unwrap();
+        second_fill.fill_id = Some(second_fill_id.clone());
+        restarted.trades.push(second_fill);
+
+        save_sqlite_ledger(&path, &restarted).unwrap();
+        let restored = load_sqlite_ledger(&path).unwrap();
+        assert_eq!(restored.fill_id_epoch, ledger.fill_id_epoch);
+        assert_eq!(restored.fill_id_sequence, 2);
+        assert_eq!(restored.trades.len(), 2);
+        assert_eq!(
+            restored.trades[0].fill_id.as_deref(),
+            Some(first_fill_id.as_str())
+        );
+        assert_eq!(
+            restored.trades[1].fill_id.as_deref(),
+            Some(second_fill_id.as_str())
+        );
+        assert_ne!(restored.trades[0].fill_id, restored.trades[1].fill_id);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn sqlite_legacy_metadata_without_no_fill_registry_loads_with_empty_registry() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-legacy-meta-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        save_sqlite_ledger(&path, &Ledger::default()).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute(
+            "UPDATE ledger_meta SET payload=?1 WHERE id=1",
+            [r#"{"initial_cash":10000.0,"max_leverage":null}"#],
+        )
+        .unwrap();
+        drop(db);
+
+        let restored = load_sqlite_ledger(&path).unwrap();
+        assert!(restored.no_fill_order_responses.is_empty());
+        assert_eq!(restored.fill_id_epoch, None);
+        assert_eq!(restored.fill_id_sequence, 0);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
     #[tokio::test]
     async fn loading_store_recovers_interrupted_barriers_and_scheduled_runs() {
         let path = std::env::temp_dir().join(format!(
             "position-management-load-{}-{}.sqlite",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
         ));
         let barrier: BarrierOrder = serde_json::from_value(serde_json::json!({
             "id": "triggering", "symbol": "BTC-USDT", "side": "sell",
             "quantity": 1.0, "remaining_quantity": 1.0, "filled_quantity": 0.0,
             "trigger_price": 100.0, "trigger_direction": "below", "created_at": 1,
             "status": "triggering"
-        })).unwrap();
+        }))
+        .unwrap();
         let auto_stop: BarrierOrder = serde_json::from_value(serde_json::json!({
             "id": "legacy-stop", "symbol": "BTC-USDT", "side": "sell",
             "quantity": 1.0, "remaining_quantity": 1.0, "filled_quantity": 0.0,
             "trigger_price": 100.0, "trigger_direction": "below", "created_at": 1,
             "triggered_at": 2, "status": "unfilled", "source": "auto",
             "parent_order_id": "auto-stop-parent"
-        })).unwrap();
+        }))
+        .unwrap();
         let run: VwapRunStatus = serde_json::from_value(serde_json::json!({
             "id": "running", "symbol": "BTC-USDT", "side": "buy", "quantity": 1.0,
-            "executed_quantity": 0.0, "strategy": "vwap", "duration_minutes": 5,
+            "executed_quantity": 0.4, "strategy": "vwap", "duration_minutes": 5,
             "started_at": 1, "status": "running", "market_vwap": 0.0,
-            "execution_vwap": 0.0, "slippage": 0.0
-        })).unwrap();
-        save_sqlite_ledger(&path, &Ledger {
-            barrier_orders: vec![barrier, auto_stop], scheduled_runs: vec![run],
-            ..Ledger::default()
-        }).unwrap();
-        let store = PositionStore::load_from_path(path.clone())
-            .await.unwrap();
+            "execution_vwap": 100.0, "slippage": 0.0,
+            "lifecycle": {
+                "schema_version": 1,
+                "opportunity_id": "opportunity-1",
+                "episode_id": "episode-1",
+                "trade_id": "trade-1",
+                "execution_mode": "paper",
+                "entry_policy": "scheduled",
+                "source": "auto"
+            }
+        }))
+        .unwrap();
+        let legacy_run: VwapRunStatus = serde_json::from_value(serde_json::json!({
+            "id": "legacy-completed", "symbol": "ETH-USDT", "side": "sell", "quantity": 2.0,
+            "executed_quantity": 2.0, "strategy": "twap", "duration_minutes": 10,
+            "started_at": 2, "status": "completed", "market_vwap": 90.0,
+            "execution_vwap": 89.0, "slippage": 1.0
+        }))
+        .unwrap();
+        assert!(legacy_run.lifecycle.is_none());
+        save_sqlite_ledger(
+            &path,
+            &Ledger {
+                barrier_orders: vec![barrier, auto_stop],
+                scheduled_runs: vec![run, legacy_run],
+                ..Ledger::default()
+            },
+        )
+        .unwrap();
+        let store = PositionStore::load_from_path(path.clone()).await.unwrap();
         let ledger = store.ledger.lock().await;
         assert_eq!(ledger.barrier_orders[0].status, "interrupted");
         assert_eq!(ledger.barrier_orders[1].status, "cancelled");
         assert_eq!(ledger.scheduled_runs[0].status, "interrupted");
-        assert!(store.vwap_runs.lock().await["running"].cancelled.load(Ordering::Relaxed));
+        assert_eq!(ledger.scheduled_runs[0].executed_quantity, 0.4);
+        assert_eq!(
+            ledger.scheduled_runs[0]
+                .lifecycle
+                .as_ref()
+                .unwrap()
+                .trade_id,
+            "trade-1"
+        );
+        assert!(
+            ledger.scheduled_runs[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("automatic replay is disabled")
+        );
+        assert_eq!(ledger.scheduled_runs[1].status, "completed");
+        assert!(ledger.scheduled_runs[1].lifecycle.is_none());
+        assert!(
+            store.vwap_runs.lock().await["running"]
+                .cancelled
+                .load(Ordering::Relaxed)
+        );
         drop(ledger);
+
+        // The recovery decision is durable. A second process load must not turn
+        // the run back into a workerless `running` row or reset its progress.
+        store.persist_durable_snapshot(None).await.unwrap();
+        drop(store);
+        let restarted = PositionStore::load_from_path(path.clone()).await.unwrap();
+        let ledger = restarted.ledger.lock().await;
+        let recovered = &ledger.scheduled_runs[0];
+        assert_eq!(recovered.status, "interrupted");
+        assert_eq!(recovered.executed_quantity, 0.4);
+        assert_eq!(recovered.lifecycle.as_ref().unwrap().trade_id, "trade-1");
+        assert!(
+            recovered
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("automatic replay is disabled")
+        );
+        assert!(
+            restarted.vwap_runs.lock().await["running"]
+                .cancelled
+                .load(Ordering::Relaxed)
+        );
+        drop(ledger);
+        drop(restarted);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));

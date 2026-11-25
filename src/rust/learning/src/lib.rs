@@ -69,6 +69,8 @@ struct LearningOutcome {
     learning_context: Option<String>,
     #[serde(default)]
     market_regime: Option<String>,
+    #[serde(default)]
+    horizon_seconds: Option<u64>,
     source: LearningOutcomeSource,
     #[serde(default)]
     realized_pnl_usd: Option<f64>,
@@ -144,6 +146,8 @@ struct LearningState {
     missed_opportunity_jobs: BTreeMap<String, MissedOpportunityJob>,
     #[serde(default)]
     scout_replay_runs: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    evidence_requests: BTreeMap<String, EvidenceRequest>,
     seen_event_ids: BTreeSet<String>,
     accepted_events: u64,
     #[serde(skip)]
@@ -174,6 +178,216 @@ mod scout_sample_defaults_tests {
     }
 }
 
+#[cfg(test)]
+mod evidence_request_tests {
+    use super::*;
+
+    #[test]
+    fn equivalent_gaps_deduplicate_and_freshness_completes_them() {
+        let mut state = LearningState::default();
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "trend",
+                "5m",
+                "fresh",
+                999,
+            )
+            .is_none()
+        );
+        assert!(state.evidence_requests.is_empty());
+        let first = schedule_evidence_request(
+            &mut state,
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "5m",
+            "missing",
+            1_000,
+        )
+        .unwrap();
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "trend",
+                "5m",
+                "stale",
+                1_001,
+            )
+            .is_none()
+        );
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "range",
+                "5m",
+                "missing",
+                1_002,
+            )
+            .is_some()
+        );
+        assert!(start_evidence_request(&mut state, &first, 1_003));
+        finish_evidence_request(&mut state, &first, 1_004, Ok(()));
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "BTC-USDT",
+                "live-momentum",
+                "profile-1",
+                "trend",
+                "5m",
+                "fresh",
+                1_005,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            state.evidence_requests[&first].status,
+            EvidenceRequestStatus::Completed
+        );
+    }
+
+    #[test]
+    fn evidence_request_retry_is_backed_off_and_capped() {
+        let mut state = LearningState::default();
+        let id = schedule_evidence_request(
+            &mut state,
+            "ETH-USDT",
+            "live-momentum",
+            "profile-2",
+            "unknown",
+            "default",
+            "stale",
+            10_000,
+        )
+        .unwrap();
+        assert!(start_evidence_request(&mut state, &id, 10_000));
+        finish_evidence_request(&mut state, &id, 10_001, Err("history unavailable".into()));
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "ETH-USDT",
+                "live-momentum",
+                "profile-2",
+                "unknown",
+                "default",
+                "stale",
+                15_000,
+            )
+            .is_none()
+        );
+        assert!(
+            schedule_evidence_request(
+                &mut state,
+                "ETH-USDT",
+                "live-momentum",
+                "profile-2",
+                "unknown",
+                "default",
+                "stale",
+                15_001,
+            )
+            .is_some()
+        );
+        assert_eq!(evidence_request_retry_delay_ms(1), 5_000);
+        assert_eq!(evidence_request_retry_delay_ms(2), 10_000);
+        assert_eq!(
+            evidence_request_retry_delay_ms(100),
+            EVIDENCE_REQUEST_RETRY_MAX_MS
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_requests_survive_learning_restart_and_running_work_is_requeued() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-evidence-requests-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut state = LearningState::default();
+        state.active_profiles.insert(
+            "BTC-USDT:live-momentum".into(),
+            StrategyProfile {
+                profile_id: "profile-1".into(),
+                version: 1,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                parameters: BTreeMap::from([("minimum_momentum".into(), 0.002)]),
+                learning_samples: 0,
+                positive_samples: 0,
+                realized_pnl: 0.0,
+            },
+        );
+        let id = schedule_evidence_request(
+            &mut state,
+            "BTC-USDT",
+            "live-momentum",
+            "profile-1",
+            "trend",
+            "30m",
+            "missing",
+            123,
+        )
+        .unwrap();
+        assert!(start_evidence_request(&mut state, &id, 124));
+        let connection = open_state_db(&path).unwrap();
+        persist_normalized(&connection, &state).unwrap();
+        drop(connection);
+
+        let recovered = service_state(path.clone()).unwrap();
+        let recovered_state = recovered.state.lock().await;
+        assert_eq!(
+            recovered_state.evidence_requests[&id].status,
+            EvidenceRequestStatus::Pending
+        );
+        assert_eq!(recovered_state.evidence_requests[&id].attempts, 1);
+        assert_eq!(
+            recovered_state.evidence_requests[&id].reason.as_deref(),
+            Some("resumed after Learning restarted")
+        );
+        drop(recovered_state);
+        let telemetry = get_evidence_requests(axum::extract::State(recovered))
+            .await
+            .0;
+        assert_eq!(telemetry.requests.len(), 1);
+        assert_eq!(
+            telemetry.requests[0].request.status,
+            EvidenceRequestStatus::Pending
+        );
+        assert_eq!(
+            telemetry.requests[0].coverage_status.as_deref(),
+            Some("missing")
+        );
+        assert_eq!(telemetry.requests[0].sample_count, Some(0));
+        assert_eq!(telemetry.requests[0].effective_sample_size, Some(0.0));
+        assert_eq!(telemetry.requests[0].last_sample_timestamp_ms, None);
+        assert_eq!(telemetry.requests[0].regime_horizon_coverage, "measured");
+        assert_eq!(telemetry.total_coverage_cohorts, 1);
+        assert_eq!(telemetry.omitted_coverage_cohorts, 0);
+        assert_eq!(telemetry.coverage_cohorts[0].symbol, "BTC-USDT");
+        assert_eq!(telemetry.coverage_cohorts[0].profile_id, "profile-1");
+        assert_eq!(
+            telemetry.coverage_cohorts[0].coverage_status.as_deref(),
+            Some("missing")
+        );
+        assert_eq!(telemetry.coverage_cohorts[0].sample_count, Some(0));
+        assert_eq!(telemetry.coverage_cohorts[0].last_sample_timestamp_ms, None);
+        std::fs::remove_file(&path).unwrap();
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+}
+
 impl Default for LearningState {
     fn default() -> Self {
         Self {
@@ -189,12 +403,192 @@ impl Default for LearningState {
             strategy_replay_jobs: BTreeMap::new(),
             missed_opportunity_jobs: BTreeMap::new(),
             scout_replay_runs: BTreeMap::new(),
+            evidence_requests: BTreeMap::new(),
             seen_event_ids: BTreeSet::new(),
             accepted_events: 0,
             outcome_history_truncated: false,
             seen_event_ids_overflowed: false,
             seen_execution_event_ids_overflowed: false,
             state_updates: None,
+        }
+    }
+}
+
+const MAX_EVIDENCE_REQUESTS: usize = 10_000;
+const EVIDENCE_REQUEST_MAX_ATTEMPTS: u32 = 5;
+const EVIDENCE_REQUEST_RETRY_BASE_MS: u64 = 5_000;
+const EVIDENCE_REQUEST_RETRY_MAX_MS: u64 = 60 * 60 * 1_000;
+const EVIDENCE_REQUEST_DISPATCH_TIMEOUT_MS: u64 = 6 * 60 * 60 * 1_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct EvidenceRequest {
+    symbol: String,
+    strategy: String,
+    profile_id: String,
+    regime: String,
+    horizon: String,
+    status: EvidenceRequestStatus,
+    attempts: u32,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    next_attempt_at_ms: u64,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceRequestStatus {
+    Pending,
+    Running,
+    Dispatched,
+    Completed,
+    Failed,
+}
+
+fn evidence_request_key(
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    regime: &str,
+    horizon: &str,
+) -> String {
+    [symbol, strategy, profile_id, regime, horizon]
+        .iter()
+        .map(|part| format!("{}:{part}", part.len()))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn evidence_request_retry_delay_ms(attempts: u32) -> u64 {
+    EVIDENCE_REQUEST_RETRY_BASE_MS
+        .saturating_mul(1_u64 << attempts.saturating_sub(1).min(20))
+        .min(EVIDENCE_REQUEST_RETRY_MAX_MS)
+}
+
+fn schedule_evidence_request(
+    state: &mut LearningState,
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    regime: &str,
+    horizon: &str,
+    freshness: &str,
+    now_ms: u64,
+) -> Option<String> {
+    let id = evidence_request_key(symbol, strategy, profile_id, regime, horizon);
+    let gap = matches!(freshness, "missing" | "stale");
+    if !gap {
+        if let Some(request) = state.evidence_requests.get_mut(&id)
+            && request.status != EvidenceRequestStatus::Completed
+        {
+            request.status = EvidenceRequestStatus::Completed;
+            request.updated_at_ms = now_ms;
+            request.reason = Some("coverage is fresh".into());
+        }
+        return None;
+    }
+    if let Some(request) = state.evidence_requests.get_mut(&id) {
+        if matches!(
+            request.status,
+            EvidenceRequestStatus::Pending | EvidenceRequestStatus::Running
+        ) {
+            return None;
+        }
+        if request.status == EvidenceRequestStatus::Dispatched {
+            if now_ms < request.next_attempt_at_ms {
+                return None;
+            }
+            request.status = EvidenceRequestStatus::Failed;
+            request.updated_at_ms = now_ms;
+            request.next_attempt_at_ms =
+                now_ms.saturating_add(evidence_request_retry_delay_ms(request.attempts.max(1)));
+            request.reason = Some("no fresh Scout outcome before dispatch timeout".into());
+            return None;
+        }
+        if request.status == EvidenceRequestStatus::Completed {
+            request.attempts = 0;
+            request.next_attempt_at_ms = now_ms;
+        } else if request.attempts >= EVIDENCE_REQUEST_MAX_ATTEMPTS
+            || now_ms < request.next_attempt_at_ms
+        {
+            return None;
+        }
+        request.status = EvidenceRequestStatus::Pending;
+        request.updated_at_ms = now_ms;
+        request.reason = None;
+        return Some(id);
+    }
+    if state.evidence_requests.len() >= MAX_EVIDENCE_REQUESTS {
+        let evict = state
+            .evidence_requests
+            .iter()
+            .filter(|(_, request)| {
+                matches!(
+                    request.status,
+                    EvidenceRequestStatus::Completed | EvidenceRequestStatus::Failed
+                )
+            })
+            .min_by_key(|(_, request)| request.updated_at_ms)
+            .map(|(id, _)| id.clone())?;
+        state.evidence_requests.remove(&evict);
+    }
+    state.evidence_requests.insert(
+        id.clone(),
+        EvidenceRequest {
+            symbol: symbol.into(),
+            strategy: strategy.into(),
+            profile_id: profile_id.into(),
+            regime: regime.into(),
+            horizon: horizon.into(),
+            status: EvidenceRequestStatus::Pending,
+            attempts: 0,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            next_attempt_at_ms: now_ms,
+            reason: None,
+        },
+    );
+    Some(id)
+}
+
+fn start_evidence_request(state: &mut LearningState, id: &str, now_ms: u64) -> bool {
+    let Some(request) = state.evidence_requests.get_mut(id) else {
+        return false;
+    };
+    if request.status != EvidenceRequestStatus::Pending || now_ms < request.next_attempt_at_ms {
+        return false;
+    }
+    request.status = EvidenceRequestStatus::Running;
+    request.attempts = request.attempts.saturating_add(1);
+    request.updated_at_ms = now_ms;
+    true
+}
+
+fn finish_evidence_request(
+    state: &mut LearningState,
+    id: &str,
+    now_ms: u64,
+    result: Result<(), String>,
+) {
+    let Some(request) = state.evidence_requests.get_mut(id) else {
+        return;
+    };
+    if request.status == EvidenceRequestStatus::Completed {
+        return;
+    }
+    request.updated_at_ms = now_ms;
+    match result {
+        Ok(()) => {
+            request.status = EvidenceRequestStatus::Dispatched;
+            request.next_attempt_at_ms =
+                now_ms.saturating_add(EVIDENCE_REQUEST_DISPATCH_TIMEOUT_MS);
+            request.reason = Some("awaiting Scout outcome feedback".into());
+        }
+        Err(reason) => {
+            request.status = EvidenceRequestStatus::Failed;
+            request.next_attempt_at_ms =
+                now_ms.saturating_add(evidence_request_retry_delay_ms(request.attempts.max(1)));
+            request.reason = Some(reason);
         }
     }
 }
@@ -212,6 +606,29 @@ enum StrategyReplayStatus {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StrategyReplayJob {
     event_id: String,
+    /// Optional identity and provenance copied from versioned TradeOutcome
+    /// feedback. Older stored jobs deserialize without invented attribution.
+    #[serde(default)]
+    schema_version: Option<u16>,
+    #[serde(default)]
+    trade_id: Option<String>,
+    #[serde(default)]
+    opportunity_id: Option<String>,
+    #[serde(default)]
+    episode_id: Option<String>,
+    /// Profile captured at entry; kept distinct from the replay/training key.
+    #[serde(default)]
+    entry_profile_id: Option<String>,
+    #[serde(default)]
+    profile_hash: Option<String>,
+    #[serde(default)]
+    profile_version: Option<u64>,
+    #[serde(default)]
+    execution_mode: Option<String>,
+    #[serde(default)]
+    entry_policy: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
     symbol: String,
     strategy: String,
     profile_id: String,
@@ -353,6 +770,50 @@ struct FeedbackResult {
     profile: Option<StrategyProfile>,
 }
 
+async fn accept_learning_feedback(
+    State(service): State<ServiceState>,
+    Json(event): Json<FeedbackEvent>,
+) -> Result<Json<FeedbackResult>, (StatusCode, String)> {
+    let scout_identity = match &event {
+        FeedbackEvent::ScoutOutcome {
+            symbol,
+            strategy,
+            profile_id,
+            market_regime,
+            ..
+        } => Some((
+            symbol.clone(),
+            strategy.clone(),
+            profile_id.clone(),
+            market_regime.clone().unwrap_or_else(|| "unknown".into()),
+        )),
+        _ => None,
+    };
+    let result = feedback::accept_feedback(State(service.clone()), Json(event)).await?;
+    if let Some((symbol, strategy, profile_id, regime)) = scout_identity {
+        let mut state = service.state.lock().await;
+        let now = now_ms();
+        let mut changed = false;
+        for request in state.evidence_requests.values_mut().filter(|request| {
+            request.symbol == symbol
+                && request.strategy == strategy
+                && request.profile_id == profile_id
+                && (request.regime == regime || request.regime == "unknown")
+        }) {
+            if request.status != EvidenceRequestStatus::Completed {
+                request.status = EvidenceRequestStatus::Completed;
+                request.updated_at_ms = now;
+                request.reason = Some("Scout outcome recorded".into());
+                changed = true;
+            }
+        }
+        if changed {
+            persist(&service.path, &state)?;
+        }
+    }
+    Ok(result)
+}
+
 fn key(symbol: &str, strategy: &str) -> String {
     format!("{symbol}:{strategy}")
 }
@@ -428,6 +889,14 @@ fn service_state(path: PathBuf) -> Result<ServiceState, String> {
             );
         }
     }
+    for request in stored.evidence_requests.values_mut() {
+        if request.status == EvidenceRequestStatus::Running {
+            request.status = EvidenceRequestStatus::Pending;
+            request.updated_at_ms = now_ms();
+            request.next_attempt_at_ms = request.updated_at_ms;
+            request.reason = Some("resumed after Learning restarted".into());
+        }
+    }
     feedback::reconcile_scout_profiles(&mut stored);
     if !stored.outcome_history_truncated {
         rebuild_trade_profile_metrics(&mut stored, now_ms());
@@ -445,9 +914,10 @@ fn service_router(service: ServiceState) -> Router {
         .route("/profiles", get(get_profiles).post(register_profile))
         .route("/decision-snapshot", get(get_decision_snapshot))
         .route("/summary", get(get_summary))
-        .route("/feedback", post(accept_feedback))
+        .route("/feedback", post(accept_learning_feedback))
         .route("/exit-timing", post(accept_exit_timing_observation))
         .route("/strategy-replays", get(get_strategy_replays))
+        .route("/evidence-requests", get(get_evidence_requests))
         .route("/strategy-replays/{event_id}", get(get_strategy_replay))
         .route(
             "/strategy-replays/{event_id}/retry",
@@ -536,6 +1006,7 @@ fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
              CREATE TABLE IF NOT EXISTS learning_strategy_replay_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_scout_replay_runs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_jobs (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS learning_evidence_requests (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS learning_missed_opportunity_bands (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);",
         )
         .map_err(|error| {
@@ -805,6 +1276,207 @@ async fn get_strategy_replays(State(service): State<ServiceState>) -> Json<Vec<S
     Json(jobs)
 }
 
+#[derive(Serialize)]
+struct EvidenceRequestCoverageView {
+    request: EvidenceRequest,
+    as_of_ms: u64,
+    coverage_scope: &'static str,
+    coverage_status: Option<String>,
+    gap_reason: Option<String>,
+    sample_count: Option<usize>,
+    effective_sample_size: Option<f64>,
+    last_sample_timestamp_ms: Option<u64>,
+    last_sample_age_ms: Option<u64>,
+    regime_horizon_coverage: &'static str,
+}
+
+#[derive(Serialize)]
+struct EvidenceRequestsResponse {
+    as_of_ms: u64,
+    total_count: usize,
+    omitted_count: usize,
+    requests: Vec<EvidenceRequestCoverageView>,
+    total_coverage_cohorts: usize,
+    omitted_coverage_cohorts: usize,
+    coverage_cohorts: Vec<EvidenceCoverageCohortView>,
+}
+
+#[derive(Serialize)]
+struct EvidenceCoverageCohortView {
+    symbol: String,
+    strategy: String,
+    profile_id: String,
+    regime: Option<String>,
+    horizon: Option<String>,
+    coverage_scope: &'static str,
+    coverage_status: Option<String>,
+    gap_reason: Option<String>,
+    sample_count: Option<usize>,
+    effective_sample_size: Option<f64>,
+    last_sample_timestamp_ms: Option<u64>,
+    last_sample_age_ms: Option<u64>,
+    regime_horizon_coverage: &'static str,
+}
+
+async fn get_evidence_requests(
+    State(service): State<ServiceState>,
+) -> Json<EvidenceRequestsResponse> {
+    const RESPONSE_LIMIT: usize = 100;
+    const COVERAGE_COHORT_LIMIT: usize = 500;
+    let as_of_ms = now_ms();
+    let state = service.state.lock().await;
+    let priority_snapshot = walk_forward_priority_snapshot(&state, as_of_ms);
+    let mut requests = state
+        .evidence_requests
+        .values()
+        .cloned()
+        .map(|request| {
+            let key = format!(
+                "{}|{}|profile:{}|regime:{}|horizon:{}",
+                request.symbol,
+                request.strategy,
+                request.profile_id,
+                request.regime,
+                request.horizon
+            );
+            let coverage = priority_snapshot.get(&key);
+            let coverage_status = coverage
+                .and_then(|coverage| coverage["freshnessStatus"].as_str())
+                .map(str::to_owned)
+                .or_else(|| Some("missing".to_owned()));
+            let sample_count = coverage
+                .and_then(|coverage| coverage["sampleCount"].as_u64())
+                .and_then(|count| usize::try_from(count).ok())
+                .or_else(|| Some(0));
+            let effective_sample_size = coverage
+                .and_then(|coverage| coverage["effectiveSampleSize"].as_f64())
+                .or_else(|| Some(0.0));
+            let last_sample_timestamp_ms = coverage
+                .and_then(|coverage| coverage["lastSampleTimestampMs"].as_u64())
+                .filter(|timestamp| *timestamp > 0);
+            let gap_reason = match coverage_status.as_deref() {
+                Some("missing") => Some("No eligible Scout outcomes are recorded.".to_owned()),
+                Some("stale") => Some("The latest eligible Scout outcome is stale.".to_owned()),
+                Some("fresh") => Some("Fresh aggregate Scout coverage is available.".to_owned()),
+                _ => None,
+            };
+            EvidenceRequestCoverageView {
+                request,
+                as_of_ms,
+                coverage_scope: "symbol_strategy_profile_regime_horizon",
+                coverage_status,
+                gap_reason,
+                sample_count,
+                effective_sample_size,
+                last_sample_timestamp_ms,
+                last_sample_age_ms: last_sample_timestamp_ms
+                    .map(|timestamp| as_of_ms.saturating_sub(timestamp)),
+                regime_horizon_coverage: "measured",
+            }
+        })
+        .collect::<Vec<_>>();
+    requests.sort_by_key(|view| std::cmp::Reverse(view.request.updated_at_ms));
+    let total_count = requests.len();
+    requests.truncate(RESPONSE_LIMIT);
+    let mut coverage_cohorts = priority_snapshot
+        .iter()
+        .filter_map(|(key, coverage)| {
+            let (symbol_strategy, context) = key.split_once("|profile:")?;
+            let (symbol, strategy) = symbol_strategy.split_once('|')?;
+            let mut segments = context.split('|');
+            let profile_id = segments.next()?;
+            let mut regime = None;
+            let mut horizon = None;
+            for segment in segments {
+                if let Some(value) = segment.strip_prefix("regime:") {
+                    regime = Some(value.to_owned());
+                } else if let Some(value) = segment.strip_prefix("horizon:") {
+                    horizon = Some(value.to_owned());
+                }
+            }
+            let coverage_scope = match (regime.is_some(), horizon.is_some()) {
+                (true, true) => "symbol_strategy_profile_regime_horizon",
+                (false, false) => "symbol_strategy_profile_aggregate",
+                _ => "symbol_strategy_profile_context",
+            };
+            let coverage_status = coverage
+                .get("freshnessStatus")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let sample_count = coverage
+                .get("sampleCount")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok());
+            let effective_sample_size = coverage
+                .get("effectiveSampleSize")
+                .and_then(serde_json::Value::as_f64);
+            let last_sample_timestamp_ms = coverage
+                .get("lastSampleTimestampMs")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|timestamp| *timestamp > 0);
+            let gap_reason = match coverage_status.as_deref() {
+                Some("missing") => Some("No eligible Scout outcomes are recorded.".to_owned()),
+                Some("stale") => Some("The latest eligible Scout outcome is stale.".to_owned()),
+                Some("fresh") => Some("Fresh aggregate Scout coverage is available.".to_owned()),
+                _ => None,
+            };
+            Some(EvidenceCoverageCohortView {
+                symbol: symbol.to_owned(),
+                strategy: strategy.to_owned(),
+                profile_id: profile_id.to_owned(),
+                regime,
+                horizon,
+                coverage_scope,
+                coverage_status,
+                gap_reason,
+                sample_count,
+                effective_sample_size,
+                last_sample_timestamp_ms,
+                last_sample_age_ms: last_sample_timestamp_ms
+                    .map(|timestamp| as_of_ms.saturating_sub(timestamp)),
+                regime_horizon_coverage: if coverage_scope
+                    == "symbol_strategy_profile_regime_horizon"
+                {
+                    "measured"
+                } else {
+                    "unavailable"
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    coverage_cohorts.sort_by(|left, right| {
+        let freshness_priority = |status: Option<&str>| match status {
+            Some("missing") => 0,
+            Some("stale") => 1,
+            Some("fresh") => 2,
+            _ => 3,
+        };
+        freshness_priority(left.coverage_status.as_deref())
+            .cmp(&freshness_priority(right.coverage_status.as_deref()))
+            .then_with(|| {
+                left.effective_sample_size
+                    .unwrap_or(f64::INFINITY)
+                    .total_cmp(&right.effective_sample_size.unwrap_or(f64::INFINITY))
+            })
+            .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.strategy.cmp(&right.strategy))
+            .then_with(|| left.profile_id.cmp(&right.profile_id))
+            .then_with(|| left.regime.cmp(&right.regime))
+            .then_with(|| left.horizon.cmp(&right.horizon))
+    });
+    let total_coverage_cohorts = coverage_cohorts.len();
+    coverage_cohorts.truncate(COVERAGE_COHORT_LIMIT);
+    Json(EvidenceRequestsResponse {
+        as_of_ms,
+        total_count,
+        omitted_count: total_count.saturating_sub(requests.len()),
+        requests,
+        total_coverage_cohorts,
+        omitted_coverage_cohorts: total_coverage_cohorts.saturating_sub(coverage_cohorts.len()),
+        coverage_cohorts,
+    })
+}
+
 async fn get_strategy_replay(
     State(service): State<ServiceState>,
     AxumPath(event_id): AxumPath<String>,
@@ -970,6 +1642,11 @@ fn load_state(path: &Path) -> Result<LearningState, String> {
             &connection,
             "learning_missed_opportunity_jobs",
             &mut state.missed_opportunity_jobs,
+        )?;
+        load_map(
+            &connection,
+            "learning_evidence_requests",
+            &mut state.evidence_requests,
         )?;
         state.missed_opportunity_bands =
             load_recent_rows(&connection, "learning_missed_opportunity_bands", 2_000)?;
@@ -1138,6 +1815,11 @@ pub(crate) fn persist_normalized(
         &transaction,
         "learning_missed_opportunity_jobs",
         &state.missed_opportunity_jobs,
+    )?;
+    write_map(
+        &transaction,
+        "learning_evidence_requests",
+        &state.evidence_requests,
     )?;
     let bands = state
         .missed_opportunity_bands
@@ -1774,6 +2456,7 @@ mod tests {
                 evidence_group_id: None,
                 learning_context: None,
                 market_regime: Some("trend".into()),
+                horizon_seconds: Some(300),
                 source: LearningOutcomeSource::Scout,
                 realized_pnl_usd: None,
                 paired_comparison: false,
@@ -1922,6 +2605,16 @@ mod tests {
         for index in 0..5 {
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("trade-{index}"),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: now_ms(),
                 learning_context: None,
                 symbol: profile.symbol.clone(),
@@ -1946,6 +2639,16 @@ mod tests {
         }
         let duplicate = FeedbackEvent::TradeOutcome {
             event_id: "trade-4".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: now_ms(),
             learning_context: None,
             symbol: profile.symbol.clone(),
@@ -2203,6 +2906,16 @@ mod tests {
         for index in 0..5 {
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("old-profile-close-{index}"),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: now_ms(),
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
@@ -2325,6 +3038,16 @@ mod tests {
             };
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("threshold-trade-{index}"),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: first_observed_at_ms + index * interval_ms,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
@@ -2414,6 +3137,16 @@ mod tests {
                 &[],
                 &FeedbackEvent::TradeOutcome {
                     event_id: "e2".into(),
+                    schema_version: None,
+                    trade_id: None,
+                    opportunity_id: None,
+                    episode_id: None,
+                    profile_hash: None,
+                    profile_version: None,
+                    execution_mode: None,
+                    entry_policy: None,
+                    source: None,
+                    entry_profile_id: None,
                     observed_at_ms: 2,
                     learning_context: None,
                     symbol: "BTC-USDT".into(),
@@ -2509,6 +3242,16 @@ mod tests {
         assert_eq!(parts.3["threshold"], 0.5);
         let trade = FeedbackEvent::TradeOutcome {
             event_id: "trade-id".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 2,
             learning_context: None,
             symbol: "ETH-USDT".into(),
@@ -2541,6 +3284,16 @@ mod tests {
         for index in 0..3 {
             let event = FeedbackEvent::TradeOutcome {
                 event_id: format!("risk-trade-{index}"),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: timestamp + index,
                 learning_context: Some("long:mixed:BTC-USDT:live-momentum:P0:depth:lt05".into()),
                 symbol: "BTC-USDT".into(),

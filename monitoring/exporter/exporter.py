@@ -541,8 +541,11 @@ def strategy_live_position_counts():
         if not isinstance(activity, dict):
             raise ValueError("AutoTrader position count response was not an object")
         for strategy, value in activity.items():
-            if strategy in live_counts and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                live_counts[strategy] = value
+            if strategy not in live_counts:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"AutoTrader position count for {strategy} was invalid")
+            live_counts[strategy] = value
         counts["live"] = live_counts
         counts_available = True
     except (OSError, URLError, ValueError, TypeError, AttributeError) as error:

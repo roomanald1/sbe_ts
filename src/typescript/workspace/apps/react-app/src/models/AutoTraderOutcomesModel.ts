@@ -18,6 +18,12 @@ import { insightsFetch } from '../insights_rsocket';
 import { paperExchangeFetch } from '../paper_exchange_api';
 import { autoTraderRpc } from '../auto_trader_rsocket';
 
+type LedgerLifecycleIdentity = {
+  opportunity_id?: string | null;
+  episode_id?: string | null;
+  trade_id?: string | null;
+};
+
 export type AutoTraderOutcome = {
   rowId: string;
   status: 'Open' | 'Partially closed' | 'Closed';
@@ -42,7 +48,10 @@ export type AutoTraderOutcome = {
   ledgerSource?: string;
   ledgerOrderType?: string;
   manuallyClosed?: boolean;
-  ledgerTrade?: PositionTrade;
+  ledgerTrade?: PositionTrade & { lifecycle?: LedgerLifecycleIdentity | null };
+  opportunityId?: string;
+  episodeId?: string;
+  tradeId?: string;
   entryNotionalUsd?: number;
   feePercent?: number;
   pnlQuoteCurrency: string;
@@ -88,6 +97,28 @@ export type AutoTraderOutcome = {
   source: 'scout' | 'exploratory' | 'strict' | 'paper-carry' | 'unknown';
   components: Record<string, number | null>;
 };
+
+/** Projects only explicit ledger lifecycle links; legacy rows stay unattributed. */
+export function projectLedgerLifecycleIdentity<T extends AutoTraderOutcome>(
+  row: T,
+): T {
+  if (row.status !== 'Closed' || !row.rowId.startsWith('ledger-trade:'))
+    return row;
+  const lifecycle = row.ledgerTrade?.lifecycle;
+  if (!lifecycle) return row;
+  return {
+    ...row,
+    ...(typeof lifecycle.opportunity_id === 'string' && lifecycle.opportunity_id
+      ? { opportunityId: lifecycle.opportunity_id }
+      : {}),
+    ...(typeof lifecycle.episode_id === 'string' && lifecycle.episode_id
+      ? { episodeId: lifecycle.episode_id }
+      : {}),
+    ...(typeof lifecycle.trade_id === 'string' && lifecycle.trade_id
+      ? { tradeId: lifecycle.trade_id }
+      : {}),
+  };
+}
 
 export function applyInstanceTodayPnl(
   rows: AutoTraderOutcome[],
@@ -1640,7 +1671,8 @@ export class AutoTraderOutcomesModel {
         ),
       ];
       void this.loadMissingEntryAudits(missingAuditDecisionIds);
-      const closedLedgerRows = closedLedgerSource.map((row) => {
+      const closedLedgerRows = closedLedgerSource.map((sourceRow) => {
+        const row = projectLedgerLifecycleIdentity(sourceRow);
         const entryAudit = this.auditRows.find(
           (record) =>
             record.decision_id === row.decisionId && record.stage === 'entry',

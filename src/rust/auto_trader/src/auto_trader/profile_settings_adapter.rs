@@ -8,7 +8,39 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
         .to_owned();
     let profile = settings.learned_profiles.get(&format!("{profile_symbol}:{strategy_name}"));
     let policy = active_exit_protection_policy(settings, &profile_symbol, strategy_name);
-    if profile.is_none() && policy.is_none() { return; }
+    let decision = signal.strategy_decision.as_ref();
+    let has_override = settings
+        .strategy_parameter_overrides
+        .keys()
+        .any(|key| key.starts_with(&format!("{profile_symbol}:{strategy_name}:")));
+    let parameters_are_valid = decision
+        .and_then(|decision| decision.get("strategy_parameters"))
+        .is_none_or(|parameters| {
+            parameters.as_object().is_some_and(|parameters| {
+                parameters.iter().all(|(key, value)| {
+                    let Some(value) = value.as_f64() else {
+                        return false;
+                    };
+                    strategy
+                        .parameter_specs()
+                        .iter()
+                        .find(|spec| spec.key.as_str() == key)
+                        .is_some_and(|spec| strategy_parameter_value_is_valid(value, spec))
+                })
+            })
+        });
+    let has_probe = decision.is_some_and(|decision| {
+        decision.get("scout_parameter_key").is_some()
+            || decision.get("scout_parameter_value").is_some()
+    });
+    if profile.is_none()
+        && policy.is_none()
+        && !has_override
+        && !has_probe
+        && parameters_are_valid
+    {
+        return;
+    }
     let mut learned_parameters = profile.map(|profile| profile.parameters.clone()).unwrap_or_else(|| {
         signal.strategy_decision.as_ref()
             .and_then(|decision| decision.get("strategy_parameters"))
@@ -430,13 +462,13 @@ fn learned_strategy_parameter_profile_with_variants(
             .or_else(|| legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
                 settings.strategy_parameter_overrides.get(&strategy_parameter_key(symbol, strategy, legacy)).copied()
             }))
-            .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max);
+            .filter(|value| strategy_parameter_value_is_valid(*value, spec));
         let policy_value = active_exit_protection_policy(settings, symbol, strategy.as_str())
             .and_then(|policy| exit_protection_policy_parameters(policy).get(spec.key.as_str()).copied());
         let learned_value = policy_value
-            .filter(|value| value.is_finite())
+            .filter(|value| strategy_parameter_value_is_valid(*value, spec))
             .or_else(|| learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
-                .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max))
+                .filter(|value| strategy_parameter_value_is_valid(*value, spec)))
             .unwrap_or(spec.default);
         let value = configured.unwrap_or(learned_value);
         StrategyParameterValue {
@@ -482,6 +514,14 @@ fn learned_strategy_parameter_profile_with_variants(
         walk_forward_evidence_by_regime: Default::default(),
         parameters,
     }
+}
+
+fn strategy_parameter_value_is_valid(value: f64, spec: &strategy::StrategyParameterSpec) -> bool {
+    if !value.is_finite() || spec.step <= 0.0 || value < spec.min || value > spec.max {
+        return false;
+    }
+    let step_position = (value - spec.min) / spec.step;
+    (step_position - step_position.round()).abs() <= 1e-6
 }
 
 fn threshold_observation(
@@ -623,6 +663,79 @@ mod strategy_parameter_bounds_tests {
         );
         inject_learned_parameters(&settings, &mut signal);
         assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.004);
+    }
+
+    #[test]
+    fn learned_profile_assembly_rejects_off_step_lock_and_unknown_names() {
+        let strategy = Strategy::LiveMomentum;
+        let symbol = "BTC-USDT";
+        let spec = strategy.parameter_specs().into_iter()
+            .find(|spec| spec.key == StrategyParameterKey::ProfitProtectionMinimumLockPercent)
+            .unwrap();
+        let mut settings = Settings::default();
+        let learned_parameters = BTreeMap::from([
+            (spec.key.as_str().to_owned(), 0.12),
+            ("retired_profit_lock_parameter".to_owned(), 99.0),
+        ]);
+        settings.learned_profiles.insert(format!("{symbol}:{}", strategy.as_str()), strategy::StrategyProfile {
+            profile_id: "legacy-profile".into(), version: 1, symbol: symbol.into(),
+            strategy: strategy.as_str().into(), parameters: learned_parameters,
+            learning_samples: 4, positive_samples: 3, realized_pnl: 0.0,
+        });
+        settings.strategy_parameter_overrides.insert(
+            strategy_parameter_key(symbol, strategy, spec.key.as_str()), 0.12,
+        );
+
+        let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
+        let lock = profile.parameters.iter()
+            .find(|parameter| parameter.key == spec.key.as_str()).unwrap();
+        assert_eq!(lock.value, spec.default);
+        assert!(profile.parameters.iter().all(|parameter| {
+            parameter.key != "retired_profit_lock_parameter"
+        }));
+
+        settings.strategy_parameter_overrides.clear();
+        settings.learned_profiles.get_mut(&format!("{symbol}:{}", strategy.as_str()))
+            .unwrap().parameters.insert(spec.key.as_str().to_owned(), 0.10);
+        let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
+        let lock = profile.parameters.iter()
+            .find(|parameter| parameter.key == spec.key.as_str()).unwrap();
+        assert_eq!(lock.value, 0.10);
+    }
+
+    #[test]
+    fn invalid_signal_probe_and_unknown_parameters_are_sanitized_without_profile() {
+        let strategy = Strategy::LiveMomentum;
+        let spec = strategy.parameter_specs().into_iter()
+            .find(|spec| spec.key == StrategyParameterKey::ProfitProtectionMinimumLockPercent)
+            .unwrap();
+        let mut settings = Settings::default();
+        settings.strategy_parameter_overrides.insert(
+            strategy_parameter_key("BTC-USDT", strategy, spec.key.as_str()), 0.12,
+        );
+        let mut signal = Signal {
+            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
+            timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
+            components: SignalComponents::default(), strategy_candidate: true,
+            strategy: Some(strategy.as_str().into()),
+            strategy_decision: Some(serde_json::json!({
+                "strategy_parameters": {
+                    "profit_protection_minimum_lock_percent": 0.12,
+                    "shadow_profit_minimum_lock_percent": 0.15,
+                    "retired_profit_lock_parameter": 0.2
+                },
+                "scout_parameter_key": "profit_protection_minimum_lock_percent",
+                "scout_parameter_value": 0.12
+            })),
+            range_location: None, market_regime: None, market_state: None,
+            news_attribution: None, entry_gate: None,
+        };
+
+        inject_learned_parameters(&settings, &mut signal);
+        let parameters = signal_strategy_parameters(&signal);
+        assert_eq!(parameters[spec.key.as_str()], spec.default);
+        assert!(!parameters.contains_key("shadow_profit_minimum_lock_percent"));
+        assert!(!parameters.contains_key("retired_profit_lock_parameter"));
     }
 
     #[test]

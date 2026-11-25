@@ -71,6 +71,7 @@ fn build_order_request(
     client_order_id: &str,
     now_ms: u64,
     reduce_only: bool,
+    lifecycle_identity: Option<&CanonicalLifecycleIdentity>,
 ) -> (&'static str, serde_json::Value) {
     let mut body = serde_json::json!({
         "symbol": symbol,
@@ -81,6 +82,20 @@ fn build_order_request(
         "client_order_id": client_order_id,
         "reduce_only": reduce_only,
     });
+    if let Some(identity) = lifecycle_identity {
+        body["lifecycle"] = serde_json::json!({
+            "schema_version": identity.schema_version,
+            "opportunity_id": identity.opportunity_id,
+            "episode_id": identity.episode_id,
+            "trade_id": identity.trade_id,
+            "profile_id": identity.profile_id,
+            "profile_hash": identity.profile_hash,
+            "profile_version": identity.profile_version,
+            "execution_mode": identity.execution_mode,
+            "entry_policy": identity.entry_policy,
+            "source": identity.source,
+        });
+    }
     let endpoint = match kind {
         AutoOrderType::Vwap | AutoOrderType::Twap => {
             body["duration_minutes"] = serde_json::json!(params.vwap_duration_minutes);
@@ -155,6 +170,29 @@ fn build_order_request(
     (endpoint, body)
 }
 
+const SUBMIT_READY_TIMING_BOUNDARY: &str = "order_payload_ready_after_local_construction";
+const RSOCKET_TIMING_BOUNDARY: &str = "position_management_rsocket_request_response";
+const BENCHMARK_ACCEPTANCE_STATE: &str = "unaccepted_release_execution_required";
+
+/// Attach separately named local and service-call durations to a production
+/// order response. `request_prepare_local_ms` covers time to the constructed
+/// payload boundary only; it does not include preceding signal/exit decisions
+/// or their risk validation. The RSocket duration includes the request/response
+/// round trip and is not an exchange acknowledgement or fill measurement.
+fn add_order_submission_timing_metadata(
+    payload: &mut serde_json::Value,
+    request_prepare_local_ms: f64,
+    rsocket_request_response_ms: f64,
+) {
+    payload["performance_timing_boundaries"] = serde_json::json!({
+        "submit_ready_boundary": SUBMIT_READY_TIMING_BOUNDARY,
+        "request_prepare_local_ms": request_prepare_local_ms,
+        "rsocket_boundary": RSOCKET_TIMING_BOUNDARY,
+        "rsocket_request_response_ms": rsocket_request_response_ms,
+        "acceptance_state": BENCHMARK_ACCEPTANCE_STATE,
+    });
+}
+
 async fn submit_configured_order(
     symbol: &str,
     side: &str,
@@ -166,6 +204,7 @@ async fn submit_configured_order(
     params: ExecutionParameters,
     client_order_id: String,
     reduce_only: bool,
+    lifecycle_identity: Option<&CanonicalLifecycleIdentity>,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     let request_prepare_started = Instant::now();
     let now_ms = std::time::SystemTime::now()
@@ -174,14 +213,14 @@ async fn submit_configured_order(
         .as_millis() as u64;
     let (endpoint, body) = build_order_request(
         symbol, side, quantity, bid, ask, kind, params, &client_order_id, now_ms,
-        reduce_only,
+        reduce_only, lifecycle_identity,
     );
     let request_prepare_ms = request_prepare_started.elapsed().as_secs_f64() * 1_000.0;
     let request_started = Instant::now();
     let response = crate::service_rpc::position_request("POST", endpoint, Some(body))
         .await
         .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
-    let response_headers_ms = request_started.elapsed().as_secs_f64() * 1_000.0;
+    let rsocket_request_response_ms = request_started.elapsed().as_secs_f64() * 1_000.0;
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let position_manager_ms = response.headers
         .get("x-position-manager-handler-ms")
@@ -196,10 +235,13 @@ async fn submit_configured_order(
     }
     let response_decode_ms = decode_started.elapsed().as_secs_f64() * 1_000.0;
     payload["client_request_prepare_local_ms"] = serde_json::json!(request_prepare_ms);
-    payload["client_response_headers_ms"] = serde_json::json!(response_headers_ms);
+    // Preserve the established response field while exposing its full
+    // request/response semantics under an unambiguous boundary name below.
+    payload["client_response_headers_ms"] = serde_json::json!(rsocket_request_response_ms);
     payload["client_body_read_ms"] = serde_json::json!(body_read_ms);
     payload["client_response_decode_local_ms"] = serde_json::json!(response_decode_ms);
-    if let Some(handler_ms) = position_manager_ms.or(Some(response_headers_ms)) {
+    add_order_submission_timing_metadata(&mut payload, request_prepare_ms, rsocket_request_response_ms);
+    if let Some(handler_ms) = position_manager_ms.or(Some(rsocket_request_response_ms)) {
         payload["position_manager_handler_ms"] = serde_json::json!(handler_ms);
     }
     if !status.is_success() {
@@ -239,8 +281,25 @@ mod order_request_tests {
         }
     }
 
+    #[test]
+    fn timing_metadata_separates_local_submit_ready_and_rsocket_boundaries() {
+        let mut response = serde_json::json!({});
+        add_order_submission_timing_metadata(&mut response, 0.125, 1.75);
+
+        let boundaries = &response["performance_timing_boundaries"];
+        assert_eq!(boundaries["submit_ready_boundary"], SUBMIT_READY_TIMING_BOUNDARY);
+        assert_eq!(boundaries["request_prepare_local_ms"], 0.125);
+        assert_eq!(boundaries["rsocket_boundary"], RSOCKET_TIMING_BOUNDARY);
+        assert_eq!(boundaries["rsocket_request_response_ms"], 1.75);
+        assert_eq!(boundaries["acceptance_state"], BENCHMARK_ACCEPTANCE_STATE);
+        assert_ne!(
+            boundaries["submit_ready_boundary"],
+            boundaries["rsocket_boundary"]
+        );
+    }
+
     fn request(kind: AutoOrderType, side: &str) -> (&'static str, serde_json::Value) {
-        build_order_request("BTC-USDT", side, 2.0, 99.0, 101.0, kind, params(), "client-1", 1_000, false)
+        build_order_request("BTC-USDT", side, 2.0, 99.0, 101.0, kind, params(), "client-1", 1_000, false, None)
     }
 
     #[test]
@@ -253,6 +312,35 @@ mod order_request_tests {
         assert_eq!(endpoint, "/positions/vwap");
         assert_eq!(twap["strategy"], "twap");
         assert!(twap.get("max_participation_rate").is_none());
+    }
+
+    #[test]
+    fn selected_entry_request_carries_versioned_lifecycle_identity() {
+        let identity = CanonicalLifecycleIdentity {
+            schema_version: 1,
+            opportunity_id: "autotrader:v1:opportunity:4".into(),
+            episode_id: "autotrader:v1:episode:4".into(),
+            trade_id: "autotrader:v1:trade:4".into(),
+            profile_id: Some("profile-4".into()),
+            profile_hash: None,
+            profile_version: Some(4),
+            execution_mode: "paper".into(),
+            entry_policy: "strict".into(),
+            source: "auto_trader_entry_reservation".into(),
+        };
+        let (_, body) = build_order_request(
+            "BTC-USDT", "buy", 1.0, 99.0, 101.0, AutoOrderType::Ioc,
+            params(), &identity.opportunity_id, 1_000, false, Some(&identity),
+        );
+        assert_eq!(body["client_order_id"], identity.opportunity_id);
+        assert_eq!(body["lifecycle"]["schema_version"], 1);
+        assert_eq!(body["lifecycle"]["opportunity_id"], identity.opportunity_id);
+        assert_eq!(body["lifecycle"]["episode_id"], identity.episode_id);
+        assert_eq!(body["lifecycle"]["trade_id"], identity.trade_id);
+        assert_eq!(body["lifecycle"]["execution_mode"], "paper");
+        assert_eq!(body["lifecycle"]["entry_policy"], "strict");
+        assert_eq!(body["lifecycle"]["profile_hash"], serde_json::Value::Null);
+        assert_eq!(body["lifecycle"]["profile_version"], 4);
     }
 
     #[test]
@@ -283,6 +371,7 @@ mod order_request_tests {
         let (_, body) = build_order_request(
             "BTC-USDT", "buy", 2.0, 99.0, 101.0,
             AutoOrderType::PostOnlyLimit, configured, "client-2", 1_000, false,
+            None,
         );
         assert_eq!(body["expires_at"], 541_000);
     }
@@ -300,6 +389,7 @@ mod order_request_tests {
             "exit-client",
             1_000,
             true,
+            None,
         );
         assert_eq!(endpoint, "/positions/orders");
         assert_eq!(body["order_type"], "post-only-limit");

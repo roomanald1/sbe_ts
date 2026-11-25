@@ -18,10 +18,16 @@ struct SelectedSignalOrderRequest<'a> {
 }
 
 fn portfolio_reduction_quantity(settings: &Settings, symbol: &str, strategy: &str) -> f64 {
-    settings.strategy_positions.get(symbol).and_then(|lots| lots.get(strategy))
-        .or_else(|| settings.positions.get(symbol).filter(|position| {
-            settings.strategy_positions.is_empty() && position.strategy.as_deref() == Some(strategy)
-        }))
+    settings
+        .strategy_positions
+        .get(symbol)
+        .and_then(|lots| lots.get(strategy))
+        .or_else(|| {
+            settings.positions.get(symbol).filter(|position| {
+                settings.strategy_positions.is_empty()
+                    && position.strategy.as_deref() == Some(strategy)
+            })
+        })
         .map(|position| position.quantity.max(0.0))
         .unwrap_or(0.0)
 }
@@ -31,22 +37,141 @@ struct SignalSettingsSnapshot {
     quote_rate: f64,
     settings_lock_wait_ms: f64,
     ioc_fallback_for: Option<u64>,
+    exploratory_event_key: Option<String>,
+}
+
+const MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS: usize = 10_000;
+
+fn exploratory_event_key(
+    event_id: &str,
+    symbol: &str,
+    strategy: &str,
+    direction: &str,
+    profile_id: &str,
+) -> Option<String> {
+    if event_id.trim().is_empty()
+        || event_id.len() > 512
+        || symbol.trim().is_empty()
+        || symbol.len() > 128
+        || strategy.trim().is_empty()
+        || strategy.len() > 128
+        || direction.trim().is_empty()
+        || direction.len() > 32
+        || profile_id.trim().is_empty()
+        || profile_id.len() > 512
+    {
+        return None;
+    }
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "identity_version": 1,
+        "event_id": event_id,
+        "symbol": symbol,
+        "strategy": strategy,
+        "direction": direction,
+        "profile_id": profile_id,
+    }))
+    .ok()?;
+    use sha2::Digest;
+    Some(format!("sha256:v1:{:x}", sha2::Sha256::digest(encoded)))
+}
+
+fn exploratory_event_key_for_signal(signal: &Signal) -> Option<String> {
+    // AutoTrader has no local producer contract proving this ID's lifecycle.
+    // Dedup only repeats an explicitly supplied worker ID; never infer an
+    // episode from timestamps or market values when that ID is absent.
+    let decision = signal.strategy_decision.as_ref()?;
+    let event_id = decision
+        .get("live_worker_event_id")
+        .and_then(serde_json::Value::as_str)?;
+    let strategy = signal.strategy.as_deref()?;
+    let supplied_profile = decision
+        .get("learning_profile_id")
+        .or_else(|| decision.get("scout_parameter_profile_id"))
+        .and_then(serde_json::Value::as_str);
+    let parameters = decision
+        .get("strategy_parameters")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| Some((key.clone(), value.as_f64()?)))
+        .collect::<BTreeMap<_, _>>();
+    let profile_id = supplied_profile.map(str::to_owned).or_else(|| {
+        let kind = Strategy::from_name(strategy)?;
+        kind.parameter_specs()
+            .iter()
+            .all(|spec| {
+                parameters
+                    .get(spec.key.as_str())
+                    .is_some_and(|value| value.is_finite())
+            })
+            .then(|| strategy::profile_id(&signal.symbol, strategy, &parameters))
+    })?;
+    exploratory_event_key(
+        event_id,
+        &signal.symbol,
+        strategy,
+        &signal.direction,
+        &profile_id,
+    )
+}
+
+fn exploratory_event_key_for_entry(signal: &Signal, exploratory: bool) -> Option<String> {
+    exploratory
+        .then(|| exploratory_event_key_for_signal(signal))
+        .flatten()
+}
+
+fn reserve_exploratory_event(settings: &mut Settings, key: &str, reserved_at_ms: u64) {
+    settings
+        .exploratory_event_reservations
+        .entry(key.to_owned())
+        .or_insert(reserved_at_ms);
+    while settings.exploratory_event_reservations.len()
+        > MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS
+    {
+        let Some(oldest) = settings
+            .exploratory_event_reservations
+            .iter()
+            .min_by_key(|(key, timestamp)| (**timestamp, (*key).clone()))
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        settings.exploratory_event_reservations.remove(&oldest);
+    }
+}
+
+fn exploratory_event_is_reserved(settings: &Settings, key: &str) -> bool {
+    settings.exploratory_event_reservations.contains_key(key)
 }
 
 async fn snapshot_signal_settings(
     state: &AutoTraderState,
     signal: &Signal,
     now_ms: u64,
+    exploratory: bool,
 ) -> Result<SignalSettingsSnapshot, String> {
     let signal_key = signal.symbol.as_str();
     let settings_lock_started = Instant::now();
     let mut settings = state.settings.lock().await;
     let settings_lock_wait = settings_lock_started.elapsed().as_secs_f64() * 1_000.0;
-    record_cycle_lock_scope(state, "signal_settings_lock_wait", settings_lock_started.elapsed());
+    record_cycle_lock_scope(
+        state,
+        "signal_settings_lock_wait",
+        settings_lock_started.elapsed(),
+    );
     reset_daily_budget(&mut settings);
+    let exploratory_event_key = exploratory_event_key_for_entry(signal, exploratory);
+    if exploratory_event_key
+        .as_deref()
+        .is_some_and(|key| exploratory_event_is_reserved(&settings, key))
+    {
+        return Err("Exploratory source event already reserved for this profile".to_owned());
+    }
     let quote_rate = quote_usd_rate(&settings, signal_key);
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
-    let block_reason = signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms);
+    let block_reason =
+        signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms);
     let ioc_fallback_for = match block_reason {
         Some(reason) if reason.starts_with("Entry already pending") => {
             pending_maker_entry_for_signal(&settings, signal, signal_key, strategy_key, now_ms)
@@ -69,6 +194,7 @@ async fn snapshot_signal_settings(
         quote_rate,
         settings_lock_wait_ms: settings_lock_wait,
         ioc_fallback_for,
+        exploratory_event_key,
     })
 }
 
@@ -109,21 +235,19 @@ async fn submit_selected_signal(
         quote_rate,
         settings_lock_wait_ms,
         ioc_fallback_for,
-    } = match snapshot_signal_settings(state, signal, now_ms).await {
+        exploratory_event_key,
+    } = match snapshot_signal_settings(state, signal, now_ms, exploratory).await {
         Ok(snapshot) => snapshot,
         Err(reason) => return Ok(skipped_for_signal(signal, &reason)),
     };
-    let recent_exploratory_exit_fee = signal
-        .strategy
-        .as_deref()
-        .and_then(|strategy| {
-            recent_exploratory_exit_fee_rate(
-                &settings_snapshot,
-                signal.symbol.as_str(),
-                strategy,
-                now_ms,
-            )
-        });
+    let recent_exploratory_exit_fee = signal.strategy.as_deref().and_then(|strategy| {
+        recent_exploratory_exit_fee_rate(
+            &settings_snapshot,
+            signal.symbol.as_str(),
+            strategy,
+            now_ms,
+        )
+    });
     let signal_key = signal.symbol.clone();
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
     let execution_plan_started = Instant::now();
@@ -211,31 +335,38 @@ async fn submit_selected_signal(
         ));
     }
     let spread_bps = (ask - bid) / mid * 10_000.0;
-    let strategy_edge = signal.strategy.as_deref().and_then(Strategy::from_name)
+    let strategy_edge = signal
+        .strategy
+        .as_deref()
+        .and_then(Strategy::from_name)
         .filter(|kind| !kind.is_dated_carry())
         .and_then(|kind| validated_strategy_entry_edge(signal, kind).ok());
     let contextual_net_edge = exploratory_contextual_net_edge(&exploration_risk_adjustment);
     let reducing_rebalance = signal.direction == "bearish"
-        && is_portfolio_rebalance_signal(signal, signal.strategy.as_deref().and_then(Strategy::from_name));
-    let (edge_percent, edge_source, fee_bps, fee_assumption, edge_is_net) =
-        if let Some(edge) = strategy_edge {
-            (
-                edge,
-                "measured strategy Scout net edge",
-                0.0,
-                "walk-forward net edge already includes execution costs".to_owned(),
-                true,
-            )
-        } else if let Some(edge) = contextual_net_edge {
-            (
-                edge,
-                "recent contextual net expectancy lower bound",
-                0.0,
-                "realized contextual net returns already include execution costs".to_owned(),
-                true,
-            )
-        } else if exploratory {
-            let (fee_bps, fee_assumption) = recent_exploratory_exit_fee
+        && is_portfolio_rebalance_signal(
+            signal,
+            signal.strategy.as_deref().and_then(Strategy::from_name),
+        );
+    let (edge_percent, edge_source, fee_bps, fee_assumption, edge_is_net) = if let Some(edge) =
+        strategy_edge
+    {
+        (
+            edge,
+            "measured strategy Scout net edge",
+            0.0,
+            "walk-forward net edge already includes execution costs".to_owned(),
+            true,
+        )
+    } else if let Some(edge) = contextual_net_edge {
+        (
+            edge,
+            "recent contextual net expectancy lower bound",
+            0.0,
+            "realized contextual net returns already include execution costs".to_owned(),
+            true,
+        )
+    } else if exploratory {
+        let (fee_bps, fee_assumption) = recent_exploratory_exit_fee
                 .map(|(exit_fee_rate, samples)| {
                     (
                         (configured_maker_fee_rate() + exit_fee_rate) * 10_000.0,
@@ -251,22 +382,22 @@ async fn submit_selected_signal(
                         "exploratory: maker entry; 50% maker / 50% taker exit prior".to_owned(),
                     )
                 });
-            (
-                effective_take_profit_percent,
-                "strategy take-profit payoff ceiling (not a measured edge)",
-                fee_bps,
-                fee_assumption,
-                false,
-            )
-        } else {
-            (
-                effective_take_profit_percent,
-                "strategy take-profit payoff ceiling (not a measured edge)",
-                2.0 * configured_taker_fee_rate() * 10_000.0,
-                "strict/urgent: taker entry and taker exit".to_owned(),
-                false,
-            )
-        };
+        (
+            effective_take_profit_percent,
+            "strategy take-profit payoff ceiling (not a measured edge)",
+            fee_bps,
+            fee_assumption,
+            false,
+        )
+    } else {
+        (
+            effective_take_profit_percent,
+            "strategy take-profit payoff ceiling (not a measured edge)",
+            2.0 * configured_taker_fee_rate() * 10_000.0,
+            "strict/urgent: taker entry and taker exit".to_owned(),
+            false,
+        )
+    };
     let incremental_cost_percent = (spread_bps + 2.0 * assessment.impact_bps + fee_bps) / 100.0;
     let execution_cost_cushion =
         time_adjusted_edge_cost_cushion(now, MIN_EDGE_TO_INCREMENTAL_COST_MULTIPLIER);
@@ -275,9 +406,10 @@ async fn submit_selected_signal(
     } else {
         incremental_cost_percent * execution_cost_cushion
     };
-    if !reducing_rebalance && (!edge_percent.is_finite()
-        || !incremental_cost_percent.is_finite()
-        || edge_percent <= edge_cost_threshold)
+    if !reducing_rebalance
+        && (!edge_percent.is_finite()
+            || !incremental_cost_percent.is_finite()
+            || edge_percent <= edge_cost_threshold)
     {
         let rejection_reason = if edge_is_net {
             format!(
@@ -291,10 +423,7 @@ async fn submit_selected_signal(
                 configured_taker_fee_rate() * 10_000.0,
             )
         };
-        return Ok(skipped_for_signal(
-            signal,
-            &rejection_reason,
-        ));
+        return Ok(skipped_for_signal(signal, &rejection_reason));
     }
     let deep_book_note = if let Some(assessment) = deep_book {
         if !matches!(order_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
@@ -348,7 +477,10 @@ async fn submit_selected_signal(
         "execution_plan_local".to_owned(),
         (execution_plan_ms - deep_book_ms - execution_learning_ms).max(0.0),
     );
-    stage_timings_ms.insert("execution_learning_lookup".to_owned(), execution_learning_ms);
+    stage_timings_ms.insert(
+        "execution_learning_lookup".to_owned(),
+        execution_learning_ms,
+    );
     stage_timings_ms.insert("signal_selection_total".to_owned(), signal_selection_ms);
     stage_timings_ms.insert(
         "signal_selection_local".to_owned(),
@@ -389,12 +521,13 @@ async fn submit_selected_signal(
             (price - bid) / mid * 10_000.0
         }
     });
-    let expires_at = is_post_only.then_some(timestamp.saturating_add(execution_params.post_only_timeout_minutes * 60_000));
+    let expires_at = is_post_only
+        .then_some(timestamp.saturating_add(execution_params.post_only_timeout_minutes * 60_000));
     let estimated_ioc_all_in_bps =
         deep_book.map(|assessment| assessment.impact_bps + configured_taker_fee_rate() * 10_000.0);
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let reservation_cycle_lock_started = Instant::now();
-    let quantity = {
+    let (quantity, lifecycle_identity) = {
         let reservation_lock_started = Instant::now();
         let mut settings = state.settings.lock().await;
         stage_timings_ms.insert(
@@ -408,26 +541,33 @@ async fn submit_selected_signal(
         );
         let order_reservation_started = Instant::now();
         reset_daily_budget(&mut settings);
+        if exploratory_event_key
+            .as_deref()
+            .is_some_and(|key| exploratory_event_is_reserved(&settings, key))
+        {
+            return Ok(skipped_for_signal(
+                signal,
+                "Exploratory source event already reserved for this profile",
+            ));
+        }
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
         if !paper_learning_exploration_active(&settings, now) && !exploratory {
             if let Some(reason) = learned_pause_block_reason(
-            &settings,
-            strategy,
-            signal,
-            reducing_rebalance,
-            &signal.direction,
-            now,
+                &settings,
+                strategy,
+                signal,
+                reducing_rebalance,
+                &signal.direction,
+                now,
             ) {
-                return Ok(skipped_for_signal(signal, &format!("Strategy entry paused: {reason}")));
+                return Ok(skipped_for_signal(
+                    signal,
+                    &format!("Strategy entry paused: {reason}"),
+                ));
             }
         }
-        let current_pending_maker = pending_maker_entry_for_signal(
-            &settings,
-            signal,
-            &signal.symbol,
-            strategy_key,
-            now_ms,
-        );
+        let current_pending_maker =
+            pending_maker_entry_for_signal(&settings, signal, &signal.symbol, strategy_key, now_ms);
         if ioc_fallback_for.is_some()
             && !current_pending_maker.is_some_and(|(timestamp, strength)| {
                 Some(timestamp) == ioc_fallback_for
@@ -440,7 +580,8 @@ async fn submit_selected_signal(
                 "Resting maker entry resolved before the stronger-signal IOC fallback",
             ));
         }
-        let block_reason = signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms);
+        let block_reason =
+            signal_position_block_reason(&settings, signal, &signal.symbol, strategy_key, now_ms);
         if let Some(reason) = block_reason {
             let fallback_still_valid = ioc_fallback_for.is_some_and(|pending_timestamp| {
                 reason.starts_with("Entry already pending")
@@ -458,29 +599,47 @@ async fn submit_selected_signal(
         let category = strategy_category(signal.strategy.as_deref());
         let category_allocated = allocated_notional_for_category(&settings, Some(category));
         // Cap gross open and pending exposure for this symbol across all strategies.
-        let symbol_remaining_budget = settings.max_order_notional
-            - allocated_notional_for_symbol(&settings, &signal.symbol);
+        let symbol_remaining_budget =
+            settings.max_order_notional - allocated_notional_for_symbol(&settings, &signal.symbol);
         let strategy_remaining_budget = Strategy::from_name(strategy_key)
             .map(|kind| match strategy_category(Some(kind.as_str())) {
                 StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                    signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Daily, now_ms)
-                        - allocated_notional_for_strategy(&settings, strategy_key)
+                    signal_weighted_strategy_budget(
+                        &settings,
+                        dashboard,
+                        kind,
+                        StrategyCategory::Daily,
+                        now_ms,
+                    ) - allocated_notional_for_strategy(&settings, strategy_key)
                 }
                 StrategyCategory::Intraday if kind.is_live_insight() => {
-                    signal_weighted_strategy_budget(&settings, dashboard, kind, StrategyCategory::Intraday, now_ms)
-                        - allocated_notional_for_strategy(&settings, strategy_key)
+                    signal_weighted_strategy_budget(
+                        &settings,
+                        dashboard,
+                        kind,
+                        StrategyCategory::Intraday,
+                        now_ms,
+                    ) - allocated_notional_for_strategy(&settings, strategy_key)
                 }
                 _ => f64::INFINITY,
             })
             .unwrap_or(f64::INFINITY);
-        let remaining_budget = if reducing_rebalance { f64::INFINITY } else { (settings.daily_notional_limit - allocated)
-            .min(category_notional_limit(&settings, category) - category_allocated)
-            .min(strategy_remaining_budget)
-            .min(symbol_remaining_budget)
-            .max(0.0) };
+        let remaining_budget = if reducing_rebalance {
+            f64::INFINITY
+        } else {
+            (settings.daily_notional_limit - allocated)
+                .min(category_notional_limit(&settings, category) - category_allocated)
+                .min(strategy_remaining_budget)
+                .min(symbol_remaining_budget)
+                .max(0.0)
+        };
         notional = notional.min(remaining_budget / stop_headroom_multiplier);
         if reducing_rebalance {
-            notional = notional.min(portfolio_reduction_quantity(&settings, &signal.symbol, strategy_key) * mid * quote_rate);
+            notional = notional.min(
+                portfolio_reduction_quantity(&settings, &signal.symbol, strategy_key)
+                    * mid
+                    * quote_rate,
+            );
         }
         if notional < minimum_book_order {
             return Ok(skipped_for_signal(
@@ -493,6 +652,70 @@ async fn submit_selected_signal(
             ));
         }
         let quantity = notional / (mid * quote_rate);
+        let supplied_profile_id = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| {
+                decision
+                    .get("learning_profile_id")
+                    .or_else(|| decision.get("scout_parameter_profile_id"))
+            })
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let entry_parameters = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some((key.clone(), value.as_f64()?)))
+            .collect::<BTreeMap<_, _>>();
+        let profile_id = supplied_profile_id.or_else(|| {
+            let kind = Strategy::from_name(strategy_key)?;
+            kind.parameter_specs()
+                .iter()
+                .all(|spec| {
+                    entry_parameters
+                        .get(spec.key.as_str())
+                        .is_some_and(|value| value.is_finite())
+                })
+                .then(|| strategy::profile_id(&signal.symbol, strategy_key, &entry_parameters))
+        });
+        let profile_hash = profile_id.as_deref().and_then(|profile_id| {
+            canonical_profile_hash_v1(&signal.symbol, strategy_key, profile_id, &entry_parameters)
+        });
+        let profile_version = signal
+            .strategy
+            .as_deref()
+            .and_then(|strategy| {
+                settings
+                    .learned_profiles
+                    .get(&format!("{}:{strategy}", signal.symbol))
+            })
+            .filter(|profile| profile_id.as_deref() == Some(profile.profile_id.as_str()))
+            .map(|profile| profile.version);
+        let existing_trade_id = settings
+            .strategy_positions
+            .get(&signal.symbol)
+            .and_then(|lots| lots.get(strategy_key))
+            .and_then(|position| position.trade_id.as_deref())
+            .and_then(|trade_id| settings.canonical_lifecycle_links.get(trade_id))
+            .map(|identity| identity.trade_id.clone());
+        let Some(lifecycle_identity) = canonical_lifecycle_identity_for_reservation(
+            &mut settings,
+            &decision_id,
+            profile_id.clone(),
+            profile_hash,
+            profile_version,
+            exploratory,
+            existing_trade_id,
+        ) else {
+            return Ok(skipped_for_signal(
+                signal,
+                "Canonical lifecycle identity sequence is exhausted",
+            ));
+        };
         stage_timings_ms.insert(
             "order_reservation_record_local".to_owned(),
             order_reservation_started.elapsed().as_secs_f64() * 1_000.0,
@@ -507,6 +730,9 @@ async fn submit_selected_signal(
         settings
             .last_signal_strength
             .insert(signal_key, signal.strength);
+        if let Some(key) = exploratory_event_key.as_deref() {
+            reserve_exploratory_event(&mut settings, key, now_ms);
+        }
         settings.orders.push(TraderOrder {
             timestamp,
             triggered_at: None,
@@ -522,6 +748,17 @@ async fn submit_selected_signal(
                     .unwrap_or_else(|| "unattributed".into()),
             ),
             decision_id: Some(decision_id.clone()),
+            revalidation_snapshot: Some(RestingOrderRevalidationSnapshot {
+                symbol: signal.symbol.clone(),
+                strategy: strategy_key.to_owned(),
+                direction: signal.direction.clone(),
+                signal_timestamp_ms: signal.timestamp,
+                profile_id: profile_id.clone(),
+                profile_version,
+                // Live worker reports currently echo the canonical profile ID
+                // in `parameter_hash`; retain that exact contract value.
+                parameter_hash: profile_id.clone(),
+            }),
             strength: signal.strength,
             ioc_fallback_for,
             quantity,
@@ -560,13 +797,40 @@ async fn submit_selected_signal(
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
+        prune_canonical_lifecycle_links(&mut settings);
+        drop(settings);
         let settings_persist_started = Instant::now();
-        request_settings_persist(state)?;
+        if let Err(error) = persist_settings_snapshot_durable(state).await {
+            let mut settings = state.settings.lock().await;
+            if let Some(order) = settings
+                .orders
+                .iter_mut()
+                .find(|order| order.timestamp == timestamp)
+            {
+                order.status = "failed".to_owned();
+                order.failure_reason = Some(format!(
+                    "Unable to durably persist lifecycle reservation: {}",
+                    error.1
+                ));
+            }
+            settings.used_notional_today = allocated_notional(&settings);
+            request_settings_persist(state)?;
+            return Err(error);
+        }
         stage_timings_ms.insert(
-            "order_record_persist_notify".to_owned(),
+            "reservation_durable_persist".to_owned(),
             settings_persist_started.elapsed().as_secs_f64() * 1_000.0,
         );
-        quantity
+        let mut settings = state.settings.lock().await;
+        if let Some(order) = settings
+            .orders
+            .iter_mut()
+            .find(|order| order.timestamp == timestamp)
+        {
+            order.stage_timings_ms = stage_timings_ms.clone();
+        }
+        request_settings_persist(state)?;
+        (quantity, lifecycle_identity)
     };
     record_cycle_lock_scope(
         state,
@@ -594,6 +858,7 @@ async fn submit_selected_signal(
         execution_params,
         timestamp,
         decision_id: decision_id.clone(),
+        lifecycle_identity,
         learning_context: learning_context.clone(),
         exploration_risk_adjustment,
         horizon_take_profit_percent,
@@ -644,9 +909,7 @@ fn time_adjusted_edge_cost_cushion(now_seconds: u64, base: f64) -> f64 {
     }
 }
 
-fn exploratory_contextual_net_edge(
-    adjustment: &ExplorationRiskAdjustment,
-) -> Option<f64> {
+fn exploratory_contextual_net_edge(adjustment: &ExplorationRiskAdjustment) -> Option<f64> {
     const MIN_CONTEXT_EDGE_SAMPLES: usize = 6;
     let samples = adjustment.sample_count;
     let lower_bound = adjustment.weighted_net_return_lcb_percent?;
@@ -773,15 +1036,115 @@ mod selected_signal_order_fee_tests {
             weighted_net_return_lcb_percent: Some(0.4),
             regime_scoped: false,
         };
-        assert!(
-            (exploratory_contextual_net_edge(&adjustment).unwrap() - 0.4).abs() < 1e-12
-        );
+        assert!((exploratory_contextual_net_edge(&adjustment).unwrap() - 0.4).abs() < 1e-12);
 
         let insufficient = ExplorationRiskAdjustment {
             sample_count: 5,
             ..adjustment
         };
         assert_eq!(exploratory_contextual_net_edge(&insufficient), None);
+    }
+
+    #[test]
+    fn exploration_event_identity_distinguishes_new_event_profile_and_direction() {
+        let base = exploratory_event_key(
+            "worker-event-7",
+            "BTC-USDT",
+            "live-momentum",
+            "bullish",
+            "profile-a",
+        )
+        .unwrap();
+        assert_eq!(
+            exploratory_event_key(
+                "worker-event-7",
+                "BTC-USDT",
+                "live-momentum",
+                "bullish",
+                "profile-a",
+            ),
+            Some(base.clone())
+        );
+        for (event_id, direction, profile) in [
+            ("worker-event-8", "bullish", "profile-a"),
+            ("worker-event-7", "bearish", "profile-a"),
+            ("worker-event-7", "bullish", "profile-b"),
+        ] {
+            assert_ne!(
+                exploratory_event_key(event_id, "BTC-USDT", "live-momentum", direction, profile,),
+                Some(base.clone())
+            );
+        }
+        assert_eq!(
+            exploratory_event_key("", "BTC-USDT", "live-momentum", "bullish", "profile-a"),
+            None
+        );
+        assert_eq!(
+            exploratory_event_key(
+                &"e".repeat(513),
+                "BTC-USDT",
+                "live-momentum",
+                "bullish",
+                "profile-a",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn strict_entry_does_not_use_exploratory_source_event_dedup() {
+        let signal = benchmark_precomputed_ingress_dashboard(900_001, "BTC-USDT")
+            .best
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(exploratory_event_key_for_entry(&signal, true).is_some());
+        assert_eq!(exploratory_event_key_for_entry(&signal, false), None);
+    }
+
+    #[test]
+    fn repeated_exploration_reservation_is_bounded_and_persists_across_restart() {
+        let key = exploratory_event_key(
+            "worker-event-7",
+            "BTC-USDT",
+            "live-momentum",
+            "bullish",
+            "profile-a",
+        )
+        .unwrap();
+        let mut settings = Settings::default();
+        assert!(!exploratory_event_is_reserved(&settings, &key));
+        reserve_exploratory_event(&mut settings, &key, 100);
+        assert!(exploratory_event_is_reserved(&settings, &key));
+        reserve_exploratory_event(&mut settings, &key, 200);
+        assert_eq!(settings.exploratory_event_reservations.len(), 1);
+        assert_eq!(
+            settings.exploratory_event_reservations.get(&key),
+            Some(&100)
+        );
+
+        let restarted: Settings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert!(exploratory_event_is_reserved(&restarted, &key));
+        // The second attempt is blocked, so one duplicate order/evidence reservation is avoided.
+        assert_eq!(restarted.exploratory_event_reservations.len(), 1);
+    }
+
+    #[test]
+    fn exploratory_event_reservation_capacity_evicts_oldest_only_at_bound() {
+        let mut settings = Settings::default();
+        for index in 0..=MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS {
+            reserve_exploratory_event(&mut settings, &format!("event-{index}"), index as u64);
+        }
+        assert_eq!(
+            settings.exploratory_event_reservations.len(),
+            MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS
+        );
+        assert!(!exploratory_event_is_reserved(&settings, "event-0"));
+        assert!(exploratory_event_is_reserved(
+            &settings,
+            &format!("event-{MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS}")
+        ));
     }
 
     #[test]
@@ -803,13 +1166,8 @@ mod selected_signal_order_fee_tests {
                 100.0,
             ));
         }
-        let (exit_fee_rate, sample_count) = recent_exploratory_exit_fee_rate(
-            &settings,
-            "BTC-USDT",
-            "live-momentum",
-            now,
-        )
-        .unwrap();
+        let (exit_fee_rate, sample_count) =
+            recent_exploratory_exit_fee_rate(&settings, "BTC-USDT", "live-momentum", now).unwrap();
         assert_eq!(sample_count, 5);
         assert!((exit_fee_rate - (0.0128 / 13.0)).abs() < 1e-12);
     }

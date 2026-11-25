@@ -41,12 +41,17 @@ function CandidateEvidence({
     <>
       {showSummary && (
         <p className="auto-trader-learning-gate-summary">
-          {typeof evidence.eligible === 'boolean'
-            ? `Candidate ${evidence.eligible ? 'eligible' : 'not eligible'}`
-            : typeof evidence.selection_mode === 'string'
-              ? `Selection mode: ${evidence.selection_mode}`
-              : 'Candidate gate results'}
-          {reasons.length ? ` · ${reasons.join(' · ')}` : ''}
+          {[
+            typeof evidence.eligible === 'boolean'
+              ? `Candidate ${evidence.eligible ? 'eligible' : 'not eligible'}`
+              : 'Candidate gate results',
+            typeof evidence.selection_mode === 'string'
+              ? `${evidence.selection_mode.replaceAll('_', ' ')} selection`
+              : null,
+            reasons.length ? reasons.join(' · ') : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
         </p>
       )}
       <table className="auto-trader-learning-evidence">
@@ -168,7 +173,6 @@ function GatePath({ value }: { value: unknown }) {
               : typeof stage === 'string'
                 ? stage.replaceAll('_', ' ')
                 : `Stage ${index + 1}`;
-        const selectionMode = raw.selection_mode;
         const gateId = raw.gate_id;
         const reason = raw.reason;
         const gate = raw.gate;
@@ -211,11 +215,6 @@ function GatePath({ value }: { value: unknown }) {
                 </span>
                 <div>
                   <strong>{stageName}</strong>
-                  {typeof selectionMode === 'string' && (
-                    <span className="auto-trader-learning-gate-stage-meta">
-                      {selectionMode.replaceAll('_', ' ')} selection
-                    </span>
-                  )}
                   {typeof gateId === 'string' && (
                     <span className="auto-trader-learning-gate-stage-meta">
                       {gateId.replaceAll('_', ' ')}
@@ -240,9 +239,7 @@ function GatePath({ value }: { value: unknown }) {
                 )}
               </p>
             )}
-            {gate !== undefined && (
-              <CandidateEvidence value={gate} showSummary={false} />
-            )}
+            {gate !== undefined && <CandidateEvidence value={gate} />}
             {isRecord(executionGate) && (
               <dl className="auto-trader-learning-gate-facts">
                 {Object.entries(executionGate)

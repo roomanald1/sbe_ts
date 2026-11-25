@@ -5,6 +5,9 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
     reconcile_maker_fills(&position_rsocket_url, state)
         .await
         .map_err(|(status, error)| (status, format!("Maker-fill reconciliation: {error}")))?;
+    if let Err(error) = revalidate_resting_signal_orders(state).await {
+        crate::service_log!("WARN", "Resting-order revalidation failed: {}", error.1);
+    }
     if let Err(error) = reconcile_inactive_execution_orders(state).await {
         crate::service_log!("WARN", "Pending-order reconciliation failed: {}", error.1);
     }
@@ -18,6 +21,147 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
         .await
         .map_err(|(status, error)| (status, format!("Exit evaluation: {error}")))?;
     Ok(())
+}
+
+const RESTING_SIGNAL_REVALIDATION_MAX_AGE_MS: u64 = 10_000;
+const RESTING_SIGNAL_REVALIDATION_MAX_CANCELS_PER_CYCLE: usize = 32;
+
+async fn revalidate_resting_signal_orders(
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let now_ms = current_time_ms();
+    let candidates = {
+        let settings = state.settings.lock().await;
+        settings
+            .orders
+            .iter()
+            .filter(|order| {
+                order.purpose == "signal"
+                    && is_post_only_entry_order(&order.order_type)
+                    && matches!(
+                        order.status.as_str(),
+                        "accepted" | "resting" | "partially_filled"
+                    )
+                    && order.execution_order_id.is_some()
+                    && order.failure_reason.is_none()
+                    && order
+                        .expires_at
+                        .is_some_and(|expires_at| now_ms < expires_at)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let reports = state.latest_worker_decisions.lock().await.clone();
+    let invalidated = candidates
+        .iter()
+        .filter_map(|order| {
+            let snapshot = order.revalidation_snapshot.as_ref()?;
+            let strategy = order.strategy.as_deref()?;
+            let profile_id = snapshot.profile_id.as_deref()?;
+            let report = reports.get(&(
+                order.symbol.clone(),
+                strategy.to_owned(),
+                profile_id.to_owned(),
+            ))?;
+            let reason = resting_order_invalidation_reason(order, report, now_ms)?;
+            Some((order.execution_order_id.clone()?, reason))
+        })
+        .take(RESTING_SIGNAL_REVALIDATION_MAX_CANCELS_PER_CYCLE)
+        .collect::<Vec<_>>();
+
+    for (execution_order_id, reason) in invalidated {
+        let path = format!("/positions/orders/{execution_order_id}");
+        let response = crate::service_rpc::position_request("DELETE", &path, None)
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "Unable to cancel invalidated resting order {execution_order_id}: {error}"
+                    ),
+                )
+            })?;
+        // A concurrent fill/cancel can remove the order before this request.
+        // Treat not-found as an idempotent race and let the next fill pass
+        // reconcile the final quantity before the order becomes inactive.
+        if !is_idempotent_cancel_response(response.status) {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "Position Management rejected cancellation for {execution_order_id}: {}",
+                    response.status
+                ),
+            ));
+        }
+        let mut settings = state.settings.lock().await;
+        if let Some(order) = settings.orders.iter_mut().find(|order| {
+            order.execution_order_id.as_deref() == Some(execution_order_id.as_str())
+                && matches!(
+                    order.status.as_str(),
+                    "accepted" | "resting" | "partially_filled"
+                )
+        }) {
+            order.failure_reason = Some(format!("revalidation_cancel_requested: {reason}"));
+            request_settings_persist(state)?;
+            drop(settings);
+            persist_settings_snapshot_durable(state).await?;
+        }
+    }
+    Ok(())
+}
+
+fn is_idempotent_cancel_response(status: u16) -> bool {
+    (200..300).contains(&status) || status == 404
+}
+
+fn is_post_only_entry_order(order_type: &str) -> bool {
+    order_type.starts_with("PostOnlyLimit")
+}
+
+fn resting_order_invalidation_reason(
+    order: &TraderOrder,
+    report: &strategy::LiveStrategyDecisionReport,
+    now_ms: u64,
+) -> Option<String> {
+    let snapshot = order.revalidation_snapshot.as_ref()?;
+    let strategy = Strategy::from_name(order.strategy.as_deref()?)?;
+    let max_age = RESTING_SIGNAL_REVALIDATION_MAX_AGE_MS;
+    if report.symbol != order.symbol
+        || report.strategy.as_str() != strategy.as_str()
+        || snapshot.profile_id.as_deref() != Some(report.profile_id.as_str())
+        || snapshot.profile_version != Some(report.profile_version)
+        || snapshot.parameter_hash.as_deref() != Some(report.parameter_hash.as_str())
+        || report.event_time_ms <= order.timestamp
+        || now_ms.saturating_sub(report.event_time_ms) > max_age
+        || report.signal.timestamp <= snapshot.signal_timestamp_ms
+        || now_ms.saturating_sub(report.signal.timestamp) > max_age
+        || report.signal.stale
+        || report.signal.symbol != snapshot.symbol
+        || report.signal.strategy.as_deref() != Some(snapshot.strategy.as_str())
+    {
+        return None;
+    }
+    if report.signal.direction != snapshot.direction {
+        return Some(format!(
+            "fresh signal direction changed from {} to {}",
+            snapshot.direction, report.signal.direction
+        ));
+    }
+    if report.decision != strategy::LiveStrategyDecision::Reject {
+        return None;
+    }
+    let reason = report
+        .reason
+        .clone()
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| {
+            strategy_entry_rejection_reason(
+                &report.signal,
+                strategy,
+                &signal_strategy_parameters(&report.signal),
+            )
+        });
+    Some(reason)
 }
 
 #[derive(Deserialize)]
@@ -351,7 +495,7 @@ async fn sync_auto_positions(state: &AutoTraderState) -> Result<(), (StatusCode,
                     ) {
                         let mut settings = state.settings.lock().await;
                         let realized_usd = realized_usd(&settings, &symbol, realized);
-                        record_strategy_trade_outcome(
+                        let trade_feedback_enqueued = record_strategy_trade_outcome(
                             &mut settings,
                             &symbol,
                             Some(strategy),
@@ -366,6 +510,16 @@ async fn sync_auto_positions(state: &AutoTraderState) -> Result<(), (StatusCode,
                             replay_context_from_close_audit(&audit),
                         );
                         request_settings_persist(state)?;
+                        drop(settings);
+                        if trade_feedback_enqueued {
+                            if let Err(error) = persist_settings_snapshot_durable(state).await {
+                                crate::service_log!(
+                                    "ERROR",
+                                    "Could not durably persist closed-trade Learning outcome: {}",
+                                    error.1
+                                );
+                            }
+                        }
                     }
                 }
                 let has_known_auto_exit =
@@ -479,7 +633,43 @@ fn inactive_execution_order_status(filled_quantity: f64) -> &'static str {
 
 #[cfg(test)]
 mod inactive_execution_order_tests {
-    use super::{inactive_execution_order_status, is_scheduled_execution_order_type};
+    use super::{
+        inactive_execution_order_status, is_idempotent_cancel_response, is_post_only_entry_order,
+        is_scheduled_execution_order_type, resting_order_invalidation_reason,
+    };
+    use serde_json::json;
+
+    fn order(snapshot: bool, filled: f64) -> super::TraderOrder {
+        let revalidation_snapshot = snapshot.then(|| {
+            json!({
+                "symbol": "BTC-USDT", "strategy": "live-momentum",
+                "direction": "bullish", "signal_timestamp_ms": 1_000,
+                "profile_id": "profile-a", "profile_version": 3, "parameter_hash": "profile-a"
+            })
+        });
+        serde_json::from_value(json!({
+            "timestamp": 1_100, "symbol": "BTC-USDT", "side": "buy",
+            "order_type": "PostOnlyLimit · P0", "purpose": "signal", "strategy": "live-momentum",
+            "quantity": 1.0, "filled_quantity": filled, "status": if filled > 0.0 { "partially_filled" } else { "resting" },
+            "realized_pnl": 0.0, "revalidation_snapshot": revalidation_snapshot
+        })).unwrap()
+    }
+
+    fn report(
+        decision: strategy::LiveStrategyDecision,
+        event_time: u64,
+        signal_time: u64,
+    ) -> strategy::LiveStrategyDecisionReport {
+        serde_json::from_value(json!({
+            "contract_version": 1, "event_id": "event-2", "strategy": "live-momentum",
+            "symbol": "BTC-USDT", "profile_id": "profile-a", "profile_version": 3,
+            "parameter_hash": "profile-a", "event_time_ms": event_time,
+            "decision": decision, "reason": "fresh evaluator rejection", "walk_forward_evidence": null,
+            "signal": { "symbol": "BTC-USDT", "direction": "bullish", "strength": 0.4,
+                "timestamp": signal_time, "stale": false, "score": 0.2,
+                "strategy_candidate": true, "strategy": "live-momentum" }
+        })).unwrap()
+    }
 
     #[test]
     fn removes_unfilled_and_partially_filled_orders_from_pending_state() {
@@ -495,5 +685,90 @@ mod inactive_execution_order_tests {
         assert!(is_scheduled_execution_order_type("Vwap · P0"));
         assert!(is_scheduled_execution_order_type("Twap · P1"));
         assert!(!is_scheduled_execution_order_type("PostOnlyLimit · P0"));
+    }
+
+    #[test]
+    fn only_fresh_same_profile_rejection_invalidates_the_original_opportunity() {
+        let now = 5_000;
+        let candidate = order(true, 0.0);
+        let snapshot =
+            serde_json::to_value(candidate.revalidation_snapshot.as_ref().unwrap()).unwrap();
+        assert!(snapshot.get("signal").is_none());
+        assert_eq!(snapshot["signal_timestamp_ms"], 1_000);
+        assert_eq!(
+            resting_order_invalidation_reason(
+                &candidate,
+                &report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400),
+                now
+            )
+            .as_deref(),
+            Some("fresh evaluator rejection")
+        );
+        assert!(
+            resting_order_invalidation_reason(
+                &candidate,
+                &report(strategy::LiveStrategyDecision::Enter, 4_500, 4_400),
+                now
+            )
+            .is_none()
+        );
+        assert!(
+            resting_order_invalidation_reason(
+                &candidate,
+                &report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400),
+                20_000
+            )
+            .is_none()
+        );
+        assert!(
+            resting_order_invalidation_reason(
+                &order(false, 0.0),
+                &report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400),
+                now
+            )
+            .is_none()
+        );
+        let mut stale_report = report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400);
+        stale_report.signal.stale = true;
+        assert!(resting_order_invalidation_reason(&candidate, &stale_report, now).is_none());
+        let mut unrelated_report = report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400);
+        unrelated_report.profile_version += 1;
+        assert!(resting_order_invalidation_reason(&candidate, &unrelated_report, now).is_none());
+
+        let mut reversed_report = report(strategy::LiveStrategyDecision::Enter, 4_500, 4_400);
+        reversed_report.signal.direction = "bearish".to_owned();
+        assert_eq!(
+            resting_order_invalidation_reason(&candidate, &reversed_report, now).as_deref(),
+            Some("fresh signal direction changed from bullish to bearish")
+        );
+    }
+
+    #[test]
+    fn partial_fill_keeps_its_fill_attribution_while_invalid_remainder_is_cancelable() {
+        let candidate = order(true, 0.25);
+        assert_eq!(candidate.filled_quantity, 0.25);
+        assert_eq!(candidate.status, "partially_filled");
+        assert!(
+            resting_order_invalidation_reason(
+                &candidate,
+                &report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400),
+                5_000
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn cancellation_not_found_is_an_idempotent_race_but_conflict_is_not() {
+        assert!(is_idempotent_cancel_response(204));
+        assert!(is_idempotent_cancel_response(404));
+        assert!(!is_idempotent_cancel_response(409));
+    }
+
+    #[test]
+    fn revalidation_only_selects_post_only_entry_orders() {
+        assert!(is_post_only_entry_order("PostOnlyLimit · P0"));
+        assert!(!is_post_only_entry_order("Gtd · P0"));
+        assert!(!is_post_only_entry_order("Ioc · P0"));
     }
 }

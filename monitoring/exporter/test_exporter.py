@@ -7,7 +7,7 @@ from rsocket.exceptions import RSocketTransportError
 
 
 class RSocketExporterTests(unittest.TestCase):
-    def test_live_position_counts_accept_empty_activity_snapshot(self):
+    def test_live_position_counts_use_lightweight_route_and_accept_zero_counts(self):
         with patch.object(
             exporter,
             "rsocket_get",
@@ -20,15 +20,35 @@ class RSocketExporterTests(unittest.TestCase):
         self.assertEqual(counts["live"]["live-momentum"], 3)
         self.assertEqual(counts["live"]["live-trade-flow"], 0)
 
-    def test_live_position_counts_mark_failed_or_malformed_activity_unavailable(self):
+    def test_live_position_counts_mark_failed_or_malformed_response_unavailable(self):
         with patch.object(exporter, "rsocket_get", side_effect=OSError("route unavailable")):
             failed = exporter.strategy_live_position_counts()
         with patch.object(exporter, "rsocket_get", return_value=[1, 2]):
             malformed = exporter.strategy_live_position_counts()
+        with patch.object(
+            exporter,
+            "rsocket_get",
+            return_value={"live-momentum": -1},
+        ):
+            invalid_count = exporter.strategy_live_position_counts()
 
         self.assertFalse(failed["live_available"])
         self.assertIn("route unavailable", failed["live_error"])
         self.assertFalse(malformed["live_available"])
+        self.assertFalse(invalid_count["live_available"])
+        self.assertIn("was invalid", invalid_count["live_error"])
+
+    def test_live_position_counts_ignore_untracked_names_without_changing_metric_contract(self):
+        with patch.object(
+            exporter,
+            "rsocket_get",
+            return_value={"live-momentum": 2, "unknown-retired-strategy": 99},
+        ):
+            counts = exporter.strategy_live_position_counts()
+
+        self.assertTrue(counts["live_available"])
+        self.assertEqual(counts["live"]["live-momentum"], 2)
+        self.assertNotIn("unknown-retired-strategy", counts["live"])
 
     def test_live_worker_metrics_expose_position_count_route_failure(self):
         class Response:

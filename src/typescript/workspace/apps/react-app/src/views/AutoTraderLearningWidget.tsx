@@ -16,6 +16,9 @@ import type {
   LearningRow,
   LearningDecision,
   TradeEffectivenessRow,
+  EvidenceCoverageCohort,
+  EvidenceRequestCoverage,
+  EvidenceRequestsResponse,
 } from '../models/AutoTraderLearningWidgetModel';
 import { AutoTraderLearningDecisionDetails } from './AutoTraderLearningDecisionDetails';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
@@ -33,6 +36,268 @@ const learningGridTheme = themeQuartz.withParams({
 
 const signedPercentPoints = (value: number | null) =>
   value == null ? '—' : `${value > 0 ? '+' : ''}${value.toFixed(3)} pp`;
+
+function evidenceRequestStatusLabel(status: string | undefined) {
+  const labels: Record<string, string> = {
+    pending: 'Queued',
+    running: 'Collecting',
+    dispatched: 'Awaiting Scout outcome',
+    capacity_blocked: 'Capacity blocked',
+    waiting_for_market: 'Waiting for market data',
+    completed: 'Request complete',
+    failed: 'Failed or waiting to retry',
+  };
+  return status
+    ? (labels[status] ?? status.replaceAll('_', ' '))
+    : 'Unavailable';
+}
+
+function evidenceFreshnessLabel(status: string | null) {
+  if (status === 'missing') return 'Missing';
+  if (status === 'stale') return 'Stale';
+  if (status === 'fresh') return 'Fresh';
+  return 'Unavailable';
+}
+
+function evidenceTimestamp(value: number | null | undefined) {
+  return typeof value === 'number' && value > 0
+    ? new Date(value).toLocaleString()
+    : 'Unavailable';
+}
+
+function relatedEvidenceRequest(
+  cohort: EvidenceCoverageCohort,
+  requests: EvidenceRequestCoverage[],
+) {
+  return requests.find(
+    ({ request }) =>
+      request.symbol === cohort.symbol &&
+      request.strategy === cohort.strategy &&
+      request.profile_id === cohort.profile_id &&
+      (cohort.regime == null || request.regime === cohort.regime) &&
+      (cohort.horizon == null || request.horizon === cohort.horizon),
+  );
+}
+
+function EvidenceCoveragePanel({
+  response,
+  error,
+}: {
+  response: EvidenceRequestsResponse | null;
+  error?: string;
+}) {
+  return (
+    <section
+      className="auto-trader-evidence-coverage"
+      aria-label="Evidence coverage"
+    >
+      <div className="auto-trader-evidence-coverage-heading">
+        <div>
+          <strong>Evidence coverage and acquisition</strong>
+          <small>
+            Learning-owned Scout requests; coverage freshness is measured at the
+            symbol, strategy, and profile level.
+          </small>
+        </div>
+        {response && (
+          <small>As of {evidenceTimestamp(response.as_of_ms)}</small>
+        )}
+      </div>
+      {error && (
+        <p className="auto-trader-learning-error" role="alert">
+          Evidence coverage unavailable: {error}
+        </p>
+      )}
+      {!response ? (
+        <p>
+          {error
+            ? 'Coverage state could not be loaded.'
+            : 'Loading evidence coverage…'}
+        </p>
+      ) : (
+        <>
+          <div className="auto-trader-evidence-coverage-subheading">
+            <strong>Active profile coverage</strong>
+            <small>
+              {Math.min(response.coverage_cohorts.length, 100).toLocaleString()}
+              {' / '}
+              {response.total_coverage_cohorts.toLocaleString()} cohorts shown
+              {response.omitted_coverage_cohorts > 0
+                ? ` · ${response.omitted_coverage_cohorts.toLocaleString()} omitted by Learning`
+                : ''}
+            </small>
+          </div>
+          {response.coverage_cohorts.length === 0 ? (
+            <p>
+              No profile coverage snapshot is available. Completeness cannot be
+              inferred from an empty list.
+            </p>
+          ) : (
+            <div className="auto-trader-evidence-request-list">
+              {response.coverage_cohorts.slice(0, 100).map((cohort) => {
+                const request = relatedEvidenceRequest(
+                  cohort,
+                  response.requests,
+                );
+                return (
+                  <article
+                    className="auto-trader-evidence-request"
+                    key={`${cohort.symbol}:${cohort.strategy}:${cohort.profile_id}`}
+                  >
+                    <header>
+                      <div>
+                        <strong>
+                          {cohort.symbol} · {cohort.strategy}
+                        </strong>
+                        <small className="auto-trader-evidence-profile">
+                          Profile {cohort.profile_id}
+                        </small>
+                      </div>
+                      <span
+                        className={`auto-trader-evidence-state auto-trader-evidence-state--${cohort.coverage_status ?? 'unavailable'}`}
+                      >
+                        {evidenceFreshnessLabel(cohort.coverage_status)}
+                      </span>
+                    </header>
+                    <dl>
+                      <div>
+                        <dt>Gap</dt>
+                        <dd>{cohort.gap_reason ?? 'Unavailable'}</dd>
+                      </div>
+                      <div>
+                        <dt>Current samples</dt>
+                        <dd>
+                          {cohort.sample_count == null
+                            ? 'Unavailable'
+                            : cohort.sample_count.toLocaleString()}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Effective samples</dt>
+                        <dd>
+                          {cohort.effective_sample_size == null
+                            ? 'Unavailable'
+                            : cohort.effective_sample_size.toFixed(2)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Last sample</dt>
+                        <dd>
+                          {evidenceTimestamp(cohort.last_sample_timestamp_ms)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Acquisition state</dt>
+                        <dd>
+                          {request
+                            ? evidenceRequestStatusLabel(request.request.status)
+                            : response.omitted_count > 0
+                              ? 'Unavailable in returned request page'
+                              : 'No request recorded'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Coverage context</dt>
+                        <dd>
+                          {cohort.regime == null && cohort.horizon == null
+                            ? 'Aggregate profile'
+                            : `${cohort.regime ?? 'Unknown regime'} · ${cohort.horizon ?? 'Default horizon'}`}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Last progress</dt>
+                        <dd>
+                          {request
+                            ? evidenceTimestamp(request.request.updated_at_ms)
+                            : 'Unavailable'}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Next attempt</dt>
+                        <dd>
+                          {request &&
+                          request.request.next_attempt_at_ms > request.as_of_ms
+                            ? evidenceTimestamp(
+                                request.request.next_attempt_at_ms,
+                              )
+                            : request
+                              ? 'Not scheduled'
+                              : 'Unavailable'}
+                        </dd>
+                      </div>
+                    </dl>
+                    {(cohort.gap_reason || request?.request.reason) && (
+                      <p className="auto-trader-evidence-request-reason">
+                        {request?.request.reason ?? cohort.gap_reason}
+                      </p>
+                    )}
+                    <small>
+                      {cohort.regime_horizon_coverage === 'unavailable'
+                        ? 'Regime and horizon are not independently measured in this coverage row.'
+                        : `Coverage scope: ${cohort.coverage_scope}`}
+                    </small>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+          <div className="auto-trader-evidence-coverage-subheading">
+            <strong>Recent acquisition requests</strong>
+            <small>
+              {response.total_count.toLocaleString()} requests ·{' '}
+              {response.requests.length.toLocaleString()} shown
+            </small>
+          </div>
+          {response.requests.length === 0 ? (
+            <p>No Scout acquisition requests are recorded yet.</p>
+          ) : (
+            <div className="auto-trader-evidence-request-list">
+              {response.requests.slice(0, 100).map((item) => (
+                <article
+                  className="auto-trader-evidence-request auto-trader-evidence-request--compact"
+                  key={`${item.request.symbol}:${item.request.strategy}:${item.request.profile_id}:${item.request.regime}:${item.request.horizon}`}
+                >
+                  <header>
+                    <strong>
+                      {item.request.symbol} · {item.request.strategy} ·{' '}
+                      {item.request.regime} · {item.request.horizon}
+                    </strong>
+                    <span
+                      className={`auto-trader-evidence-state auto-trader-evidence-state--${item.request.status}`}
+                    >
+                      {evidenceRequestStatusLabel(item.request.status)}
+                    </span>
+                  </header>
+                  <small>
+                    Profile {item.request.profile_id} ·{' '}
+                    {item.request.attempts.toLocaleString()} attempts · last
+                    progress {evidenceTimestamp(item.request.updated_at_ms)}
+                  </small>
+                  {item.request.reason && (
+                    <small className="auto-trader-evidence-request-reason">
+                      {item.request.reason}
+                    </small>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      {response && response.omitted_count > 0 && (
+        <p className="auto-trader-evidence-coverage-omitted">
+          {response.omitted_count.toLocaleString()} older requests omitted from
+          this view.
+        </p>
+      )}
+      <small className="auto-trader-evidence-coverage-limitation">
+        Required sample windows, confidence, worker heartbeat, and per-regime or
+        per-horizon coverage are unavailable when Learning has not published
+        those measurements.
+      </small>
+    </section>
+  );
+}
 
 const tradeEffectivenessColumns: ColDef<TradeEffectivenessRow>[] = [
   { field: 'strategy', headerName: 'Strategy', pinned: 'left', width: 180 },
@@ -370,6 +635,8 @@ export function AutoTraderLearningWidget({
     decisions,
     decisionCoverage,
     decisionError,
+    evidenceRequests,
+    evidenceRequestError,
   } = useBehaviorSnapshot(model.state$);
   const recentDecisionCutoff = Date.now() - decisionLookbackMs;
   const filteredDecisions = decisions
@@ -629,6 +896,10 @@ export function AutoTraderLearningWidget({
       )}
       {section === 'scouts' && (
         <>
+          <EvidenceCoveragePanel
+            response={evidenceRequests}
+            error={evidenceRequestError}
+          />
           <section
             className="auto-trader-learning-experiments"
             aria-label="Scout simulated evidence"

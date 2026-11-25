@@ -19,6 +19,21 @@ fn sqlite_write_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|error| error.into_inner())
 }
 
+/// Snapshot persistence is serialized, so this cache can safely retain the
+/// last committed value per database. Most AutoTrader updates change only a
+/// small part of Settings; rewriting every normalized row turns a durable
+/// reservation into a full-state write on the signal critical path.
+fn committed_settings_snapshots() -> &'static std::sync::Mutex<
+    std::collections::HashMap<PathBuf, serde_json::Map<String, serde_json::Value>>,
+> {
+    static SNAPSHOTS: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<PathBuf, serde_json::Map<String, serde_json::Value>>,
+        >,
+    > = std::sync::OnceLock::new();
+    SNAPSHOTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn settings_database_path(json_path: &PathBuf) -> PathBuf {
     json_path.with_extension("sqlite")
 }
@@ -55,7 +70,10 @@ fn ensure_dated_carry_schema(connection: &rusqlite::Connection) -> rusqlite::Res
         |row| row.get(0),
     )?;
     if !has_closed_at {
-        connection.execute("ALTER TABLE dated_carry_positions ADD COLUMN closed_at_ms INTEGER", [])?;
+        connection.execute(
+            "ALTER TABLE dated_carry_positions ADD COLUMN closed_at_ms INTEGER",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -263,6 +281,7 @@ fn persist_settings_snapshot(
     settings: &Settings,
 ) -> Result<(), (StatusCode, String)> {
     let _sqlite_write_guard = sqlite_write_guard();
+    let database_existed = path.exists();
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -280,18 +299,39 @@ fn persist_settings_snapshot(
     let object = value
         .as_object()
         .ok_or_else(|| settings_persistence_error("Settings did not serialize as an object"))?;
+    if !database_existed {
+        committed_settings_snapshots()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(path);
+    }
+    let committed = committed_settings_snapshots()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .cloned();
     let transaction = connection
         .unchecked_transaction()
         .map_err(settings_persistence_error)?;
     for (field, value) in object {
+        if committed.as_ref().and_then(|snapshot| snapshot.get(field)) == Some(value) {
+            continue;
+        }
         let table = format!("setting_{field}");
         transaction.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {table} (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);")).map_err(settings_persistence_error)?;
         transaction.execute(&format!("INSERT INTO {table}(id,value) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET value=excluded.value"), [serde_json::to_string(value).map_err(settings_persistence_error)?]).map_err(settings_persistence_error)?;
     }
-    transaction
-        .execute_batch("DROP TABLE IF EXISTS auto_trader_state;")
-        .map_err(settings_persistence_error)?;
-    transaction.commit().map_err(settings_persistence_error)
+    if committed.is_none() {
+        transaction
+            .execute_batch("DROP TABLE IF EXISTS auto_trader_state;")
+            .map_err(settings_persistence_error)?;
+    }
+    transaction.commit().map_err(settings_persistence_error)?;
+    committed_settings_snapshots()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(path.clone(), object.clone());
+    Ok(())
 }
 
 fn settings_persistence_error(error: impl std::fmt::Display) -> (StatusCode, String) {
@@ -333,6 +373,129 @@ mod sqlite_state_tests {
             )
             .unwrap();
         assert!(tables > 50);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn repeated_snapshot_updates_changed_rows_without_rewriting_unchanged_rows() {
+        let path = temporary_database_path();
+        let mut settings = Settings::default();
+        persist_settings_snapshot(&path, &settings).unwrap();
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE persistence_update_counts (table_name TEXT PRIMARY KEY, updates INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO persistence_update_counts(table_name) VALUES ('setting_enabled'), ('setting_strategies');
+                 CREATE TRIGGER count_enabled_update AFTER UPDATE ON setting_enabled BEGIN
+                    UPDATE persistence_update_counts SET updates = updates + 1 WHERE table_name = 'setting_enabled';
+                 END;
+                 CREATE TRIGGER count_strategies_update AFTER UPDATE ON setting_strategies BEGIN
+                    UPDATE persistence_update_counts SET updates = updates + 1 WHERE table_name = 'setting_strategies';
+                 END;",
+            )
+            .unwrap();
+        drop(connection);
+
+        settings.enabled = true;
+        persist_settings_snapshot(&path, &settings).unwrap();
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let enabled_updates: i64 = connection
+            .query_row(
+                "SELECT updates FROM persistence_update_counts WHERE table_name='setting_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let unchanged_updates: i64 = connection
+            .query_row(
+                "SELECT updates FROM persistence_update_counts WHERE table_name='setting_strategies'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled_updates, 1);
+        assert_eq!(unchanged_updates, 0);
+        assert!(read_settings_database(&path).unwrap().unwrap().enabled);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn durable_reservation_and_learning_event_reuse_ids_after_sqlite_restart() {
+        let path = temporary_database_path();
+        let mut state = benchmark_snapshot_state(Settings::default());
+        state.settings_path = path.clone();
+        let first = {
+            let mut settings = state.settings.lock().await;
+            let first = canonical_lifecycle_identity_for_reservation(
+                &mut settings,
+                "durable-decision",
+                Some("profile-v1".into()),
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+            record_strategy_trade_outcome(
+                &mut settings,
+                "BTC-USDT",
+                Some("live-momentum"),
+                Some("durable-context"),
+                false,
+                1.25,
+                Some(0.8),
+                Some(&serde_json::json!({"strategy_parameters": {"minimum_momentum": 0.003}})),
+                Some("durable-decision"),
+                None,
+            );
+            first
+        };
+        persist_settings_snapshot_durable(&state).await.unwrap();
+
+        let mut restarted = read_settings_database(&path).unwrap().unwrap();
+        let retried = canonical_lifecycle_identity_for_reservation(
+            &mut restarted,
+            "durable-decision",
+            Some("profile-v1".into()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(retried, first);
+        assert_eq!(restarted.canonical_lifecycle_sequence, 1);
+        let Some(FeedbackEvent::TradeOutcome {
+            schema_version,
+            trade_id,
+            opportunity_id,
+            episode_id,
+            execution_mode,
+            entry_policy,
+            source,
+            ..
+        }) = restarted.feedback_outbox.first()
+        else {
+            panic!("persisted canonical Learning event is missing")
+        };
+        assert_eq!(*schema_version, Some(1));
+        assert_eq!(trade_id.as_deref(), Some(first.trade_id.as_str()));
+        assert_eq!(
+            opportunity_id.as_deref(),
+            Some(first.opportunity_id.as_str())
+        );
+        assert_eq!(episode_id.as_deref(), Some(first.episode_id.as_str()));
+        assert_eq!(execution_mode.as_deref(), Some("paper"));
+        assert_eq!(entry_policy.as_deref(), Some("strict"));
+        assert_eq!(source.as_deref(), Some("auto_trader_entry_reservation"));
+
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
@@ -461,6 +624,26 @@ fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, 
     Ok(())
 }
 
+/// Persist a settings snapshot under the same serialized writer lock used by
+/// the coalescing worker, and return only after its SQLite transaction commits.
+/// Entry reservations use this before external order submission so a restart
+/// can retry with the same canonical client order ID.
+async fn persist_settings_snapshot_durable(
+    state: &AutoTraderState,
+) -> Result<(), (StatusCode, String)> {
+    let _write_guard = Arc::clone(&state.settings_persist_write_lock)
+        .lock_owned()
+        .await;
+    let settings_guard = Arc::clone(&state.settings).lock_owned().await;
+    let snapshot = tokio::task::spawn_blocking(move || settings_guard.clone())
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    let path = state.settings_path.clone();
+    tokio::task::spawn_blocking(move || persist_settings_snapshot(&path, &snapshot))
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+}
+
 const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
 const SETTINGS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 
@@ -481,11 +664,13 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
     let settings = Arc::clone(&state.settings);
     let path = state.settings_path.clone();
     let notify = Arc::clone(&state.settings_persist_notify);
+    let write_lock = Arc::clone(&state.settings_persist_write_lock);
     let timings = Arc::clone(&state.settings_persist_timings_ms);
     tokio::spawn(async move {
         loop {
             notify.notified().await;
             tokio::time::sleep(SETTINGS_PERSIST_COALESCE_WINDOW).await;
+            let write_guard = Arc::clone(&write_lock).lock_owned().await;
             let lock_wait_started = Instant::now();
             let settings_guard = Arc::clone(&settings).lock_owned().await;
             record_settings_persist_sample(
@@ -498,6 +683,7 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
                 match tokio::task::spawn_blocking(move || settings_guard.clone()).await {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
+                        drop(write_guard);
                         crate::service_log!(
                             "ERROR",
                             "Auto Trader state snapshot copier failed: {error}"
@@ -525,6 +711,7 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
                     write_started.elapsed().as_secs_f64() * 1_000.0,
                 ),
                 Ok(Err((_, error))) => {
+                    drop(write_guard);
                     crate::service_log!(
                         "ERROR",
                         "Auto Trader state snapshot write failed: {error}"
@@ -533,6 +720,7 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
                     notify.notify_one();
                 }
                 Err(error) => {
+                    drop(write_guard);
                     crate::service_log!(
                         "ERROR",
                         "Auto Trader state snapshot writer failed: {error}"
@@ -1034,7 +1222,9 @@ fn pending_entry_strategy_keys(settings: &Settings) -> BTreeSet<(String, String)
         .iter()
         .filter(|order| {
             order.purpose == "signal"
-                && order.expires_at.is_none_or(|expires_at| expires_at > now_ms)
+                && order
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > now_ms)
                 && matches!(
                     order.status.as_str(),
                     "submitting" | "accepted" | "resting" | "partially_filled"

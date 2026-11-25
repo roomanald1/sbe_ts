@@ -328,6 +328,18 @@ fn json_has_strategy(value: &serde_json::Value, strategy: &str) -> bool {
 
 fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy) -> Router {
     let mut persisted = load_scout_state(&state_path).unwrap_or_default();
+    let startup_pair_changes = reconcile_and_expire_scout_pairs(&mut persisted, scout_now_ms());
+    if !startup_pair_changes.is_empty() {
+        let mut changed = startup_pair_changes
+            .iter()
+            .map(|key| format!("pairs@{key}"))
+            .collect::<Vec<_>>();
+        changed.push("outbox".to_owned());
+        let changed = changed.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Err(error) = persist_scout_state(&state_path, &persisted, &changed) {
+            eprintln!("WARN Could not persist Scout comparison startup cleanup: {}", error.1);
+        }
+    }
     persisted.scout_configuration.strategies = vec![worker_strategy.as_str().to_owned()];
     let _ = persist_scout_state(&state_path, &persisted, &["scout_configuration"]);
     rebuild_strategy_outcome_profile_index(&mut persisted);
@@ -359,7 +371,23 @@ fn router_with_state(state_path: PathBuf, worker_strategy: strategies::Strategy)
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            if !retry_scout.data.lock().await.outbox.is_empty() {
+            let has_outbox = {
+                let mut state = retry_scout.data.lock().await;
+                let changes = reconcile_and_expire_scout_pairs(&mut state, scout_now_ms());
+                if !changes.is_empty() {
+                    let mut changed = changes
+                        .iter()
+                        .map(|key| format!("pairs@{key}"))
+                        .collect::<Vec<_>>();
+                    changed.push("outbox".to_owned());
+                    let changed = changed.iter().map(String::as_str).collect::<Vec<_>>();
+                    if let Err(error) = persist_scout_state(&retry_scout.path, &state, &changed) {
+                        eprintln!("WARN Could not persist periodic Scout comparison cleanup: {}", error.1);
+                    }
+                }
+                !state.outbox.is_empty()
+            };
+            if has_outbox {
                 schedule_scout_outbox_flush_with(
                     retry_scout.clone(),
                     retry_learning_rsocket_url.clone(),
@@ -588,13 +616,27 @@ async fn get_scout_status(State(service): State<ServiceState>) -> Json<ScoutStat
         .filter(|outcome| outcome.net_return_percent > 0.0).count();
     let realized_pnl_usd = state.outcomes.values()
         .map(|outcome| outcome.simulated_net_pnl_usd).sum();
+    let (unmatched_comparison_pairs, unmatched_comparison_outcomes) =
+        scout_comparison_unmatched_counts(&state);
     Json(ScoutStatus {
         active_samples,
         learning_samples,
         positive_samples,
         win_rate: (learning_samples > 0).then_some(positive_samples as f64 / learning_samples as f64),
         realized_pnl_usd,
+        unmatched_comparison_pairs,
+        unmatched_comparison_outcomes,
+        expired_comparison_pairs: state.expired_scout_comparison_pairs,
     })
+}
+
+fn scout_comparison_unmatched_counts(state: &PersistedState) -> (usize, usize) {
+    let outcomes = state
+        .pairs
+        .values()
+        .map(|pair| usize::from(pair.baseline.is_some()) + usize::from(pair.variant.is_some()))
+        .sum();
+    (state.pairs.len(), outcomes)
 }
 
 async fn set_scout_configuration(
@@ -3178,6 +3220,118 @@ fn paired_event_with_legacy_side(
     Some(event)
 }
 
+const SCOUT_COMPARISON_TTL_MS: u64 = 7 * 86_400_000;
+
+fn expire_scout_comparison_pairs(state: &mut PersistedState, now_ms: u64) -> Vec<String> {
+    let expired = state
+        .pairs
+        .iter()
+        .filter_map(|(key, pair)| {
+            (now_ms.saturating_sub(pair.updated_at_ms) > SCOUT_COMPARISON_TTL_MS)
+                .then_some(key.clone())
+        })
+        .collect::<Vec<_>>();
+    for key in &expired {
+        state.pairs.remove(key);
+    }
+    state.expired_scout_comparison_pairs = state
+        .expired_scout_comparison_pairs
+        .saturating_add(expired.len() as u64);
+    expired
+}
+
+fn outcome_proves_comparison_scenario(
+    outcome: &ScoutOutcomeRequest,
+    comparison_id: &str,
+    scenario: &str,
+) -> bool {
+    outcome.exit_scenario == scenario
+        && (outcome.scout_comparison_id.as_deref() == Some(comparison_id)
+            || outcome
+                .scout_comparison_ids
+                .iter()
+                .any(|id| id == comparison_id))
+}
+
+/// Reconcile only the known legacy shape: an unsuffixed strategy comparison
+/// arm and its `|scenario:strategy` counterpart. Both rows must independently
+/// identify the same comparison, scenario, and strategy before they are joined.
+fn reconcile_legacy_scout_comparison_pairs(state: &mut PersistedState) -> Vec<String> {
+    let legacy_keys = state
+        .pairs
+        .keys()
+        .filter(|key| !key.contains("|scenario:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut changed = Vec::new();
+    for comparison_id in legacy_keys {
+        let canonical_key = format!("{comparison_id}|scenario:strategy");
+        let (Some(legacy), Some(canonical)) = (
+            state.pairs.get(&comparison_id).cloned(),
+            state.pairs.get(&canonical_key).cloned(),
+        ) else {
+            continue;
+        };
+        let complementary = match (
+            legacy.baseline.as_ref(),
+            legacy.variant.as_ref(),
+            canonical.baseline.as_ref(),
+            canonical.variant.as_ref(),
+        ) {
+            (Some(baseline), None, None, Some(variant))
+                if outcome_proves_comparison_scenario(baseline, &comparison_id, "strategy")
+                    && outcome_proves_comparison_scenario(variant, &comparison_id, "strategy")
+                    && baseline.strategy == variant.strategy =>
+            {
+                Some((baseline.clone(), variant.clone()))
+            }
+            (None, Some(variant), Some(baseline), None)
+                if outcome_proves_comparison_scenario(baseline, &comparison_id, "strategy")
+                    && outcome_proves_comparison_scenario(variant, &comparison_id, "strategy")
+                    && baseline.strategy == variant.strategy =>
+            {
+                Some((baseline.clone(), variant.clone()))
+            }
+            _ => None,
+        };
+        let Some((baseline, variant)) = complementary else {
+            continue;
+        };
+        if paired_event(&canonical_key, &baseline, &variant).is_none() {
+            continue;
+        }
+        let mut merged = canonical;
+        merged.baseline = Some(baseline);
+        merged.variant = Some(variant);
+        merged.updated_at_ms = legacy.updated_at_ms.max(merged.updated_at_ms);
+        state.pairs.remove(&comparison_id);
+        if let Some(event) = merged
+            .baseline
+            .as_ref()
+            .zip(merged.variant.as_ref())
+            .and_then(|(baseline, variant)| paired_event(&canonical_key, baseline, variant))
+        {
+            if !outbox_has_learning(state, &event) {
+                state.outbox.push(ScoutOutboxItem::Learning(event));
+            }
+            state.pairs.remove(&canonical_key);
+        } else {
+            state.pairs.insert(canonical_key.clone(), merged);
+        }
+        changed.push(comparison_id);
+        changed.push(canonical_key);
+    }
+    changed
+}
+
+fn reconcile_and_expire_scout_pairs(state: &mut PersistedState, now_ms: u64) -> Vec<String> {
+    let mut changed = expire_scout_comparison_pairs(state, now_ms);
+    changed.extend(reconcile_legacy_scout_comparison_pairs(state));
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
 fn record_paired_scout_outcome(
     state: &mut PersistedState,
     outcome: &ScoutOutcomeRequest,
@@ -3185,9 +3339,10 @@ fn record_paired_scout_outcome(
     let Some(role) = outcome.scout_comparison_role.as_deref() else {
         return (Vec::new(), Vec::new());
     };
+    let mut touched_ids = expire_scout_comparison_pairs(state, outcome.evaluated_timestamp_ms);
     let comparison_ids = outcome_comparison_ids(outcome);
     let mut paired_updates = Vec::new();
-    let mut touched_ids = comparison_ids.clone();
+    touched_ids.extend(comparison_ids.iter().cloned());
     for comparison_id in comparison_ids {
         // A parameter comparison can produce more than one exit-scenario
         // outcome. Keep each scenario's baseline and variant together; sharing
@@ -3262,18 +3417,6 @@ fn record_paired_scout_outcome(
             state.pairs.remove(&pair_key);
             touched_ids.push(pair_key);
         }
-    }
-    let expired = state
-        .pairs
-        .iter()
-        .filter_map(|(key, pair)| {
-            (outcome.evaluated_timestamp_ms.saturating_sub(pair.updated_at_ms) > 7 * 86_400_000)
-                .then_some(key.clone())
-        })
-        .collect::<Vec<_>>();
-    for key in expired {
-        state.pairs.remove(&key);
-        touched_ids.push(key);
     }
     while state.pairs.len() > 20_000 {
         let Some(oldest) = state

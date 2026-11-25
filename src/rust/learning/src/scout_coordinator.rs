@@ -20,7 +20,7 @@ use strategy::{
     Strategy, StrategyProfile, StrategyReplayPoint, StrategyReplayRequest, StrategyReplayResponse,
     request_scout_service_route_with_timeouts,
 };
-use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, oneshot};
 use tower::ServiceExt;
 
 use crate::ServiceState;
@@ -42,6 +42,10 @@ const MAX_REPLAY_TOTAL_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_REPLAY_SIGNAL_GAP_MS: u64 = 30_000;
 const MAX_WORKER_SCOUT_VARIANTS: usize = 2_000;
 const MAX_AUTOTRADER_SCOUT_VARIANTS: usize = 5_000;
+const MAX_EVIDENCE_REQUESTS_PER_BATCH: usize = 32;
+const MAX_REPLAY_ATTEMPTS: u32 = 5;
+const REPLAY_RETRY_BASE_MS: u64 = 5_000;
+const REPLAY_RETRY_MAX_MS: u64 = 60 * 60 * 1_000;
 
 type ScoutWorkerClientPool = HashMap<String, Arc<Client>>;
 
@@ -408,6 +412,38 @@ fn strategy_replay_horizons_ms(strategy: &str) -> Option<Vec<u64>> {
     .then_some(horizons)
 }
 
+fn replay_retry_delay_ms(attempts: u32) -> u64 {
+    let exponent = attempts.saturating_sub(1).min(20);
+    REPLAY_RETRY_BASE_MS
+        .saturating_mul(1_u64 << exponent)
+        .min(REPLAY_RETRY_MAX_MS)
+}
+
+fn replay_retry_ready(
+    status: crate::StrategyReplayStatus,
+    attempts: u32,
+    updated_at_ms: u64,
+    now_ms: u64,
+) -> bool {
+    match status {
+        crate::StrategyReplayStatus::Pending => true,
+        crate::StrategyReplayStatus::Failed => {
+            attempts < MAX_REPLAY_ATTEMPTS
+                && now_ms.saturating_sub(updated_at_ms) >= replay_retry_delay_ms(attempts)
+        }
+        _ => false,
+    }
+}
+
+fn evidence_gap_priority(freshness_status: Option<&str>) -> u8 {
+    match freshness_status {
+        Some("fresh") => 2,
+        Some("stale") => 1,
+        Some("missing") | None => 0,
+        Some(_) => 0,
+    }
+}
+
 fn missed_opportunity_band(
     job: &crate::MissedOpportunityJob,
     horizon_ms: u64,
@@ -508,6 +544,7 @@ pub struct ScoutCoordinator {
     insights_rsocket_url: String,
     auto_trader_rsocket_url: String,
     replay_gate: Arc<AsyncMutex<()>>,
+    evidence_request_gate: Arc<Semaphore>,
     scout_updates: Arc<ScoutUpdateHub>,
     recent_scout_activity: Arc<AsyncMutex<Vec<serde_json::Value>>>,
 }
@@ -559,6 +596,7 @@ impl ScoutCoordinator {
             auto_trader_rsocket_url: std::env::var("AUTO_TRADER_RSOCKET_URL")
                 .unwrap_or_else(|_| "ws://auto-trader:10006".into()),
             replay_gate: Arc::new(AsyncMutex::new(())),
+            evidence_request_gate: Arc::new(Semaphore::new(4)),
             scout_updates: ScoutUpdateHub::new(),
             recent_scout_activity: Arc::new(AsyncMutex::new(Vec::new())),
         })
@@ -742,9 +780,13 @@ impl ScoutCoordinator {
             });
         }
 
-        let state = self.state.state.lock().await;
+        let mut state = self.state.state.lock().await;
+        let priority_snapshot =
+            crate::profiles::walk_forward_priority_snapshot(&state, crate::now_ms());
         let mut assignments = Vec::new();
         let mut results = Vec::new();
+        let mut evidence_requests_scheduled = 0;
+        let mut evidence_requests_changed = false;
         for (signal_index, signal) in request.signals.iter().enumerate() {
             let symbol = signal["symbol"]
                 .as_str()
@@ -797,6 +839,68 @@ impl ScoutCoordinator {
                         });
                         continue;
                     }
+                    let regime = candidate["market_regime"]
+                        .as_str()
+                        .or_else(|| signal["market_regime"].as_str())
+                        .filter(|value| matches!(*value, "range" | "trend" | "volatile" | "mixed"))
+                        .unwrap_or("unknown");
+                    let horizon = candidate["horizon_seconds"]
+                        .as_u64()
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "default".into());
+                    let cohort_key = format!(
+                        "{}|{}|profile:{}|regime:{}|horizon:{}",
+                        profile.symbol, profile.strategy, profile.profile_id, regime, horizon
+                    );
+                    let freshness = priority_snapshot
+                        .get(&cohort_key)
+                        .and_then(|coverage| coverage["freshnessStatus"].as_str())
+                        .unwrap_or("missing");
+                    let evidence_permit = if request.mode == ScoutWorkMode::Evaluate
+                        && matches!(freshness, "missing" | "stale")
+                        && evidence_requests_scheduled < MAX_EVIDENCE_REQUESTS_PER_BATCH
+                    {
+                        self.evidence_request_gate.clone().try_acquire_owned().ok()
+                    } else {
+                        None
+                    };
+                    let evidence_request_id = if request.mode == ScoutWorkMode::Evaluate
+                        && evidence_permit.is_some()
+                        && evidence_requests_scheduled < MAX_EVIDENCE_REQUESTS_PER_BATCH
+                    {
+                        let key = crate::evidence_request_key(
+                            &profile.symbol,
+                            &profile.strategy,
+                            &profile.profile_id,
+                            regime,
+                            &horizon,
+                        );
+                        let previous_request = state.evidence_requests.get(&key).cloned();
+                        let id = crate::schedule_evidence_request(
+                            &mut state,
+                            &profile.symbol,
+                            &profile.strategy,
+                            &profile.profile_id,
+                            regime,
+                            &horizon,
+                            freshness,
+                            crate::now_ms(),
+                        );
+                        let mut changed =
+                            state.evidence_requests.get(&key) != previous_request.as_ref();
+                        if id.is_some() {
+                            evidence_requests_scheduled += 1;
+                        }
+                        if let Some(id) = id.as_deref() {
+                            changed |=
+                                crate::start_evidence_request(&mut state, id, crate::now_ms());
+                        }
+                        evidence_requests_changed |= changed;
+                        id
+                    } else {
+                        None
+                    };
+                    let evidence_permit = evidence_request_id.as_ref().and(evidence_permit);
                     assignments.push((
                         ScoutWorkAssignment {
                             assignment_id,
@@ -807,14 +911,19 @@ impl ScoutCoordinator {
                             candidate,
                         },
                         evidence,
+                        evidence_request_id,
+                        evidence_permit,
                     ));
                 }
             }
         }
+        if evidence_requests_changed {
+            crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
+        }
         drop(state);
 
         results.reserve(assignments.len());
-        for (assignment, evidence) in assignments {
+        for (assignment, evidence, evidence_request_id, _evidence_permit) in assignments {
             let expected_id = assignment.assignment_id.clone();
             let expected_strategy = assignment.strategy;
             let (sender, receiver) = oneshot::channel();
@@ -826,40 +935,56 @@ impl ScoutCoordinator {
             let sequence = self
                 .scout_updates
                 .publish(expected_strategy, ScoutDataUpdate::Assignment(assignment));
-            if self.scout_updates.sender.receiver_count() == 0 {
-                self.scout_updates
-                    .assignments
-                    .lock()
-                    .await
-                    .remove(&expected_id);
-                bail!(
-                    "no Scout stream is subscribed for {}",
-                    expected_strategy.as_str()
-                );
-            }
-            let result = tokio::time::timeout(self.worker_timeout, receiver)
-                .await
-                .with_context(|| {
-                    format!(
-                        "Scout worker {} assignment stream timed out (sequence {sequence})",
+            let worker_result: anyhow::Result<ScoutWorkResult> = async {
+                if self.scout_updates.sender.receiver_count() == 0 {
+                    self.scout_updates
+                        .assignments
+                        .lock()
+                        .await
+                        .remove(&expected_id);
+                    bail!(
+                        "no Scout stream is subscribed for {}",
                         expected_strategy.as_str()
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "Scout worker {} assignment result channel closed",
+                    );
+                }
+                let result = tokio::time::timeout(self.worker_timeout, receiver)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Scout worker {} assignment stream timed out (sequence {sequence})",
+                            expected_strategy.as_str()
+                        )
+                    })?
+                    .with_context(|| {
+                        format!(
+                            "Scout worker {} assignment result channel closed",
+                            expected_strategy.as_str()
+                        )
+                    })?;
+                let result = result.map_err(|error| {
+                    anyhow::anyhow!(
+                        "Scout worker {} assignment failed: {error}",
                         expected_strategy.as_str()
                     )
                 })?;
-            let mut result = result.map_err(|error| {
-                anyhow::anyhow!(
-                    "Scout worker {} assignment failed: {error}",
-                    expected_strategy.as_str()
-                )
-            })?;
-            if result.assignment_id != expected_id || result.strategy != expected_strategy {
-                bail!("Scout worker returned a result for a different assignment");
+                anyhow::ensure!(
+                    result.assignment_id == expected_id && result.strategy == expected_strategy,
+                    "Scout worker returned a result for a different assignment"
+                );
+                Ok(result)
             }
+            .await;
+            if let Some(id) = evidence_request_id.as_deref() {
+                let mut state = self.state.state.lock().await;
+                let finish = worker_result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                crate::finish_evidence_request(&mut state, id, crate::now_ms(), finish);
+                crate::persist(&self.state.path, &state)
+                    .map_err(|error| anyhow::anyhow!(error.1))?;
+            }
+            let mut result = worker_result?;
             result.walk_forward_evidence = evidence;
             results.push(result);
         }
@@ -991,11 +1116,23 @@ impl ScoutCoordinator {
         };
         let mut job = {
             let mut state = self.state.state.lock().await;
+            let now_ms = crate::now_ms();
+            let coverage = crate::profiles::walk_forward_priority_snapshot(&state, now_ms);
             let Some(event_id) = state
                 .strategy_replay_jobs
                 .values()
-                .filter(|job| job.status == crate::StrategyReplayStatus::Pending)
-                .min_by_key(|job| (job.created_at_ms, job.event_id.clone()))
+                .filter(|job| {
+                    replay_retry_ready(job.status, job.attempts, job.updated_at_ms, now_ms)
+                })
+                .min_by_key(|job| {
+                    let key = format!("{}|{}|profile:{}", job.symbol, job.strategy, job.profile_id);
+                    let priority = evidence_gap_priority(
+                        coverage
+                            .get(&key)
+                            .and_then(|evidence| evidence["freshnessStatus"].as_str()),
+                    );
+                    (priority, job.created_at_ms, job.event_id.clone())
+                })
                 .map(|job| job.event_id.clone())
             else {
                 return Ok(());
@@ -1006,7 +1143,7 @@ impl ScoutCoordinator {
                 .expect("selected replay job exists");
             job.status = crate::StrategyReplayStatus::Running;
             job.attempts = job.attempts.saturating_add(1);
-            job.updated_at_ms = crate::now_ms();
+            job.updated_at_ms = now_ms;
             let job = job.clone();
             crate::persist(&self.state.path, &state).map_err(|error| anyhow::anyhow!(error.1))?;
             job
@@ -3822,5 +3959,44 @@ mod tests {
         )));
         hub.forget_assignment(strategy, "assignment-1");
         assert_eq!(hub.snapshot(strategy).len(), 1);
+    }
+
+    #[test]
+    fn evidence_gap_priority_orders_missing_and_stale_before_fresh() {
+        assert_eq!(evidence_gap_priority(Some("missing")), 0);
+        assert_eq!(evidence_gap_priority(None), 0);
+        assert_eq!(evidence_gap_priority(Some("stale")), 1);
+        assert_eq!(evidence_gap_priority(Some("fresh")), 2);
+    }
+
+    #[test]
+    fn replay_retry_budget_and_backoff_are_bounded() {
+        use crate::StrategyReplayStatus as Status;
+
+        assert!(replay_retry_ready(Status::Pending, 0, 0, 0));
+        assert!(!replay_retry_ready(Status::Failed, 1, 10_000, 14_999));
+        assert!(replay_retry_ready(Status::Failed, 1, 10_000, 15_000));
+        assert_eq!(replay_retry_delay_ms(1), 5_000);
+        assert_eq!(replay_retry_delay_ms(2), 10_000);
+        assert_eq!(replay_retry_delay_ms(100), REPLAY_RETRY_MAX_MS);
+        assert!(!replay_retry_ready(
+            Status::Failed,
+            MAX_REPLAY_ATTEMPTS,
+            0,
+            u64::MAX
+        ));
+        assert!(!replay_retry_ready(Status::Completed, 0, 0, u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn evidence_requests_have_an_explicit_concurrency_ceiling() {
+        let gate = Arc::new(Semaphore::new(4));
+        let permits = (0..4)
+            .map(|_| gate.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert!(gate.clone().try_acquire_owned().is_err());
+        drop(permits);
+        assert!(gate.clone().try_acquire_owned().is_ok());
+        assert_eq!(MAX_EVIDENCE_REQUESTS_PER_BATCH, 32);
     }
 }

@@ -257,6 +257,151 @@ mod scout_outcome_tests {
     }
 
     #[test]
+    fn startup_reconciles_legacy_pair_keys_only_with_exact_provenance() {
+        let comparison_id = "legacy-split";
+        let mut baseline = outcome("baseline", 0.4);
+        baseline.scout_comparison_id = Some(comparison_id.into());
+        baseline.scout_comparison_role = Some("baseline".into());
+        let mut variant = outcome("variant", 1.1);
+        variant.scout_comparison_id = Some(comparison_id.into());
+        variant.scout_comparison_role = Some("variant".into());
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.7);
+
+        let mut state = PersistedState::default();
+        state.pairs.insert(
+            comparison_id.into(),
+            ScoutPair {
+                baseline: Some(baseline.clone()),
+                updated_at_ms: scout_now_ms(),
+                ..ScoutPair::default()
+            },
+        );
+        state.pairs.insert(
+            format!("{comparison_id}|scenario:strategy"),
+            ScoutPair {
+                variant: Some(variant.clone()),
+                updated_at_ms: scout_now_ms(),
+                ..ScoutPair::default()
+            },
+        );
+        let changes = reconcile_and_expire_scout_pairs(&mut state, scout_now_ms());
+        assert!(changes.contains(&comparison_id.to_owned()));
+        assert!(state.pairs.is_empty());
+        let ScoutOutboxItem::Learning(FeedbackEvent::ScoutOutcome {
+            comparison: strategies::ScoutComparisonMetadata::Paired { .. },
+            ..
+        }) = &state.outbox[0]
+        else {
+            panic!("the provenance-complete legacy pair should become paired feedback");
+        };
+
+        let mut mismatched = PersistedState::default();
+        let mut wrong_variant = variant;
+        wrong_variant.scout_comparison_id = Some("different-id".into());
+        mismatched.pairs.insert(
+            comparison_id.into(),
+            ScoutPair {
+                baseline: Some(baseline),
+                updated_at_ms: scout_now_ms(),
+                ..ScoutPair::default()
+            },
+        );
+        mismatched.pairs.insert(
+            format!("{comparison_id}|scenario:strategy"),
+            ScoutPair {
+                variant: Some(wrong_variant),
+                updated_at_ms: scout_now_ms(),
+                ..ScoutPair::default()
+            },
+        );
+        reconcile_and_expire_scout_pairs(&mut mismatched, scout_now_ms());
+        assert_eq!(mismatched.pairs.len(), 2);
+        assert!(mismatched.outbox.is_empty());
+    }
+
+    #[test]
+    fn expired_baseline_cannot_pair_with_a_new_variant() {
+        let now = scout_now_ms();
+        let comparison_id = "aged-comparison";
+        let mut baseline = outcome("old-baseline", 0.4);
+        baseline.scout_comparison_id = Some(comparison_id.into());
+        baseline.scout_comparison_role = Some("baseline".into());
+        let mut state = PersistedState::default();
+        state.pairs.insert(
+            format!("{comparison_id}|scenario:strategy"),
+            ScoutPair {
+                baseline: Some(baseline),
+                updated_at_ms: now.saturating_sub(SCOUT_COMPARISON_TTL_MS + 1),
+                ..ScoutPair::default()
+            },
+        );
+
+        let mut variant = outcome("new-variant", 1.1);
+        variant.evaluated_timestamp_ms = now;
+        variant.scout_comparison_id = Some(comparison_id.into());
+        variant.scout_comparison_role = Some("variant".into());
+        variant.scout_parameter_key = Some("minimum_momentum".into());
+        variant.scout_parameter_value = Some(0.7);
+        record_paired_scout_outcome(&mut state, &variant);
+
+        assert_eq!(state.expired_scout_comparison_pairs, 1);
+        assert_eq!(state.pairs.len(), 1);
+        let pair = state.pairs.values().next().unwrap();
+        assert!(pair.baseline.is_none());
+        assert!(pair.variant.is_some());
+        assert!(state.outbox.is_empty(), "an expired baseline must never produce Learning feedback");
+    }
+
+    #[test]
+    fn scout_status_reports_unmatched_and_expired_comparison_counts() {
+        let mut state = PersistedState::default();
+        let mut baseline = outcome("orphan", 0.4);
+        baseline.scout_comparison_role = Some("baseline".into());
+        state.pairs.insert(
+            "orphan|scenario:strategy".into(),
+            ScoutPair {
+                baseline: Some(baseline),
+                updated_at_ms: scout_now_ms(),
+                ..ScoutPair::default()
+            },
+        );
+        state.expired_scout_comparison_pairs = 3;
+        let (unmatched_pairs, unmatched_outcomes) = scout_comparison_unmatched_counts(&state);
+        assert_eq!(unmatched_pairs, 1);
+        assert_eq!(unmatched_outcomes, 1);
+        assert_eq!(state.expired_scout_comparison_pairs, 3);
+    }
+
+    #[tokio::test]
+    async fn service_startup_persists_expiry_of_idle_comparison_pairs() {
+        let path = std::env::temp_dir().join(format!(
+            "scout-pair-expiry-{}-{}.sqlite",
+            std::process::id(),
+            scout_now_ms()
+        ));
+        let mut state = PersistedState::default();
+        state.pairs.insert(
+            "idle|scenario:strategy".into(),
+            ScoutPair {
+                baseline: Some(outcome("old-baseline", 0.2)),
+                updated_at_ms: scout_now_ms().saturating_sub(SCOUT_COMPARISON_TTL_MS + 1),
+                ..ScoutPair::default()
+            },
+        );
+        persist_scout_state(&path, &state, &["pairs"]).unwrap();
+
+        let router = router_with_state(path.clone(), strategies::Strategy::LiveMomentum);
+        drop(router);
+        let loaded = load_scout_state(&path).unwrap();
+        assert!(loaded.pairs.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn ineligible_variant_can_pair_as_zero_with_variant_metadata_from_baseline() {
         let mut baseline = outcome("baseline", 0.8);
         baseline.scout_comparison_id = Some("cmp-zero".into());

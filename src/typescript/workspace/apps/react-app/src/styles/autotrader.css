@@ -610,6 +610,7 @@
 }
 .auto-trader-learning-gate-path {
   display: grid;
+  min-width: 0;
   gap: 10px;
   margin: 0;
   padding: 0;
@@ -617,7 +618,7 @@
 }
 .auto-trader-learning-gate-stage {
   min-width: 0;
-  padding: 12px 14px;
+  padding: 10px 12px;
   border: 1px solid #303945;
   border-left: 3px solid #78889b;
   border-radius: 6px;
@@ -630,8 +631,8 @@
 .auto-trader-learning-gate-stage-title {
   display: flex;
   min-width: 0;
-  align-items: center;
 }
+.auto-trader-learning-gate-stage-header { align-items: flex-start; }
 .auto-trader-learning-gate-stage-header {
   justify-content: space-between;
   gap: 12px;
@@ -641,6 +642,10 @@
   display: grid;
   min-width: 0;
   gap: 3px;
+}
+.auto-trader-learning-gate-stage-title > div,
+.auto-trader-learning-gate-stage-header > .auto-trader-gate-result {
+  overflow-wrap: anywhere;
 }
 .auto-trader-learning-gate-stage-number {
   display: grid;
@@ -704,6 +709,8 @@
   margin: 0 0 8px;
   color: #9fadc0;
   font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .auto-trader-learning-gate-path .auto-trader-learning-evidence {
   width: 100%;
@@ -733,6 +740,9 @@
 .auto-trader-learning-gate-path .auto-trader-learning-evidence td:first-child { width: 34%; }
 .auto-trader-learning-gate-path .auto-trader-learning-evidence th:nth-child(2),
 .auto-trader-learning-gate-path .auto-trader-learning-evidence td:nth-child(2) { width: 88px; }
+.auto-trader-learning-gate-path .auto-trader-learning-evidence td:last-child {
+  line-height: 1.45;
+}
 .auto-trader-learning-gate-name { color: #e0e8f1; }
 .auto-trader-learning-gate-facts {
   display: grid;
@@ -766,6 +776,13 @@
   line-height: 1.4;
 }
 .auto-trader-learning-gate-entry { margin-top: 10px; }
+.auto-trader-learning-gate-entry,
+.auto-trader-learning-gate-entry pre,
+.auto-trader-learning-gate-facts,
+.auto-trader-learning-evidence {
+  min-width: 0;
+  max-width: 100%;
+}
 .auto-trader-learning-gate-entry summary {
   color: #afc0d3;
   cursor: pointer;
@@ -782,8 +799,33 @@
   .auto-trader-learning-details-content > .auto-trader-learning-gate-path-section {
     grid-column: auto;
   }
-  .auto-trader-learning-gate-stage-header { align-items: flex-start; }
-  .auto-trader-gate-result { max-width: 42%; }
+  .auto-trader-learning-details-content { padding: 10px; }
+  .auto-trader-learning-details-content > section { padding: 10px; }
+  .auto-trader-learning-gate-stage-header { gap: 8px; }
+  .auto-trader-gate-result { max-width: 44%; }
+}
+@media (max-width: 440px) {
+  .auto-trader-learning-gate-stage { padding: 9px; }
+  .auto-trader-learning-gate-stage-header { flex-wrap: wrap; }
+  .auto-trader-learning-gate-stage-header > .auto-trader-gate-result {
+    max-width: 100%;
+    margin-left: 34px;
+  }
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence {
+    font-size: 10px;
+  }
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence th,
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence td {
+    padding: 6px 5px;
+  }
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence th:first-child,
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence td:first-child {
+    width: 30%;
+  }
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence th:nth-child(2),
+  .auto-trader-learning-gate-path .auto-trader-learning-evidence td:nth-child(2) {
+    width: 68px;
+  }
 }
 .dashboard-widget .auto-trader-strategy-parameters {
   display: flex;
@@ -951,6 +993,140 @@
   .auto-trader-learning-detail-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+.auto-trader-evidence-coverage {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #2c3947;
+  border-radius: 6px;
+  background: #10161d;
+}
+.auto-trader-evidence-coverage-heading,
+.auto-trader-evidence-request > header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.auto-trader-evidence-coverage-heading > div,
+.auto-trader-evidence-request > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.auto-trader-evidence-coverage-heading > div > strong {
+  color: #dce8f5;
+  font-size: 12px;
+}
+.auto-trader-evidence-coverage-subheading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: #c8d4e0;
+  font-size: 11px;
+}
+.auto-trader-evidence-coverage-heading small,
+.auto-trader-evidence-profile,
+.auto-trader-evidence-request > small,
+.auto-trader-evidence-coverage-limitation {
+  color: #91a0b2;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.auto-trader-evidence-request-list {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+.auto-trader-evidence-request {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #29333e;
+  border-radius: 5px;
+  background: #0d1218;
+}
+.auto-trader-evidence-request > header strong {
+  color: #d9e4f0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.auto-trader-evidence-state {
+  max-width: 45%;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #625437;
+  border-radius: 999px;
+  background: #282318;
+  color: #e8c875;
+  font: 700 10px/1.3 var(--mono);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.auto-trader-evidence-state--completed {
+  border-color: #315845;
+  background: #14251e;
+  color: #8de0b7;
+}
+.auto-trader-evidence-state--failed,
+.auto-trader-evidence-state--capacity_blocked,
+.auto-trader-evidence-state--missing,
+.auto-trader-evidence-state--stale,
+.auto-trader-evidence-state--unavailable {
+  border-color: #6a3c43;
+  background: #2a171b;
+  color: #ff9ba0;
+}
+.auto-trader-evidence-state--fresh {
+  border-color: #315845;
+  background: #14251e;
+  color: #8de0b7;
+}
+.auto-trader-evidence-request dl {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+.auto-trader-evidence-request dl > div {
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #242e38;
+  border-radius: 4px;
+  background: #10151b;
+}
+.auto-trader-evidence-request dt {
+  margin-bottom: 3px;
+  color: #8899ad;
+  font: 600 9px/1.3 var(--mono);
+  text-transform: uppercase;
+}
+.auto-trader-evidence-request dd {
+  margin: 0;
+  color: #c8d4e0;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.auto-trader-evidence-request--compact {
+  gap: 6px;
+  padding: 8px 10px;
+}
+.auto-trader-evidence-request-reason,
+.auto-trader-evidence-coverage-omitted {
+  margin: 0;
+  color: #e4c77e;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .dashboard-widget .auto-trader-learning-experiments {
   min-height: 0;

@@ -77,9 +77,7 @@ fn refresh_order_usd_rate_snapshot() {
     let Ok(cached_guard) = cache.try_lock() else {
         return;
     };
-    let cached = cached_guard
-        .as_ref()
-        .map(|(_, rates)| rates.clone());
+    let cached = cached_guard.as_ref().map(|(_, rates)| rates.clone());
     let stream = latest_stream_usd_rates();
     let merged = match (stream, cached) {
         (Some(stream), Some(cached)) => Some(merge_usd_rate_snapshots(&stream, &cached)),
@@ -148,6 +146,27 @@ async fn cached_usd_rates_for_order() -> Result<Arc<UsdRatesResponse>, (StatusCo
             StatusCode::SERVICE_UNAVAILABLE,
             "USD conversion rates are not warmed yet".to_owned(),
         ))
+}
+
+/// Seed the paper-order capacity cache for deterministic integration fixtures.
+/// This is available only when the crate's `test-support` feature is enabled.
+#[cfg(feature = "test-support")]
+pub fn set_test_usd_rates(rates: BTreeMap<String, f64>) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    let updated_at_by_currency = rates
+        .keys()
+        .map(|currency| (currency.clone(), now_ms))
+        .collect();
+    USD_RATE_ORDER_SNAPSHOT
+        .get_or_init(ArcSwapOption::empty)
+        .store(Some(Arc::new(UsdRatesResponse {
+            rates,
+            updated_at: now_ms,
+            updated_at_by_currency,
+        })));
 }
 
 async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
@@ -265,11 +284,28 @@ mod tests {
     fn usd_rate_order_lookup_benchmark() {
         use std::{hint::black_box, sync::Arc, time::Instant};
 
-        let stream = rates(&[("USD", 1.0), ("USDT", 0.999), ("BTC", 68_000.0)], 200, &[("USDT", 200), ("BTC", 200)]);
+        let stream = rates(
+            &[("USD", 1.0), ("USDT", 0.999), ("BTC", 68_000.0)],
+            200,
+            &[("USDT", 200), ("BTC", 200)],
+        );
         let cached = rates(
-            &[("USD", 1.0), ("USDT", 1.0), ("BTC", 67_900.0), ("EUR", 1.08), ("GBP", 1.27), ("JPY", 0.0067)],
+            &[
+                ("USD", 1.0),
+                ("USDT", 1.0),
+                ("BTC", 67_900.0),
+                ("EUR", 1.08),
+                ("GBP", 1.27),
+                ("JPY", 0.0067),
+            ],
             150,
-            &[("USDT", 150), ("BTC", 150), ("EUR", 150), ("GBP", 150), ("JPY", 150)],
+            &[
+                ("USDT", 150),
+                ("BTC", 150),
+                ("EUR", 150),
+                ("GBP", 150),
+                ("JPY", 150),
+            ],
         );
         let merged = cached_usd_rates_with_stream(Some(&stream), &cached);
         let snapshot = ArcSwapOption::from(Some(Arc::new(merged)));
@@ -287,7 +323,10 @@ mod tests {
         }
         let snapshot_ns = started.elapsed().as_nanos() as f64 / ITERATIONS as f64;
 
-        println!("USD rate order lookup: merge+clone={merge_ns:.1} ns/op, premerged snapshot={snapshot_ns:.1} ns/op, speedup={:.1}x", merge_ns / snapshot_ns);
+        println!(
+            "USD rate order lookup: merge+clone={merge_ns:.1} ns/op, premerged snapshot={snapshot_ns:.1} ns/op, speedup={:.1}x",
+            merge_ns / snapshot_ns
+        );
     }
 
     #[test]

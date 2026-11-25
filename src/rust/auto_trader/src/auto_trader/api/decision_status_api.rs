@@ -8,7 +8,20 @@ async fn get_strategy_open_position_counts(
     State(state): State<AutoTraderState>,
 ) -> Json<BTreeMap<String, usize>> {
     let settings = state.settings.lock().await;
-    let mut counts = settings.strategies.iter()
+    let carry_positions = state.dated_carry.lock().await;
+    let open_carry_count = carry_positions.positions.iter()
+        .filter(|position| position.status.eq_ignore_ascii_case("open"))
+        .count();
+    Json(strategy_open_position_counts(&settings, open_carry_count))
+}
+
+fn strategy_open_position_counts(
+    settings: &Settings,
+    open_carry_count: usize,
+) -> BTreeMap<String, usize> {
+    let mut counts = settings
+        .strategies
+        .iter()
         .map(|strategy| (strategy.as_str().to_owned(), 0usize))
         .collect::<BTreeMap<_, _>>();
     for strategies in settings.strategy_positions.values() {
@@ -18,12 +31,63 @@ async fn get_strategy_open_position_counts(
             }
         }
     }
-    let carry_positions = state.dated_carry.lock().await;
-    let open_carry_count = carry_positions.positions.iter()
-        .filter(|position| position.status.eq_ignore_ascii_case("open"))
-        .count();
     *counts.entry("dated-futures-carry".to_owned()).or_default() += open_carry_count;
-    Json(counts)
+    counts
+}
+
+#[cfg(test)]
+mod strategy_open_position_count_tests {
+    use super::*;
+
+    #[test]
+    fn counts_only_nonzero_authoritative_strategy_positions_and_carry() {
+        let mut settings = Settings::default();
+        settings.strategy_positions.insert(
+            "BTC-USDT".to_owned(),
+            BTreeMap::from([
+                (
+                    "live-momentum".to_owned(),
+                    TraderPosition {
+                        quantity: 0.5,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "live-trade-flow".to_owned(),
+                    TraderPosition {
+                        quantity: 0.0,
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        );
+        settings.strategy_positions.insert(
+            "ETH-USDT".to_owned(),
+            BTreeMap::from([
+                (
+                    "live-momentum".to_owned(),
+                    TraderPosition {
+                        quantity: -0.25,
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "retired-strategy".to_owned(),
+                    TraderPosition {
+                        quantity: 1.0,
+                        ..Default::default()
+                    },
+                ),
+            ]),
+        );
+
+        let counts = strategy_open_position_counts(&settings, 2);
+
+        assert_eq!(counts.get("live-momentum"), Some(&2));
+        assert_eq!(counts.get("live-trade-flow"), Some(&0));
+        assert_eq!(counts.get("retired-strategy"), Some(&1));
+        assert_eq!(counts.get("dated-futures-carry"), Some(&2));
+    }
 }
 
 async fn get_missed_opportunity_bands(

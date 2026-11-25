@@ -72,7 +72,37 @@ pub(crate) fn walk_forward_priority_snapshot(
                 continue;
             }
             let day = outcome.observed_at_ms / 86_400_000;
-            for key in [&cohort, &exact_profile] {
+            let regime = outcome
+                .market_regime
+                .as_deref()
+                .filter(|value| matches!(*value, "range" | "trend" | "volatile" | "mixed"))
+                .unwrap_or("unknown");
+            let horizon = outcome
+                .horizon_seconds
+                .map(|seconds| seconds.to_string())
+                .unwrap_or_else(|| "default".to_owned());
+            let regime_cohort = format!("{cohort}|regime:{regime}");
+            let regime_profile = format!("{exact_profile}|regime:{regime}");
+            let horizon_cohort = format!("{cohort}|horizon:{horizon}");
+            let horizon_profile = format!("{exact_profile}|horizon:{horizon}");
+            let exact_case_cohort = format!("{cohort}|regime:{regime}|horizon:{horizon}");
+            let exact_case_profile = format!("{exact_profile}|regime:{regime}|horizon:{horizon}");
+            let keys = [
+                cohort.clone(),
+                exact_profile.clone(),
+                regime_cohort,
+                regime_profile,
+                horizon_cohort,
+                horizon_profile,
+                exact_case_cohort,
+                exact_case_profile,
+            ];
+            for key in &keys {
+                max_age_ms_by_cohort
+                    .entry(key.clone())
+                    .or_insert(max_age_ms);
+            }
+            for key in keys {
                 if let Some(group) = outcome.evidence_group_id.as_deref()
                     && !seen.insert(format!("{key}|{group}"))
                 {
@@ -1354,6 +1384,59 @@ mod tests {
     }
 
     #[test]
+    fn walk_forward_priority_distinguishes_missing_fresh_and_stale_cohorts() {
+        let now = 3 * 86_400_000;
+        let mut variant = scout_variant("BTC-USDT", &[0.1]);
+        variant.profile.strategy = "live-momentum".into();
+        variant.profile.profile_id = "momentum-v1".into();
+        variant.outcomes[0].observed_at_ms = now - 1_000;
+        variant.outcomes[0].market_regime = Some("trend".into());
+        variant.outcomes[0].horizon_seconds = Some(300);
+        let active = variant.profile.clone();
+        let mut state = LearningState {
+            variants: BTreeMap::from([(variant_key(&variant.profile), variant)]),
+            active_profiles: BTreeMap::from([("active".into(), active)]),
+            ..LearningState::default()
+        };
+
+        let snapshot = walk_forward_priority_snapshot(&state, now);
+        assert_eq!(
+            snapshot["BTC-USDT|live-momentum"]["freshnessStatus"],
+            "fresh"
+        );
+        assert_eq!(
+            snapshot["BTC-USDT|live-momentum|profile:momentum-v1"]["freshnessStatus"],
+            "fresh"
+        );
+        assert_eq!(
+            snapshot["BTC-USDT|live-momentum|profile:momentum-v1|regime:trend|horizon:300"]["freshnessStatus"],
+            "fresh"
+        );
+        assert_eq!(
+            snapshot["BTC-USDT|live-momentum|profile:momentum-v1|regime:trend|horizon:300"]["sampleCount"],
+            1
+        );
+        assert!(
+            !snapshot.contains_key(
+                "BTC-USDT|live-momentum|profile:momentum-v1|regime:range|horizon:300"
+            ),
+            "a different regime remains a separate, missing evidence cohort"
+        );
+
+        state.variants.values_mut().next().unwrap().outcomes[0].observed_at_ms =
+            now - 25 * 60 * 60 * 1_000;
+        let stale = walk_forward_priority_snapshot(&state, now);
+        assert_eq!(stale["BTC-USDT|live-momentum"]["freshnessStatus"], "stale");
+
+        state.variants.clear();
+        let missing = walk_forward_priority_snapshot(&state, now);
+        assert_eq!(
+            missing["BTC-USDT|live-momentum|profile:momentum-v1"]["freshnessStatus"],
+            "missing"
+        );
+    }
+
+    #[test]
     fn stale_profile_parameters_decay_toward_catalog_defaults() {
         let now = now_ms();
         let mut variant = scout_variant("BTC-USDT", &[0.01]);
@@ -1404,6 +1487,7 @@ mod tests {
                     evidence_group_id: None,
                     learning_context: None,
                     market_regime: None,
+                    horizon_seconds: None,
                     source: LearningOutcomeSource::Scout,
                     realized_pnl_usd: None,
                     paired_comparison: false,

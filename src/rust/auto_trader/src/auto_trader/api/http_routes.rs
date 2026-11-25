@@ -516,6 +516,16 @@ mod strategy_pause_snapshot_tests {
         let registrations = vec![registration("unrelated"), registration("needed")];
         let event = FeedbackEvent::TradeOutcome {
             event_id: "trade".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: Some(4),
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 1,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -601,6 +611,16 @@ mod strategy_pause_snapshot_tests {
         };
         let trade = FeedbackEvent::TradeOutcome {
             event_id: "trade".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 2,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -714,6 +734,16 @@ mod strategy_pause_snapshot_tests {
             },
             FeedbackEvent::TradeOutcome {
                 event_id: "trade-outcome".into(),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: 2,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),
@@ -761,6 +791,16 @@ mod strategy_pause_snapshot_tests {
         outbox.clear();
         outbox.resize_with(FEEDBACK_OUTBOX_CAPACITY, || FeedbackEvent::TradeOutcome {
             event_id: "trade".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 1,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -978,6 +1018,8 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         settings: Arc::new(Mutex::new(settings)),
         activity_snapshot: Arc::new(Mutex::new(None)),
         settings_persist_notify: Arc::new(Notify::new()),
+        settings_persist_write_lock: Arc::new(Mutex::new(())),
+        durable_feedback_event_ids: Arc::new(Mutex::new(BTreeSet::new())),
         price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
         live_profile_updates,
@@ -1518,6 +1560,81 @@ fn feedback_event_id(event: &FeedbackEvent) -> &str {
     }
 }
 
+async fn ensure_feedback_event_durable(
+    state: &AutoTraderState,
+    event_id: &str,
+) -> Result<bool, (StatusCode, String)> {
+    if state.durable_feedback_event_ids.lock().await.contains(event_id) {
+        return Ok(false);
+    }
+    persist_settings_snapshot_durable(state).await?;
+    state.durable_feedback_event_ids.lock().await.insert(event_id.to_owned());
+    Ok(true)
+}
+
+#[cfg(test)]
+mod durable_feedback_event_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn canonical_feedback_is_committed_once_before_first_delivery() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "auto-trader-durable-feedback-{}-{nonce}.sqlite",
+            std::process::id(),
+        ));
+        let mut state = benchmark_snapshot_state(Settings::default());
+        state.settings_path = path.clone();
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:durable-before-send".into(),
+            schema_version: Some(1),
+            trade_id: Some("trade-v1".into()),
+            opportunity_id: Some("opportunity-v1".into()),
+            episode_id: Some("episode-v1".into()),
+            profile_hash: None,
+            profile_version: Some(4),
+            execution_mode: Some("paper".into()),
+            entry_policy: Some("strict".into()),
+            source: Some("auto_trader_entry_reservation".into()),
+            observed_at_ms: 2,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "derived-profile".into(),
+            entry_profile_id: Some("entry-profile".into()),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 1.0,
+            threshold_observations: vec![],
+            replay_context: None,
+        };
+        state.settings.lock().await.feedback_outbox.push(event);
+
+        assert!(ensure_feedback_event_durable(&state, "trade:durable-before-send").await.unwrap());
+        assert!(!ensure_feedback_event_durable(&state, "trade:durable-before-send").await.unwrap());
+        let restored = read_settings_database(&path).unwrap().unwrap();
+        let Some(FeedbackEvent::TradeOutcome {
+            trade_id, opportunity_id, episode_id, profile_version, entry_profile_id, ..
+        }) = restored.feedback_outbox.first() else {
+            panic!("canonical feedback was not committed before delivery")
+        };
+        assert_eq!(trade_id.as_deref(), Some("trade-v1"));
+        assert_eq!(opportunity_id.as_deref(), Some("opportunity-v1"));
+        assert_eq!(episode_id.as_deref(), Some("episode-v1"));
+        assert_eq!(*profile_version, Some(4));
+        assert_eq!(entry_profile_id.as_deref(), Some("entry-profile"));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+}
+
 fn rotate_feedback_event_to_back(feedback: &mut Vec<FeedbackEvent>, event_id: &str) -> bool {
     let Some(index) = feedback
         .iter()
@@ -1621,6 +1738,16 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                     next_feedback_event(&settings.feedback_outbox, lane == 3).cloned()
                 };
                 if let Some(event) = event {
+                    let event_id = feedback_event_id(&event).to_owned();
+                    if let Err(error) = ensure_feedback_event_durable(&publisher_state, &event_id).await {
+                        crate::service_log!(
+                            "WARN",
+                            "Could not durably persist Learning feedback before delivery: {}",
+                            error.1
+                        );
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
                     let class = match &event {
                         FeedbackEvent::MissedOpportunityCandidate { .. } => "missed_opportunity",
                         FeedbackEvent::ScoutOutcome { .. } => "scout_outcome",
@@ -1635,7 +1762,6 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                     .await
                     {
                         FeedbackDeliveryOutcome::Acknowledged => {
-                            let event_id = feedback_event_id(&event).to_owned();
                             let mut settings = publisher_state.settings.lock().await;
                             settings
                                 .feedback_outbox
@@ -1648,15 +1774,24 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                                     error.1
                                 );
                             }
+                            publisher_state
+                                .durable_feedback_event_ids
+                                .lock()
+                                .await
+                                .remove(&event_id);
                         }
                         FeedbackDeliveryOutcome::PermanentRejection { status, reason } => {
-                            let event_id = feedback_event_id(&event).to_owned();
                             let mut settings = publisher_state.settings.lock().await;
                             if matches!(&event, FeedbackEvent::MissedOpportunityCandidate { .. }) {
                                 settings.feedback_outbox.retain(|pending| {
                                     feedback_event_id(pending) != event_id
                                 });
                                 drop(settings);
+                                publisher_state
+                                    .durable_feedback_event_ids
+                                    .lock()
+                                    .await
+                                    .remove(&event_id);
                                 record_feedback_terminal_drop(
                                     &publisher_state,
                                     class,

@@ -156,12 +156,34 @@ pub enum FeedbackEvent {
     },
     TradeOutcome {
         event_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trade_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opportunity_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        episode_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_hash: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile_version: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_policy: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
         observed_at_ms: u64,
         #[serde(default)]
         learning_context: Option<String>,
         symbol: String,
         strategy: String,
         profile_id: String,
+        /// Profile identity supplied at entry, distinct from the training key
+        /// reconstructed from the captured parameter values.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_profile_id: Option<String>,
         parameters: BTreeMap<String, f64>,
         specs: Vec<ParameterSpec>,
         scout: bool,

@@ -140,11 +140,11 @@ fn record_strategy_trade_outcome(
     entry_decision: Option<&serde_json::Value>,
     trade_id: Option<&str>,
     replay_context: Option<strategy::TradeReplayContext>,
-) {
+) -> bool {
     if strategy == Some("unattributed")
         || learning_context == Some(UNATTRIBUTED_POSITION_MANAGER_CONTEXT)
     {
-        return;
+        return false;
     }
     // Closed spot trades cannot lose more than their entry notional. Keep
     // strategy-specific feedback aligned with the legacy closed-trade window
@@ -152,14 +152,15 @@ fn record_strategy_trade_outcome(
     let Some(net_return_percent) = net_return_percent
         .filter(|value| value.is_finite() && *value >= -100.0)
     else {
-        return;
+        return false;
     };
     if !realized_pnl_usd.is_finite() {
-        return;
+        return false;
     }
     // Scout fills are deliberately small, but still provide strategy-specific
     // evidence for tuning the profile that produced them.
     if let Some(strategy) = strategy {
+        let mut added = false;
         let profile_symbol = entry_decision
             .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
             .and_then(serde_json::Value::as_str)
@@ -202,16 +203,28 @@ fn record_strategy_trade_outcome(
             })
             .unwrap_or_default();
         let event_id = format!("trade:{}", trade_id.filter(|value| !value.is_empty()).unwrap_or(learning_context.unwrap_or(symbol)));
+        let lifecycle_identity = trade_id
+            .and_then(|id| settings.canonical_lifecycle_links.get(id));
         if !settings.feedback_outbox.iter().any(|event| matches!(event,
             strategy::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
         )) {
             settings.feedback_outbox.push(strategy::FeedbackEvent::TradeOutcome {
                 event_id,
+                schema_version: lifecycle_identity.map(|identity| identity.schema_version),
+                trade_id: lifecycle_identity.map(|identity| identity.trade_id.clone()),
+                opportunity_id: lifecycle_identity.map(|identity| identity.opportunity_id.clone()),
+                episode_id: lifecycle_identity.map(|identity| identity.episode_id.clone()),
+                profile_hash: lifecycle_identity.and_then(|identity| identity.profile_hash.clone()),
+                profile_version: lifecycle_identity.and_then(|identity| identity.profile_version),
+                execution_mode: lifecycle_identity.map(|identity| identity.execution_mode.clone()),
+                entry_policy: lifecycle_identity.map(|identity| identity.entry_policy.clone()),
+                source: lifecycle_identity.map(|identity| identity.source.clone()),
                 observed_at_ms: current_time_ms(),
                 learning_context: learning_context.map(str::to_owned),
                 symbol: profile_symbol.to_owned(),
                 strategy: strategy.to_owned(),
                 profile_id,
+                entry_profile_id: lifecycle_identity.and_then(|identity| identity.profile_id.clone()),
                 parameters,
                 // Real trade outcomes update profile statistics, while
                 // parameter changes require a successful parameter-specific
@@ -223,7 +236,11 @@ fn record_strategy_trade_outcome(
                 threshold_observations,
                 replay_context,
             });
+            added = true;
         }
+        added
+    } else {
+        false
     }
 }
 
@@ -348,6 +365,18 @@ mod feedback_outbox_tests {
     #[test]
     fn completed_trade_is_queued_for_external_learning_with_its_exact_profile() {
         let mut settings = Settings::default();
+        settings.canonical_lifecycle_links.insert("trade-42".into(), CanonicalLifecycleIdentity {
+            schema_version: 1,
+            opportunity_id: "autotrader:v1:opportunity:17".into(),
+            episode_id: "autotrader:v1:episode:17".into(),
+            trade_id: "autotrader:v1:trade:17".into(),
+            profile_id: Some("profile-v1".into()),
+            profile_hash: None,
+            profile_version: Some(4),
+            execution_mode: "paper".into(),
+            entry_policy: "strict".into(),
+            source: "auto_trader_entry_reservation".into(),
+        });
         let decision = serde_json::json!({
             "strategy_parameters": { "minimum_momentum": 0.003 },
             "learning_profile_id": "ignored-stale-id"
@@ -358,15 +387,60 @@ mod feedback_outbox_tests {
         );
         assert!(settings.learning.is_empty(), "the trader must not update learner state inline");
         let Some(FeedbackEvent::TradeOutcome {
-            event_id, profile_id, parameters, realized_pnl_usd, net_return_percent, ..
+            event_id, schema_version, trade_id, opportunity_id, episode_id,
+            profile_hash, profile_version, execution_mode, entry_policy, source, entry_profile_id,
+            profile_id, parameters, realized_pnl_usd, net_return_percent, ..
         }) = settings.feedback_outbox.first() else {
             panic!("trade outcome was not queued")
         };
         assert_eq!(event_id, "trade:trade-42");
+        assert_eq!(*schema_version, Some(1));
+        assert_eq!(trade_id.as_deref(), Some("autotrader:v1:trade:17"));
+        assert_eq!(opportunity_id.as_deref(), Some("autotrader:v1:opportunity:17"));
+        assert_eq!(episode_id.as_deref(), Some("autotrader:v1:episode:17"));
+        assert_eq!(profile_hash.as_deref(), None);
+        assert_eq!(*profile_version, Some(4));
+        assert_eq!(execution_mode.as_deref(), Some("paper"));
+        assert_eq!(entry_policy.as_deref(), Some("strict"));
+        assert_eq!(source.as_deref(), Some("auto_trader_entry_reservation"));
+        assert_eq!(entry_profile_id.as_deref(), Some("profile-v1"));
         assert_eq!(parameters["minimum_momentum"], 0.003);
         assert_eq!(profile_id, &strategy::profile_id("BTC-USDT", "live-momentum", parameters));
         assert_eq!(*realized_pnl_usd, 1.25);
         assert_eq!(*net_return_percent, 0.8);
+    }
+
+    #[test]
+    fn legacy_trade_outcome_does_not_receive_synthetic_lifecycle_identity() {
+        let mut settings = Settings::default();
+        let decision = serde_json::json!({"strategy_parameters": {"minimum_momentum": 0.003}});
+        record_strategy_trade_outcome(
+            &mut settings, "BTC-USDT", Some("live-momentum"), Some("legacy-context"), false,
+            1.25, Some(0.8), Some(&decision), Some("legacy-trade"), None,
+        );
+        let Some(FeedbackEvent::TradeOutcome {
+            schema_version, opportunity_id, episode_id, ..
+        }) = settings.feedback_outbox.first() else {
+            panic!("legacy trade outcome was not queued")
+        };
+        assert_eq!(*schema_version, None);
+        assert_eq!(opportunity_id, &None);
+        assert_eq!(episode_id, &None);
+        let serialized = serde_json::to_value(settings.feedback_outbox.first().unwrap()).unwrap();
+        for field in [
+            "schema_version",
+            "trade_id",
+            "opportunity_id",
+            "episode_id",
+            "profile_hash",
+            "profile_version",
+            "execution_mode",
+            "entry_policy",
+            "source",
+            "entry_profile_id",
+        ] {
+            assert!(serialized.get(field).is_none(), "legacy wire payload added {field}");
+        }
     }
 
     #[test]

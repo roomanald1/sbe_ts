@@ -5,13 +5,109 @@ import {
   AutoTraderOutcomesModel,
   mergeLatestStrategyDecisions,
   parseLearningSummary,
+  projectLedgerLifecycleIdentity,
   resolveLedgerOrder,
   strategyInstanceForClose,
 } from './AutoTraderOutcomesModel';
+import type { AutoTraderOutcome } from './AutoTraderOutcomesModel';
 import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('projects only explicit ledger lifecycle IDs onto the outcome row', () => {
+    const legacy = {
+      rowId: 'ledger-trade:legacy-fill',
+      status: 'Closed' as const,
+      decisionId: 'decision-legacy',
+      symbol: 'BTC-USDT',
+      side: 'buy',
+      openedAt: 10,
+      quantity: 1,
+      signedQuantity: 1,
+      entryPrice: 100,
+      pnl: 2,
+      entryFees: 0,
+      estimatedExitFeeRate: 0,
+      estimatedExitSlippageBps: 0,
+      pnlQuoteCurrency: 'USDT',
+      strategy: 'unattributed',
+      direction: '—',
+      strength: null,
+      scout: false,
+      source: 'unknown' as const,
+      components: {},
+      ledgerTrade: {
+        id: 'ledger-fill-id',
+        symbol: 'BTC-USDT',
+        side: 'buy' as const,
+        quantity: 1,
+        execution_price: 100,
+        timestamp: 10,
+      },
+    };
+    assert.equal(projectLedgerLifecycleIdentity(legacy), legacy);
+
+    const linked = {
+      ...legacy,
+      ledgerTrade: {
+        ...legacy.ledgerTrade,
+        lifecycle: {
+          opportunity_id: 'opp-7',
+          episode_id: 'episode-3',
+          trade_id: 'trade-9',
+        },
+      },
+    } as unknown as AutoTraderOutcome;
+    const projected = projectLedgerLifecycleIdentity(linked);
+    assert.equal(projected.opportunityId, 'opp-7');
+    assert.equal(projected.episodeId, 'episode-3');
+    assert.equal(projected.tradeId, 'trade-9');
+    assert.equal(projected.rowId, legacy.rowId);
+    assert.equal(projected.pnl, legacy.pnl);
+  });
+
+  it('leaves missing lifecycle links absent without deriving historical IDs', () => {
+    const row = {
+      rowId: 'ledger-trade:old-fill',
+      status: 'Closed' as const,
+      decisionId: 'decision-old',
+      symbol: 'BTC-USDT',
+      side: 'buy',
+      openedAt: 1_234,
+      quantity: 1,
+      signedQuantity: 1,
+      entryPrice: 100,
+      pnl: 0,
+      entryFees: 0,
+      estimatedExitFeeRate: 0,
+      estimatedExitSlippageBps: 0,
+      pnlQuoteCurrency: 'USDT',
+      strategy: 'unattributed',
+      direction: '—',
+      strength: null,
+      scout: false,
+      source: 'unknown' as const,
+      components: {},
+      ledgerTrade: {
+        id: 'ledger-fill-id',
+        symbol: 'BTC-USDT',
+        side: 'buy' as const,
+        quantity: 1,
+        execution_price: 100,
+        timestamp: 1_234,
+        lifecycle: {
+          opportunity_id: null,
+          episode_id: '',
+          trade_id: undefined,
+        },
+      },
+    } as unknown as Parameters<typeof projectLedgerLifecycleIdentity>[0];
+    const projected = projectLedgerLifecycleIdentity(row);
+    assert.equal('opportunityId' in projected, false);
+    assert.equal('episodeId' in projected, false);
+    assert.equal('tradeId' in projected, false);
+  });
+
   it('distinguishes unavailable Learning summaries from empty recent outcomes', () => {
     assert.deepEqual(parseLearningSummary(undefined), {
       rows: [],

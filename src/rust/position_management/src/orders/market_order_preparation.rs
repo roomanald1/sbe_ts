@@ -148,6 +148,7 @@ mod market_order_preparation_tests {
             time_in_force: None,
             source: "manual".into(),
             client_order_id: None,
+            lifecycle: None,
             reduce_only,
         }
     }

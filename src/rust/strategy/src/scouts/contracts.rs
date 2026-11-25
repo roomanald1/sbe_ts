@@ -102,6 +102,12 @@ pub struct ScoutStatus {
     pub positive_samples: usize,
     pub win_rate: Option<f64>,
     pub realized_pnl_usd: f64,
+    #[serde(default)]
+    pub unmatched_comparison_pairs: usize,
+    #[serde(default)]
+    pub unmatched_comparison_outcomes: usize,
+    #[serde(default)]
+    pub expired_comparison_pairs: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,6 +291,8 @@ struct PersistedState {
     scout_instances: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     pairs: BTreeMap<String, ScoutPair>,
+    #[serde(skip)]
+    expired_scout_comparison_pairs: u64,
     #[serde(default)]
     outbox: Vec<ScoutOutboxItem>,
     #[serde(default, alias = "shadow_sample_at_ms")]

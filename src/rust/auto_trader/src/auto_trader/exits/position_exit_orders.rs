@@ -17,6 +17,12 @@ async fn submit_position_exit_order(
         && matches!(reason, "take-profit" | "profit-protection");
     let entry_notional = position.quantity.abs() * position.average_entry_price;
     let entry_decision_id = position.entry_decision_id.clone();
+    let lifecycle_identity = {
+        let settings = state.settings.lock().await;
+        entry_decision_id.as_deref().and_then(|decision_id| {
+            settings.canonical_lifecycle_links.get(decision_id).cloned()
+        })
+    };
     let protected_quantity = position
         .protective_stops
         .iter()
@@ -63,6 +69,7 @@ async fn submit_position_exit_order(
         ExecutionParameters::default(),
         timestamp.to_string(),
         true,
+        lifecycle_identity.as_ref(),
     )
     .await
     {
@@ -106,6 +113,7 @@ async fn submit_position_exit_order(
         (0.0, None)
     };
     let mut strategy_realized_pnl = 0.0;
+    let mut trade_feedback_enqueued = false;
     if filled > 0.0 {
         if let Some(price) = average_price {
             let Settings { strategy_positions, positions, .. } = &mut *settings;
@@ -162,7 +170,7 @@ async fn submit_position_exit_order(
                 fees_usd,
                 closed_trade_audit_for_position(&position, &symbol),
             );
-            record_strategy_trade_outcome(
+            trade_feedback_enqueued = record_strategy_trade_outcome(
                 &mut settings,
                 &symbol,
                 position.strategy.as_deref(),
@@ -221,6 +229,11 @@ async fn submit_position_exit_order(
     }
     request_settings_persist(state)?;
     drop(settings);
+    if trade_feedback_enqueued {
+        if let Err(error) = persist_settings_snapshot_durable(state).await {
+            crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
+        }
+    }
     if let Some(decision_id) = entry_decision_id {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

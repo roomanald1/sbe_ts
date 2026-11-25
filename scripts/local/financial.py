@@ -68,6 +68,81 @@ def load_snapshot_manifest(filename):
 
     sources = data.get("sources", [])
 
+    if len(sources) == 1 and sources[0].get("endpoint") == "financial-snapshot":
+        item = sources[0]
+        if item.get("status") != "COLLECTED" or item.get("service") != "positions":
+            raise ValueError("Invalid atomic financial snapshot metadata")
+        path = Path(item["evidence"]).resolve()
+        if path.parent != cache or not path.name.startswith("positions-financial-snapshot-"):
+            raise ValueError("Financial snapshot evidence identity mismatch")
+        if path.stat().st_size > 16_000_000:
+            raise ValueError("Evidence too large")
+        raw = path.read_bytes()
+        payload = json.loads(raw)
+        if (
+            payload.get("service") != "positions"
+            or payload.get("route") != "/positions/financial-snapshot"
+            or payload.get("application_status") != 200
+            or "body" not in payload
+            or payload.get("bytes") != item.get("bytes")
+        ):
+            raise ValueError("Financial snapshot evidence identity mismatch")
+        snapshot = payload["body"]
+        snapshot_id = data.get("snapshot_id")
+        if (
+            not isinstance(snapshot_id, str)
+            or not snapshot_id
+            or snapshot.get("snapshot_id") != snapshot_id
+            or snapshot.get("snapshot_consistency") != "single_locked_ledger_clone"
+            or snapshot.get("ledger_snapshot_consistent") is not True
+            or snapshot.get("execution_mode") != "paper"
+            or data.get("ledger_snapshot_consistent") is not True
+            or data.get("atomic_snapshot") is not False
+        ):
+            raise ValueError("Atomic financial snapshot contract mismatch")
+        collected = datetime.fromisoformat(item["timestamp"])
+        if collected.tzinfo is None:
+            raise ValueError("Missing timestamp timezone")
+        evidence = {
+            "endpoint": "financial-snapshot",
+            "path": str(path),
+            "age_seconds": age(path),
+            "modified_at": datetime.fromtimestamp(
+                path.stat().st_mtime, timezone.utc
+            ).isoformat(),
+            "collected_at": collected.isoformat(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "snapshot_id": snapshot_id,
+        }
+        SNAPSHOT_SOURCES = {
+            endpoint: (snapshot[key], evidence)
+            for endpoint, key in {
+                "account": "account",
+                "positions": "positions",
+                "realized-pnl": "realized_pnl",
+                "fee-summary": "fee_summary",
+                "fee-rates": "fee_rates",
+            }.items()
+        }
+        SNAPSHOT_MANIFEST = {
+            "path": str(manifest),
+            "sha256": hashlib.sha256(raw_manifest).hexdigest(),
+            "timestamp": data["timestamp"],
+            "collection_seconds": data["collection_seconds"],
+            "near_synchronous": True,
+            "atomic_snapshot": False,
+            "ledger_snapshot_consistent": True,
+            "snapshot_id": snapshot_id,
+            "execution_mode": "paper",
+            "fx_rates_updated_at_by_currency": snapshot.get("fx_rates_updated_at_by_currency"),
+            "market_marks_consistency": snapshot.get("market_marks_consistency"),
+            "ledger_coverage": snapshot.get("ledger_coverage"),
+            "historical_integrity_verified": False,
+            "independent_execution_ledger_reconciled": False,
+            "acceptance": "NOT_EVALUATED",
+        }
+        return
+
     if len(sources) != len(REQUIRED_ENDPOINTS):
         raise ValueError("Unexpected source count")
 
@@ -153,6 +228,9 @@ def load_snapshot_manifest(filename):
         "collection_seconds": data["collection_seconds"],
         "near_synchronous": data.get("near_synchronous"),
         "atomic_snapshot": False,
+        "ledger_snapshot_consistent": False,
+        "snapshot_id": data.get("snapshot_id"),
+        "execution_mode": data.get("execution_mode"),
         "historical_integrity_verified": False,
         "acceptance": "NOT_EVALUATED"
     }
@@ -450,6 +528,29 @@ def reconciliation():
         for x in evidence
     ]
 
+    snapshot = SNAPSHOT_MANIFEST or {}
+    coverage = snapshot.get("ledger_coverage") or {}
+    blockers = []
+    if snapshot.get("ledger_snapshot_consistent") is not True:
+        blockers.append("Ledger snapshot consistency not guaranteed")
+    if snapshot.get("execution_mode") != "paper" or not snapshot.get("snapshot_id"):
+        blockers.append("Execution mode or snapshot identity not exposed")
+    else:
+        blockers.append("Durable ledger epoch across restarts is not exposed")
+    if (
+        a.get("fees_complete") is not True
+        or coverage.get("unknown_fee_fills", 0) > 0
+        or coverage.get("fee_currency_unknown_rows", 0) > 0
+        or coverage.get("fee_cashflow_currency_mismatch_rows", 0) > 0
+    ):
+        blockers.append("Fee metadata is incomplete or its currency differs from the trade quote")
+    if coverage.get("rows_without_parent_order_id", 0) > 0:
+        blockers.append("Some PositionTrade rows lack parent-order attribution")
+    if snapshot.get("independent_execution_ledger_reconciled") is not True:
+        blockers.append("No independent execution ledger reconciliation")
+    if coverage.get("timestamp_order_inversion_rows", 0) > 0:
+        blockers.append("Ledger append order includes fill timestamp inversions")
+
     return {
         "status": "PROVISIONAL",
         "account_currency": a["currency"],
@@ -461,15 +562,16 @@ def reconciliation():
         "position_trade_count": p.get("trade_count"),
         "snapshot_skew_seconds":
             round(max(timestamps)-min(timestamps),3),
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "execution_mode": snapshot.get("execution_mode"),
+        "atomic_snapshot": snapshot.get("atomic_snapshot") is True,
+        "ledger_snapshot_consistent": snapshot.get("ledger_snapshot_consistent") is True,
+        "fx_rates_updated_at_by_currency": snapshot.get("fx_rates_updated_at_by_currency"),
+        "market_marks_consistency": snapshot.get("market_marks_consistency"),
+        "ledger_coverage": coverage,
         "evidence": evidence,
         "acceptance": "NOT_EVALUATED",
-        "blockers": [
-            "Snapshot consistency not guaranteed",
-            "Mode and ledger epoch not exposed",
-            "Fee inclusion requires source verification",
-            "Parent-order attribution not verified",
-            "No independent execution ledger reconciliation"
-        ]
+        "blockers": blockers
     }
 
 def main(name):

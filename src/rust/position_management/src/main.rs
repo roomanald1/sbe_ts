@@ -1,16 +1,12 @@
-#[path = "feeds/feed_client.rs"]
-mod feed_client;
-#[path = "observability/logging.rs"]
-mod logging;
-mod positions;
 #[path = "../../service_docs.rs"]
 mod service_docs;
-#[path = "users/users.rs"]
-mod users;
+
+use position_management::service_log;
+use position_management::{queue_metrics, router};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _internal_position_router = positions::router().await?;
+    let _internal_position_router = router().await?;
     let app = axum::Router::new()
         .merge(service_docs::routes(
             "Position Management",
@@ -27,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/internal/queue-metrics",
-            axum::routing::get(|| async { axum::Json(positions::queue_metrics()) }),
+            axum::routing::get(|| async { axum::Json(queue_metrics()) }),
         );
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3002)).await?;
     crate::service_log!(

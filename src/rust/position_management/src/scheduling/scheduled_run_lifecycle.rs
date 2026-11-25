@@ -148,6 +148,7 @@ async fn start_scheduled_run(
         execution_vwap: 0.0,
         slippage: 0.0,
         error: None,
+        lifecycle: request.lifecycle.clone(),
     }));
     let cancelled = Arc::new(AtomicBool::new(false));
     account_ledger.scheduled_runs.push(status.try_lock().map_err(|_| {

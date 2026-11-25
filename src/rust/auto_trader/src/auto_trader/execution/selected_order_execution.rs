@@ -16,6 +16,7 @@ struct SelectedOrderExecution {
     execution_params: ExecutionParameters,
     timestamp: u64,
     decision_id: String,
+    lifecycle_identity: CanonicalLifecycleIdentity,
     learning_context: String,
     exploration_risk_adjustment: ExplorationRiskAdjustment,
     horizon_take_profit_percent: Option<f64>,

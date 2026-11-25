@@ -169,6 +169,8 @@ mod account_snapshot_tests {
             path: PathBuf::new(),
             ledger: Arc::new(Mutex::new(Ledger::default())),
             persistence_notify: Arc::new(Notify::new()),
+            persistence_write_lock: Arc::new(Mutex::new(())),
+            pending_client_order_commits: StdMutex::new(HashSet::new()),
             state_updates,
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),

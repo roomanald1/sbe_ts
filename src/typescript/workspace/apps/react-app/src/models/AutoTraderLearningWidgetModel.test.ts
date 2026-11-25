@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { AutoTraderModel } from './AutoTraderModel';
+import type { EvidenceRequestsResponse } from './AutoTraderLearningWidgetModel';
 import type { LearningSummary } from './AutoTraderOutcomesModel';
 import {
   AutoTraderLearningWidgetModel,
@@ -174,5 +175,115 @@ describe('AutoTraderLearningWidgetModel', () => {
     assert.ok(emissions.includes('temporary failure'));
     assert.equal(emissions.at(-1), undefined);
     subscription.unsubscribe();
+  });
+
+  it('loads evidence requests without converting unavailable coverage into zero', async () => {
+    const autoTrader = new AutoTraderModel();
+    const source = {
+      state$: autoTrader.state$,
+      start() {},
+      stop() {},
+    };
+    const evidence: EvidenceRequestsResponse = {
+      as_of_ms: 20_000,
+      total_count: 1,
+      omitted_count: 0,
+      total_coverage_cohorts: 1,
+      omitted_coverage_cohorts: 0,
+      coverage_cohorts: [
+        {
+          symbol: 'BTC-USDT',
+          strategy: 'live-momentum',
+          profile_id: 'profile-1',
+          regime: null,
+          horizon: null,
+          coverage_scope: 'symbol_strategy_profile_aggregate',
+          coverage_status: 'missing',
+          gap_reason: 'No eligible Scout outcomes are recorded.',
+          sample_count: 0,
+          effective_sample_size: 0,
+          last_sample_timestamp_ms: null,
+          last_sample_age_ms: null,
+          regime_horizon_coverage: 'unavailable',
+        },
+      ],
+      requests: [
+        {
+          request: {
+            symbol: 'BTC-USDT',
+            strategy: 'live-momentum',
+            profile_id: 'profile-1',
+            regime: 'trend',
+            horizon: '5m',
+            status: 'pending',
+            attempts: 1,
+            created_at_ms: 10_000,
+            updated_at_ms: 11_000,
+            next_attempt_at_ms: 12_000,
+            reason: null,
+          },
+          as_of_ms: 20_000,
+          coverage_scope: 'symbol_strategy_profile_regime_horizon',
+          coverage_status: 'missing',
+          gap_reason: 'No eligible Scout outcomes are recorded.',
+          sample_count: 0,
+          effective_sample_size: 0,
+          last_sample_timestamp_ms: null,
+          last_sample_age_ms: null,
+          regime_horizon_coverage: 'measured',
+        },
+      ],
+    };
+    const model = new AutoTraderLearningWidgetModel(
+      source,
+      async () => [],
+      30_000,
+      async () => ({ decisions: [], errors: [] }),
+      async () => evidence,
+    );
+
+    await model.refreshEvidenceRequests();
+
+    assert.equal(model.state$.value.evidenceRequests?.requests.length, 1);
+    assert.equal(
+      model.state$.value.evidenceRequests?.requests[0]?.coverage_status,
+      'missing',
+    );
+    assert.equal(
+      model.state$.value.evidenceRequests?.coverage_cohorts[0]?.sample_count,
+      0,
+    );
+    assert.equal(
+      model.state$.value.evidenceRequests?.requests[0]
+        ?.last_sample_timestamp_ms,
+      null,
+    );
+    assert.equal(model.state$.value.evidenceRequestError, undefined);
+  });
+
+  it('shows evidence request transport errors separately from empty coverage', async () => {
+    const autoTrader = new AutoTraderModel();
+    const source = {
+      state$: autoTrader.state$,
+      start() {},
+      stop() {},
+    };
+    const model = new AutoTraderLearningWidgetModel(
+      source,
+      async () => [],
+      30_000,
+      async () => ({ decisions: [], errors: [] }),
+      async () => {
+        throw new Error('Learning request failed (503).');
+      },
+    );
+
+    await model.refreshEvidenceRequests();
+
+    assert.equal(model.state$.value.evidenceRequests, null);
+    assert.equal(
+      model.state$.value.evidenceRequestError,
+      'Learning request failed (503).',
+    );
   });
 });

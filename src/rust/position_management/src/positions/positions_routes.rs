@@ -93,16 +93,32 @@ pub async fn router() -> anyhow::Result<Router> {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
     });
-    let router = Router::new()
+    let router = position_router(Arc::clone(&store));
+    let port =
+        std::env::var("POSITION_MANAGEMENT_RSOCKET_PORT").unwrap_or_else(|_| "10005".to_owned());
+    start_position_rsocket(
+        router.clone(),
+        Arc::clone(&store),
+        format!("0.0.0.0:{port}"),
+    );
+    Ok(router)
+}
+
+fn position_router(store: Arc<PositionStore>) -> Router {
+    Router::new()
         .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
         .route("/positions/fee-summary", get(get_fee_summary))
+        .route("/positions/financial-snapshot", get(get_financial_snapshot))
         .route("/positions/account", get(get_account))
         .route("/account", get(get_account))
         .route("/positions/account/topups", post(top_up_account))
         .route("/positions/account/leverage", post(set_account_leverage))
-        .route("/positions/dated-carry/ledger", post(sync_dated_carry_ledger))
+        .route(
+            "/positions/dated-carry/ledger",
+            post(sync_dated_carry_ledger),
+        )
         .route("/account/topups", post(top_up_account))
         .route("/positions/usd-rates", get(get_usd_rates))
         .route("/positions/fee-rates", get(get_fee_rates))
@@ -126,10 +142,22 @@ pub async fn router() -> anyhow::Result<Router> {
             "/positions/orders/{id}",
             axum::routing::delete(cancel_order),
         )
-        .with_state(Arc::clone(&store))
-        .merge(crate::users::router());
-    start_position_rsocket(router.clone(), Arc::clone(&store));
-    Ok(router)
+        .with_state(store)
+        .merge(crate::users::router())
+}
+
+/// Start the real Position Management RSocket adapter against a test-owned
+/// SQLite ledger and explicit loopback address. Service background workers are
+/// intentionally omitted so tests have no dependency on feed/OKX runtime data.
+#[cfg(feature = "test-support")]
+pub async fn start_test_rsocket_service(
+    path: PathBuf,
+    address: String,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let store = Arc::new(PositionStore::load_from_path_without_writer(path).await?);
+    let _ = POSITION_STORE_FOR_QUEUE_METRICS.set(Arc::clone(&store));
+    let router = position_router(Arc::clone(&store));
+    Ok(start_position_rsocket(router, store, address))
 }
 
 pub fn queue_metrics() -> Vec<serde_json::Value> {
@@ -157,15 +185,23 @@ async fn sync_dated_carry_ledger(
             || position.spot_symbol.is_empty()
             || position.future_symbol.is_empty()
     }) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid dated-carry ledger position".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid dated-carry ledger position".into(),
+        ));
     }
     let mut ledger = store.ledger.lock().await;
     ledger.dated_carry_positions = positions;
-    let completed_carries = ledger.dated_carry_positions.iter().filter(|position| {
-        position.status.starts_with("closed")
-            && position.net_pnl_usdt.is_some_and(f64::is_finite)
-            && position.closed_at_ms.is_some()
-    }).cloned().collect::<Vec<_>>();
+    let completed_carries = ledger
+        .dated_carry_positions
+        .iter()
+        .filter(|position| {
+            position.status.starts_with("closed")
+                && position.net_pnl_usdt.is_some_and(f64::is_finite)
+                && position.closed_at_ms.is_some()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let mut carry_fills_changed = false;
     for position in &completed_carries {
         let Some((spot_symbol, quote)) = carry_ledger_symbol(&position.spot_symbol, None) else {
@@ -176,26 +212,75 @@ async fn sync_dated_carry_ledger(
         } else {
             format!("{}-{quote}", position.future_symbol)
         };
-        let Some(spot_exit) = position.spot_exit_twap.filter(|price| price.is_finite() && *price > 0.0) else {
+        let Some(spot_exit) = position
+            .spot_exit_twap
+            .filter(|price| price.is_finite() && *price > 0.0)
+        else {
             continue;
         };
-        let Some(future_exit) = position.settlement_price.filter(|price| price.is_finite() && *price > 0.0) else {
+        let Some(future_exit) = position
+            .settlement_price
+            .filter(|price| price.is_finite() && *price > 0.0)
+        else {
             continue;
         };
         let spot_entry_fee = position.quantity * position.spot_entry_price * 0.001;
         let future_entry_fee = (position.entry_fees - spot_entry_fee).max(0.0);
         let spot_exit_fee = position.quantity * spot_exit * 0.001;
         let future_exit_fee = position.quantity * future_exit * 0.0005;
-        let parent = format!("dated-carry:{}:{}", position.future_symbol, position.entry_ms);
+        let parent = format!(
+            "dated-carry:{}:{}",
+            position.future_symbol, position.entry_ms
+        );
         let fills = [
-            dated_carry_fill(position, "spot-entry", &spot_symbol, TradeSide::Buy,
-                position.spot_entry_price, spot_entry_fee, 0.001, position.entry_ms, &parent, &quote),
-            dated_carry_fill(position, "future-entry", &future_symbol, TradeSide::Sell,
-                position.future_entry_price, future_entry_fee, 0.0005, position.entry_ms, &parent, &quote),
-            dated_carry_fill(position, "spot-exit", &spot_symbol, TradeSide::Sell,
-                spot_exit, spot_exit_fee, 0.001, position.closed_at_ms.unwrap(), &parent, &quote),
-            dated_carry_fill(position, "future-exit", &future_symbol, TradeSide::Buy,
-                future_exit, future_exit_fee, 0.0005, position.closed_at_ms.unwrap(), &parent, &quote),
+            dated_carry_fill(
+                position,
+                "spot-entry",
+                &spot_symbol,
+                TradeSide::Buy,
+                position.spot_entry_price,
+                spot_entry_fee,
+                0.001,
+                position.entry_ms,
+                &parent,
+                &quote,
+            ),
+            dated_carry_fill(
+                position,
+                "future-entry",
+                &future_symbol,
+                TradeSide::Sell,
+                position.future_entry_price,
+                future_entry_fee,
+                0.0005,
+                position.entry_ms,
+                &parent,
+                &quote,
+            ),
+            dated_carry_fill(
+                position,
+                "spot-exit",
+                &spot_symbol,
+                TradeSide::Sell,
+                spot_exit,
+                spot_exit_fee,
+                0.001,
+                position.closed_at_ms.unwrap(),
+                &parent,
+                &quote,
+            ),
+            dated_carry_fill(
+                position,
+                "future-exit",
+                &future_symbol,
+                TradeSide::Buy,
+                future_exit,
+                future_exit_fee,
+                0.0005,
+                position.closed_at_ms.unwrap(),
+                &parent,
+                &quote,
+            ),
         ];
         for fill in fills {
             if let Some(existing) = ledger.trades.iter_mut().find(|trade| trade.id == fill.id) {
@@ -205,10 +290,14 @@ async fn sync_dated_carry_ledger(
                     || existing.execution_price != fill.execution_price
                     || existing.fee != fill.fee
                 {
-                    *existing = fill;
+                    let mut replacement = fill;
+                    replacement.fill_id = existing.fill_id.clone();
+                    *existing = replacement;
                     carry_fills_changed = true;
                 }
             } else {
+                let mut fill = fill;
+                fill.fill_id = Some(allocate_fill_id(&mut ledger, fill.timestamp));
                 ledger.trades.push(fill);
                 carry_fills_changed = true;
             }
@@ -219,10 +308,16 @@ async fn sync_dated_carry_ledger(
         // rebuild the append-only index so realized P&L no longer mixes the
         // paired spot leg with ordinary spot trades.
         *store.trade_index.lock().unwrap_or_else(|p| p.into_inner()) = LedgerTradeIndex::default();
-        *store.realized_pnl_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *store
+            .realized_pnl_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
     }
     store.persist(&ledger).await.map_err(|error| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Could not persist dated-carry ledger: {error}"))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not persist dated-carry ledger: {error}"),
+        )
     })?;
     Ok(Json(serde_json::json!({
         "status": "recorded",
@@ -236,8 +331,12 @@ fn carry_ledger_symbol(symbol: &str, quote_hint: Option<&str>) -> Option<(String
             return Some((format!("CARRY{base}-{quote}"), quote.to_owned()));
         }
     }
-    let quote = quote_hint.or_else(|| ["USDT", "USDC", "USD"].iter()
-        .find(|quote| symbol.ends_with(**quote)).copied())?;
+    let quote = quote_hint.or_else(|| {
+        ["USDT", "USDC", "USD"]
+            .iter()
+            .find(|quote| symbol.ends_with(**quote))
+            .copied()
+    })?;
     let base = symbol.strip_suffix(quote).unwrap_or(symbol);
     (!base.is_empty()).then(|| (format!("CARRY{base}-{quote}"), quote.to_owned()))
 }
@@ -255,7 +354,11 @@ fn dated_carry_fill(
     quote: &str,
 ) -> PositionTrade {
     PositionTrade {
-        id: format!("dated-carry:{}:{}:{leg}", position.future_symbol, position.entry_ms),
+        id: format!(
+            "dated-carry:{}:{}:{leg}",
+            position.future_symbol, position.entry_ms
+        ),
+        fill_id: None,
         symbol: symbol.to_owned(),
         side,
         quantity: position.quantity,
@@ -264,6 +367,8 @@ fn dated_carry_fill(
         timestamp,
         source: "auto".into(),
         parent_order_id: Some(parent.to_owned()),
+        client_order_id: None,
+        lifecycle: None,
         fee: -fee.abs(),
         fee_known: true,
         fee_currency: quote.to_owned(),
@@ -289,7 +394,10 @@ fn position_ui_events(
             if !initialized {
                 let snapshot = position_ui_snapshot(&store).await;
                 let event = serde_json::json!({ "type": "snapshot", "state": snapshot });
-                return Some((Ok(event), (store, updates, Some(snapshot), true, rates_refresh)));
+                return Some((
+                    Ok(event),
+                    (store, updates, Some(snapshot), true, rates_refresh),
+                ));
             }
             loop {
                 tokio::select! {
@@ -342,20 +450,63 @@ fn position_ui_events(
 
 async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
     let (positions, auto_positions, orders, trades, auto_trades, account) = {
-    let (ledger, _, _, _) = snapshot_position_ledger(&store.ledger).await;
+        let (ledger, _, _, _) = snapshot_position_ledger(&store.ledger).await;
         let positions = cached_position_summary(store, &ledger, None);
         let auto_positions = cached_position_summary(store, &ledger, Some("auto"));
-        let orders = OrdersResponse { orders: ledger.orders.clone(), barrier_orders: ledger.barrier_orders.clone() };
+        let orders = OrdersResponse {
+            orders: ledger.orders.clone(),
+            barrier_orders: ledger.barrier_orders.clone(),
+        };
         const STREAM_TRADE_LIMIT: usize = 256;
-        let mut recent_trades = ledger.trades.iter().rev().take(STREAM_TRADE_LIMIT).cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect::<Vec<_>>();
+        let mut recent_trades = ledger
+            .trades
+            .iter()
+            .rev()
+            .take(STREAM_TRADE_LIMIT)
+            .cloned()
+            .map(|mut trade| {
+                trade.fee = signed_fee_cashflow(trade.fee);
+                trade
+            })
+            .collect::<Vec<_>>();
         recent_trades.reverse();
-        let trades = TradesResponse { trades: recent_trades, total: None, next_offset: None, has_older: None };
-        let mut recent_auto_trades = ledger.trades.iter().rev().filter(|trade| trade.source == "auto").take(STREAM_TRADE_LIMIT).cloned().map(|mut trade| { trade.fee = signed_fee_cashflow(trade.fee); trade }).collect::<Vec<_>>();
+        let trades = TradesResponse {
+            trades: recent_trades,
+            total: None,
+            next_offset: None,
+            has_older: None,
+        };
+        let mut recent_auto_trades = ledger
+            .trades
+            .iter()
+            .rev()
+            .filter(|trade| trade.source == "auto")
+            .take(STREAM_TRADE_LIMIT)
+            .cloned()
+            .map(|mut trade| {
+                trade.fee = signed_fee_cashflow(trade.fee);
+                trade
+            })
+            .collect::<Vec<_>>();
         recent_auto_trades.reverse();
-        let auto_trades = TradesResponse { trades: recent_auto_trades, total: None, next_offset: None, has_older: None };
-        let rates = latest_stream_usd_rates().map(|rates| rates.rates).unwrap_or_default();
+        let auto_trades = TradesResponse {
+            trades: recent_auto_trades,
+            total: None,
+            next_offset: None,
+            has_older: None,
+        };
+        let rates = latest_stream_usd_rates()
+            .map(|rates| rates.rates)
+            .unwrap_or_default();
         let account = account_snapshot_with_rates(store, &ledger, &rates).ok();
-        (positions, auto_positions, orders, trades, auto_trades, account)
+        (
+            positions,
+            auto_positions,
+            orders,
+            trades,
+            auto_trades,
+            account,
+        )
     };
     let Json(vwap_runs) = get_vwap_runs(State(Arc::clone(store))).await;
     let Json(fee_rates) = get_fee_rates().await;
@@ -372,8 +523,15 @@ async fn position_ui_snapshot(store: &Arc<PositionStore>) -> serde_json::Value {
     })
 }
 
-async fn account_ui_snapshot(store: &Arc<PositionStore>, rates: &serde_json::Value) -> serde_json::Value {
-    let rates = rates.get("rates").cloned().and_then(|rates| serde_json::from_value(rates).ok()).unwrap_or_default();
+async fn account_ui_snapshot(
+    store: &Arc<PositionStore>,
+    rates: &serde_json::Value,
+) -> serde_json::Value {
+    let rates = rates
+        .get("rates")
+        .cloned()
+        .and_then(|rates| serde_json::from_value(rates).ok())
+        .unwrap_or_default();
     let account = {
         let ledger = store.ledger.lock().await;
         account_snapshot_with_rates(store, &ledger, &rates).ok()
@@ -394,7 +552,6 @@ async fn order_handler_timing(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-
 #[derive(Serialize)]
 struct PersistenceTimingSummary {
     latest_ms: f64,
@@ -411,17 +568,27 @@ async fn get_persistence_timing(
         .lock()
         .map(|samples| samples.clone())
         .unwrap_or_default();
-    Json(samples.into_iter().filter_map(|(phase, values)| {
-        if values.is_empty() { return None; }
-        let mut sorted = values.clone();
-        sorted.sort_by(f64::total_cmp);
-        Some((phase, PersistenceTimingSummary {
-            latest_ms: *values.last().unwrap_or(&0.0),
-            average_ms: sorted.iter().sum::<f64>() / sorted.len() as f64,
-            p95_ms: sorted[(95 * sorted.len()).div_ceil(100).saturating_sub(1)],
-            samples: sorted.len(),
-        }))
-    }).collect())
+    Json(
+        samples
+            .into_iter()
+            .filter_map(|(phase, values)| {
+                if values.is_empty() {
+                    return None;
+                }
+                let mut sorted = values.clone();
+                sorted.sort_by(f64::total_cmp);
+                Some((
+                    phase,
+                    PersistenceTimingSummary {
+                        latest_ms: *values.last().unwrap_or(&0.0),
+                        average_ms: sorted.iter().sum::<f64>() / sorted.len() as f64,
+                        p95_ms: sorted[(95 * sorted.len()).div_ceil(100).saturating_sub(1)],
+                        samples: sorted.len(),
+                    },
+                ))
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -442,7 +609,10 @@ impl RSocket for PositionRSocketResponder {
         &'life0 self,
         _request: Payload,
     ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<()>> + Send + 'async_trait>>
-    where Self: 'async_trait, 'life0: 'async_trait {
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+    {
         Box::pin(async { Err(anyhow::anyhow!("RSocket metadata push is unsupported")) })
     }
 
@@ -450,24 +620,42 @@ impl RSocket for PositionRSocketResponder {
         &'life0 self,
         _request: Payload,
     ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<()>> + Send + 'async_trait>>
-    where Self: 'async_trait, 'life0: 'async_trait {
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+    {
         Box::pin(async { Err(anyhow::anyhow!("RSocket fire-and-forget is unsupported")) })
     }
 
     fn request_response<'life0, 'async_trait>(
         &'life0 self,
         request: Payload,
-    ) -> Pin<Box<dyn futures_util::Future<Output = anyhow::Result<Option<Payload>>> + Send + 'async_trait>>
-    where Self: 'async_trait, 'life0: 'async_trait {
+    ) -> Pin<
+        Box<
+            dyn futures_util::Future<Output = anyhow::Result<Option<Payload>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        Self: 'async_trait,
+        'life0: 'async_trait,
+    {
         let router = self.router.clone();
         Box::pin(async move {
-            let bytes = request.data().ok_or_else(|| anyhow::anyhow!("RSocket request data is required"))?;
+            let bytes = request
+                .data()
+                .ok_or_else(|| anyhow::anyhow!("RSocket request data is required"))?;
             let rpc: PositionRpcRequest = serde_json::from_slice(bytes.as_ref())?;
             let method = rpc.method.parse::<axum::http::Method>()?;
             if !is_position_rpc_path(&rpc.path) {
                 anyhow::bail!("unsupported Position Management RSocket path");
             }
-            let body = rpc.body.map(|value| serde_json::to_vec(&value)).transpose()?.unwrap_or_default();
+            let body = rpc
+                .body
+                .map(|value| serde_json::to_vec(&value))
+                .transpose()?
+                .unwrap_or_default();
             let request = Request::builder()
                 .method(method)
                 .uri(&rpc.path)
@@ -493,28 +681,45 @@ impl RSocket for PositionRSocketResponder {
                 "body": serde_json::from_slice::<serde_json::Value>(&body)
                     .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&body).into_owned()))
             });
-            Ok(Some(Payload::new(Some(Bytes::from(serde_json::to_vec(&response)?)), None)))
+            Ok(Some(Payload::new(
+                Some(Bytes::from(serde_json::to_vec(&response)?)),
+                None,
+            )))
         })
     }
 
     fn request_stream(
         &self,
         request: Payload,
-    ) -> Pin<Box<dyn futures_util::Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>> {
-        let is_ui_stream = request.data().is_some_and(|data| data.as_ref() == b"position-ui:*");
+    ) -> Pin<Box<dyn futures_util::Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>>
+    {
+        let is_ui_stream = request
+            .data()
+            .is_some_and(|data| data.as_ref() == b"position-ui:*");
         if !is_ui_stream {
             return Box::pin(futures_util::stream::once(async {
-                Err(anyhow::anyhow!("unsupported Position Management RSocket stream"))
+                Err(anyhow::anyhow!(
+                    "unsupported Position Management RSocket stream"
+                ))
             }));
         }
         Box::pin(position_ui_events(Arc::clone(&self.store)).map(|event| {
             let event = event?;
-            Ok(Payload::new(Some(Bytes::from(serde_json::to_vec(&event)?)), None))
+            Ok(Payload::new(
+                Some(Bytes::from(serde_json::to_vec(&event)?)),
+                None,
+            ))
         }))
     }
 
-    fn request_channel(&self, _requests: Flux<Result<Payload, anyhow::Error>>) -> Flux<Result<Payload, anyhow::Error>> {
-        futures_util::stream::once(async { Err(anyhow::anyhow!("RSocket request-channel is unsupported")) }).boxed()
+    fn request_channel(
+        &self,
+        _requests: Flux<Result<Payload, anyhow::Error>>,
+    ) -> Flux<Result<Payload, anyhow::Error>> {
+        futures_util::stream::once(async {
+            Err(anyhow::anyhow!("RSocket request-channel is unsupported"))
+        })
+        .boxed()
     }
 }
 
@@ -526,22 +731,33 @@ fn is_position_rpc_path(path: &str) -> bool {
         || path == "/internal/persistence-timing"
 }
 
-fn start_position_rsocket(router: Router, store: Arc<PositionStore>) {
-    let port = std::env::var("POSITION_MANAGEMENT_RSOCKET_PORT").unwrap_or_else(|_| "10005".to_owned());
+fn start_position_rsocket(
+    router: Router,
+    store: Arc<PositionStore>,
+    address: String,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let address = format!("0.0.0.0:{port}");
-        crate::service_log!("INFO", "Position Management RSocket server listening on ws://{address}");
+        crate::service_log!(
+            "INFO",
+            "Position Management RSocket server listening on ws://{address}"
+        );
         if let Err(error) = RSocketFactory::receive()
             .transport(WebsocketServerTransport::from(address))
             .acceptor(Box::new(move |_setup, _socket| {
-                Ok(Box::new(PositionRSocketResponder { router: router.clone(), store: Arc::clone(&store) }))
+                Ok(Box::new(PositionRSocketResponder {
+                    router: router.clone(),
+                    store: Arc::clone(&store),
+                }))
             }))
             .serve()
             .await
         {
-            crate::service_log!("ERROR", "Position Management RSocket server stopped: {error:#}");
+            crate::service_log!(
+                "ERROR",
+                "Position Management RSocket server stopped: {error:#}"
+            );
         }
-    });
+    })
 }
 
 #[cfg(test)]
@@ -567,7 +783,10 @@ mod position_rsocket_contract_tests {
             "/health",
             "/internal/other",
         ] {
-            assert!(!is_position_rpc_path(route), "unexpectedly accepted {route}");
+            assert!(
+                !is_position_rpc_path(route),
+                "unexpectedly accepted {route}"
+            );
         }
     }
 

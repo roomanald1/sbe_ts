@@ -111,6 +111,8 @@ async fn create_profit_barrier(
         extreme_price: None,
         source: default_trade_source(),
         parent_order_id: None,
+        client_order_id: None,
+        lifecycle: None,
     };
     ledger.barrier_orders.push(barrier_order.clone());
     if let Err(error) = store.persist(&ledger).await {
@@ -202,6 +204,7 @@ async fn close_profitable(
             time_in_force: None,
             source,
             client_order_id,
+            lifecycle: None,
             // A manual close must not reserve buying power or open/reverse a
             // position if inventory changed after the close quantity was read.
             reduce_only: true,

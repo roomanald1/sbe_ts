@@ -92,6 +92,18 @@ struct Settings {
     utc_day: String,
     #[serde(default)]
     orders: Vec<TraderOrder>,
+    /// Durable canonical links keyed by the existing decision correlation key.
+    /// The key is not promoted to a canonical lifecycle identity.
+    #[serde(default)]
+    canonical_lifecycle_links: BTreeMap<String, CanonicalLifecycleIdentity>,
+    #[serde(default)]
+    canonical_lifecycle_sequence: u64,
+    #[serde(default)]
+    canonical_lifecycle_epoch: String,
+    /// Stable worker event reservations for bounded exploratory deduplication.
+    /// Missing entries from older settings and signals without source IDs stay unknown.
+    #[serde(default)]
+    exploratory_event_reservations: BTreeMap<String, u64>,
     #[serde(default)]
     positions: BTreeMap<String, TraderPosition>,
     #[serde(default)]
@@ -122,8 +134,7 @@ struct Settings {
     #[serde(default)]
     learned_exit_protection_policies: BTreeMap<String, strategy::LearnedExitProtectionPolicy>,
     #[serde(default)]
-    learned_walk_forward_evidence:
-        BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
+    learned_walk_forward_evidence: BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
     #[serde(default)]
     learned_context_thresholds: BTreeMap<String, strategy::ContextThresholds>,
     /// Explicitly selected concurrent live parameter profiles, keyed by strategy.
@@ -182,8 +193,7 @@ struct Settings {
     daily_strategy_signal_cursors: BTreeMap<String, u64>,
 }
 
-const UNATTRIBUTED_POSITION_MANAGER_CONTEXT: &str =
-    "unattributed:position-manager-reconciliation";
+const UNATTRIBUTED_POSITION_MANAGER_CONTEXT: &str = "unattributed:position-manager-reconciliation";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -373,6 +383,10 @@ impl Default for Settings {
             pnl_utc_day: utc_day(),
             utc_day: utc_day(),
             orders: Vec::new(),
+            canonical_lifecycle_links: BTreeMap::new(),
+            canonical_lifecycle_sequence: 0,
+            canonical_lifecycle_epoch: new_canonical_lifecycle_epoch(),
+            exploratory_event_reservations: BTreeMap::new(),
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
@@ -417,6 +431,200 @@ impl Default for Settings {
     }
 }
 
+fn new_canonical_lifecycle_epoch() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
+}
+
+/// Hash the complete declared strategy parameter set using a versioned,
+/// sorted JSON representation. Partial or non-finite profiles remain unknown.
+fn canonical_profile_hash_v1(
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    parameters: &BTreeMap<String, f64>,
+) -> Option<String> {
+    let strategy_kind = Strategy::from_name(strategy)?;
+    let specs = strategy_kind.parameter_specs();
+    if specs.is_empty() {
+        return None;
+    }
+    let canonical_parameters = specs
+        .iter()
+        .map(|spec| {
+            parameters
+                .get(spec.key.as_str())
+                .filter(|value| value.is_finite())
+                .map(|value| (spec.key.as_str(), *value))
+        })
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "canonical_hash_version": 1,
+        "symbol": symbol,
+        "strategy": strategy,
+        "profile_id": profile_id,
+        "parameters": canonical_parameters,
+    }))
+    .ok()?;
+    use sha2::Digest;
+    Some(format!("sha256:v1:{:x}", sha2::Sha256::digest(encoded)))
+}
+
+fn canonical_lifecycle_identity_for_reservation(
+    settings: &mut Settings,
+    decision_key: &str,
+    profile_id: Option<String>,
+    profile_hash: Option<String>,
+    profile_version: Option<u64>,
+    exploratory: bool,
+    existing_trade_id: Option<String>,
+) -> Option<CanonicalLifecycleIdentity> {
+    if let Some(existing) = settings.canonical_lifecycle_links.get(decision_key) {
+        return Some(existing.clone());
+    }
+    if settings.canonical_lifecycle_epoch.is_empty() {
+        settings.canonical_lifecycle_epoch = new_canonical_lifecycle_epoch();
+    }
+    settings.canonical_lifecycle_sequence = settings.canonical_lifecycle_sequence.checked_add(1)?;
+    let sequence = settings.canonical_lifecycle_sequence;
+    let epoch = settings.canonical_lifecycle_epoch.as_str();
+    let identity = CanonicalLifecycleIdentity {
+        schema_version: 1,
+        opportunity_id: format!("autotrader:v1:opportunity:{epoch}:{sequence}"),
+        // V1 starts one episode for each accepted decision thesis. Continuation
+        // and reset grouping can extend this only after signal semantics define
+        // those boundaries explicitly.
+        episode_id: format!("autotrader:v1:episode:{epoch}:{sequence}"),
+        trade_id: existing_trade_id
+            .unwrap_or_else(|| format!("autotrader:v1:trade:{epoch}:{sequence}")),
+        profile_id,
+        profile_hash,
+        profile_version,
+        execution_mode: "paper".to_owned(),
+        entry_policy: if exploratory { "exploratory" } else { "strict" }.to_owned(),
+        source: "auto_trader_entry_reservation".to_owned(),
+    };
+    settings
+        .canonical_lifecycle_links
+        .insert(decision_key.to_owned(), identity.clone());
+    Some(identity)
+}
+
+fn prune_canonical_lifecycle_links(settings: &mut Settings) {
+    let mut retained_keys = settings
+        .orders
+        .iter()
+        .filter_map(|order| order.decision_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut retain_position = |position: &TraderPosition| {
+        if position.quantity.abs() > 1e-12 {
+            retained_keys.extend(position.entry_decision_id.iter().cloned());
+            retained_keys.extend(position.trade_id.iter().cloned());
+        }
+    };
+    for position in settings.positions.values() {
+        retain_position(position);
+    }
+    for position in settings
+        .strategy_positions
+        .values()
+        .flat_map(|lots| lots.values())
+    {
+        retain_position(position);
+    }
+    settings
+        .canonical_lifecycle_links
+        .retain(|key, _| retained_keys.contains(key));
+}
+
+#[cfg(test)]
+mod canonical_lifecycle_identity_tests {
+    use super::*;
+
+    #[test]
+    fn reservation_identity_is_idempotent_and_survives_settings_restart() {
+        let mut settings = Settings::default();
+        let first = canonical_lifecycle_identity_for_reservation(
+            &mut settings,
+            "decision-a",
+            Some("profile-a".into()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let persisted = serde_json::to_value(&settings).unwrap();
+        let mut restarted: Settings = serde_json::from_value(persisted).unwrap();
+        let retried = canonical_lifecycle_identity_for_reservation(
+            &mut restarted,
+            "decision-a",
+            Some("profile-a".into()),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let next = canonical_lifecycle_identity_for_reservation(
+            &mut restarted,
+            "decision-b",
+            None,
+            None,
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first, retried);
+        assert_ne!(first.opportunity_id, next.opportunity_id);
+        assert_ne!(first.episode_id, next.episode_id);
+        assert_eq!(restarted.canonical_lifecycle_sequence, 2);
+    }
+
+    #[test]
+    fn canonical_profile_hash_is_versioned_deterministic_and_requires_full_profile() {
+        let kind = Strategy::LiveMomentum;
+        let parameters = kind
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let first =
+            canonical_profile_hash_v1("BTC-USDT", kind.as_str(), "profile-1", &parameters).unwrap();
+        let second =
+            canonical_profile_hash_v1("BTC-USDT", kind.as_str(), "profile-1", &parameters).unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("sha256:v1:"));
+        let mut incomplete = parameters.clone();
+        incomplete.pop_first();
+        assert_eq!(
+            canonical_profile_hash_v1("BTC-USDT", kind.as_str(), "profile-1", &incomplete),
+            None
+        );
+        let mut invalid = parameters;
+        let key = invalid.keys().next().unwrap().clone();
+        invalid.insert(key, f64::NAN);
+        assert_eq!(
+            canonical_profile_hash_v1("BTC-USDT", kind.as_str(), "profile-1", &invalid),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_settings_keep_absent_lifecycle_links_unattributed() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "enabled": true, "orders": []
+        }))
+        .unwrap();
+        assert!(settings.canonical_lifecycle_links.is_empty());
+        assert_eq!(settings.canonical_lifecycle_sequence, 0);
+    }
+}
+
 #[cfg(test)]
 mod strategy_settings_migration_tests {
     use super::*;
@@ -424,7 +632,10 @@ mod strategy_settings_migration_tests {
     #[test]
     fn missing_learning_queue_telemetry_fields_migrate_to_defaults() {
         let mut value = serde_json::to_value(Settings::default()).unwrap();
-        value.as_object_mut().unwrap().remove("learning_feedback_stats");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("learning_feedback_stats");
         value
             .as_object_mut()
             .unwrap()

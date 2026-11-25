@@ -115,6 +115,7 @@ async fn sync_protective_stops(
                     trade_realized_pnl,
                 );
             }
+            let mut trade_feedback_enqueued = false;
             if fully_closed && entry_notional > 0.0 {
                 let total_trade_pnl = trade_realized_pnl;
                 let total_fees = if prior_total_fees > 0.0 {
@@ -138,7 +139,7 @@ async fn sync_protective_stops(
                         &symbol,
                     ),
                 );
-                record_strategy_trade_outcome(
+                trade_feedback_enqueued = record_strategy_trade_outcome(
                     &mut settings,
                     &symbol,
                     Some(&strategy),
@@ -200,6 +201,11 @@ async fn sync_protective_stops(
                 .and_then(|order| order.strategy_realized_pnl)
                 .unwrap_or(strategy_realized_delta);
             drop(settings);
+            if trade_feedback_enqueued {
+                if let Err(error) = persist_settings_snapshot_durable(state).await {
+                    crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
+                }
+            }
             if let Some(decision_id) = entry_decision_id {
                 let update_timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)

@@ -12,6 +12,10 @@ struct AutoTraderState {
     settings: Arc<Mutex<Settings>>,
     activity_snapshot: Arc<Mutex<Option<axum::body::Bytes>>>,
     settings_persist_notify: Arc<Notify>,
+    settings_persist_write_lock: Arc<Mutex<()>>,
+    /// IDs whose current outbox payloads have been durably committed before
+    /// attempting delivery during this process lifetime.
+    durable_feedback_event_ids: Arc<Mutex<BTreeSet<String>>>,
     price_path_last_checkpoint_requested_at: Arc<std::sync::Mutex<Option<Instant>>>,
     state_updates: broadcast::Sender<()>,
     live_profile_updates: broadcast::Sender<()>,
@@ -370,6 +374,11 @@ struct TraderOrder {
     strategy: Option<String>,
     #[serde(default)]
     decision_id: Option<String>,
+    /// Compact point-in-time entry input used to correlate later worker
+    /// decisions with this exact strategy/profile opportunity. Legacy orders
+    /// intentionally have no snapshot and retain timeout-only behavior.
+    #[serde(default)]
+    revalidation_snapshot: Option<RestingOrderRevalidationSnapshot>,
     #[serde(default)]
     strength: f64,
     #[serde(default)]
@@ -429,6 +438,38 @@ struct TraderOrder {
     strategy_realized_pnl_today: Option<f64>,
     #[serde(default)]
     strategy_realized_pnl_day: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct RestingOrderRevalidationSnapshot {
+    symbol: String,
+    strategy: String,
+    direction: String,
+    signal_timestamp_ms: u64,
+    profile_id: Option<String>,
+    profile_version: Option<u64>,
+    parameter_hash: Option<String>,
+}
+
+/// Versioned identities created atomically with an accepted AutoTrader
+/// reservation. Legacy settings intentionally have no link and stay unknown.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CanonicalLifecycleIdentity {
+    schema_version: u16,
+    opportunity_id: String,
+    episode_id: String,
+    trade_id: String,
+    #[serde(default)]
+    profile_id: Option<String>,
+    /// A profile hash is absent until the producer supplies a canonical,
+    /// immutable parameter serialization contract.
+    #[serde(default)]
+    profile_hash: Option<String>,
+    #[serde(default)]
+    profile_version: Option<u64>,
+    execution_mode: String,
+    entry_policy: String,
+    source: String,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct TraderPosition {

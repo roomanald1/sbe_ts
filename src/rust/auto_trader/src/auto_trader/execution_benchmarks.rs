@@ -25,6 +25,13 @@ fn benchmark_signal(strategy: &str, candidate: bool) -> Signal {
     }
 }
 
+fn service_endpoint_environment_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Per-event latency summary used by the end-to-end benchmark runner. Samples
 /// are recorded before inspecting the operation result, so rejected/error
 /// outcomes remain in the measured population.
@@ -40,7 +47,9 @@ pub struct BenchmarkLatencyDistribution {
 impl BenchmarkLatencyDistribution {
     pub fn from_samples_ms(mut samples: Vec<f64>) -> Self {
         assert!(!samples.is_empty(), "benchmark needs at least one event");
-        assert!(samples.iter().all(|sample| sample.is_finite() && *sample >= 0.0));
+        assert!(samples
+            .iter()
+            .all(|sample| sample.is_finite() && *sample >= 0.0));
         samples.sort_by(f64::total_cmp);
         let percentile = |fraction: f64| {
             let index = ((samples.len() as f64 * fraction).ceil() as usize)
@@ -80,7 +89,7 @@ where
         let result = operation(index).await;
         samples_ms.push(event_started.elapsed().as_secs_f64() * 1_000.0);
         successful_events += usize::from(result.is_ok());
-        std::hint::black_box(result);
+        let _ = std::hint::black_box(result);
     }
     let elapsed = workload_started.elapsed();
     (
@@ -88,6 +97,96 @@ where
         elapsed,
         successful_events,
     )
+}
+
+/// Per-event production-path evidence. Timing distributions are optional when
+/// no order reached that boundary; their sample counts must not be inferred
+/// from the event count.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ProductionPathBenchmarkMeasurements {
+    pub event_latency: BenchmarkLatencyDistribution,
+    pub submit_ready_local: Option<BenchmarkLatencyDistribution>,
+    pub position_management_rsocket: Option<BenchmarkLatencyDistribution>,
+    pub event_count: usize,
+    pub successful_events: usize,
+    pub submitted_order_events: usize,
+    pub non_submitted_events: usize,
+    pub response_timing_sample_count: usize,
+    pub queue_wait: Option<BenchmarkLatencyDistribution>,
+    pub cycle_lock_wait: Option<BenchmarkLatencyDistribution>,
+    pub dropped_telemetry_events: usize,
+    pub concurrent_events: Option<usize>,
+    pub distinct_symbols: Option<usize>,
+    pub burst_throughput_events_per_second: Option<f64>,
+    pub elapsed_ms: f64,
+    pub events_per_second: f64,
+}
+
+async fn measure_production_path_events<T, E, F, Fut, X>(
+    event_count: usize,
+    mut operation: F,
+    mut extract_timing: X,
+) -> ProductionPathBenchmarkMeasurements
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    X: FnMut(&T) -> Option<(f64, f64)>,
+{
+    use std::time::Instant;
+    assert!(event_count > 0, "benchmark event count must be positive");
+    let mut event_samples_ms = Vec::with_capacity(event_count);
+    let mut submit_ready_samples_ms = Vec::with_capacity(event_count);
+    let mut transport_samples_ms = Vec::with_capacity(event_count);
+    let mut successful_events = 0;
+    let mut submitted_order_events = 0;
+    let workload_started = Instant::now();
+    for index in 0..event_count {
+        let event_started = Instant::now();
+        let result = operation(index).await;
+        event_samples_ms.push(event_started.elapsed().as_secs_f64() * 1_000.0);
+        if let Ok(output) = &result {
+            successful_events += 1;
+            if let Some((submit_ready_ms, transport_ms)) = extract_timing(output) {
+                submitted_order_events += 1;
+                if submit_ready_ms.is_finite() && submit_ready_ms >= 0.0 {
+                    submit_ready_samples_ms.push(submit_ready_ms);
+                }
+                if transport_ms.is_finite() && transport_ms >= 0.0 {
+                    transport_samples_ms.push(transport_ms);
+                }
+            }
+        }
+        let _ = std::hint::black_box(result);
+    }
+    let elapsed = workload_started.elapsed();
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let response_timing_sample_count = submit_ready_samples_ms
+        .len()
+        .min(transport_samples_ms.len());
+    ProductionPathBenchmarkMeasurements {
+        event_latency: BenchmarkLatencyDistribution::from_samples_ms(event_samples_ms),
+        submit_ready_local: (!submit_ready_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(submit_ready_samples_ms)),
+        position_management_rsocket: (!transport_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(transport_samples_ms)),
+        event_count,
+        successful_events,
+        submitted_order_events,
+        non_submitted_events: event_count.saturating_sub(submitted_order_events),
+        response_timing_sample_count,
+        queue_wait: None,
+        cycle_lock_wait: None,
+        dropped_telemetry_events: 0,
+        concurrent_events: None,
+        distinct_symbols: None,
+        burst_throughput_events_per_second: None,
+        elapsed_ms: elapsed.as_secs_f64() * 1_000.0,
+        events_per_second: if elapsed_seconds > 0.0 {
+            event_count as f64 / elapsed_seconds
+        } else {
+            0.0
+        },
+    }
 }
 
 /// Machine-readable evidence shape accepted by scripts/local/performance_gate.py.
@@ -98,15 +197,752 @@ pub struct AutoTraderPerformanceEvidence {
     pub hardware: String,
     pub git_head: String,
     pub build_mode: String,
+    pub measurement_scope: String,
     pub workload_id: String,
+    pub event_latency_boundary: String,
     pub measurement_definition: String,
     pub benchmark_config_sha256: String,
     pub sampling_method: String,
+    /// Release-build measurements remain observational until independently
+    /// reviewed against the applicable performance acceptance gates.
+    pub acceptance_state: String,
+    pub event_count: usize,
+    pub successful_events: usize,
+    pub submitted_order_events: usize,
+    pub non_submitted_events: usize,
+    pub response_timing_sample_count: usize,
+    pub events_per_second: f64,
     pub signals_per_second: f64,
+    pub dropped_telemetry_events: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrent_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distinct_symbols: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burst_throughput_events_per_second: Option<f64>,
     pub measurements: std::collections::BTreeMap<String, BenchmarkLatencyDistribution>,
+    /// Boundaries that this AutoTrader executable cannot measure. In
+    /// particular, raw market ingress and its upstream feature evaluation
+    /// belong to Insights, not this process.
+    pub unsupported_boundaries: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exchange_network_latency: Option<BenchmarkLatencyDistribution>,
 }
+
+pub const AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE: &str =
+    "unaccepted_release_execution_and_independent_review_required";
+pub const AUTOTRADER_SUBMIT_TIMING_BOUNDARIES: &[&str] = &[
+    "order_payload_ready_after_local_construction",
+    "position_management_rsocket_request_response",
+];
+
+fn response_timing_boundaries(response: &serde_json::Value) -> Option<(f64, f64)> {
+    let timings = response.get("performance_timing_boundaries")?;
+    if timings.get("submit_ready_boundary")?.as_str()? != AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[0]
+        || timings.get("rsocket_boundary")?.as_str()? != AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[1]
+        || timings.get("acceptance_state")?.as_str()? != BENCHMARK_ACCEPTANCE_STATE
+    {
+        return None;
+    }
+    Some((
+        timings.get("request_prepare_local_ms")?.as_f64()?,
+        timings.get("rsocket_request_response_ms")?.as_f64()?,
+    ))
+}
+
+fn cycle_submission_decision_id(cycle: &CycleResult) -> Option<String> {
+    cycle
+        .entry_diagnostic
+        .as_ref()?
+        .candidate_decision_ids
+        .first()
+        .cloned()
+}
+
+async fn wait_for_shared_state_order_timings(
+    state: &AutoTraderState,
+    decision_id: &str,
+) -> Option<(f64, f64)> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        let timing = {
+            let settings = state.settings.lock().await;
+            settings
+                .orders
+                .iter()
+                .find(|order| order.decision_id.as_deref() == Some(decision_id))
+                .and_then(|order| {
+                    Some((
+                        *order.stage_timings_ms.get("order_request_prepare_local")?,
+                        *order.stage_timings_ms.get("client_request_to_headers")?,
+                    ))
+                })
+        };
+        if timing.is_some() {
+            return timing;
+        }
+        tokio::task::yield_now().await;
+    }
+    None
+}
+
+fn production_path_measurements(
+    event_samples_ms: Vec<f64>,
+    submit_ready_samples_ms: Vec<f64>,
+    transport_samples_ms: Vec<f64>,
+    queue_wait_samples_ms: Vec<f64>,
+    cycle_lock_wait_samples_ms: Vec<f64>,
+    successful_events: usize,
+    submitted_order_events: usize,
+    dropped_telemetry_events: usize,
+    measured_elapsed: std::time::Duration,
+    concurrent_events: Option<usize>,
+    distinct_symbols: Option<usize>,
+) -> ProductionPathBenchmarkMeasurements {
+    let event_count = event_samples_ms.len();
+    let response_timing_sample_count = submit_ready_samples_ms
+        .len()
+        .min(transport_samples_ms.len());
+    let elapsed_seconds = measured_elapsed.as_secs_f64();
+    ProductionPathBenchmarkMeasurements {
+        event_latency: BenchmarkLatencyDistribution::from_samples_ms(event_samples_ms),
+        submit_ready_local: (!submit_ready_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(submit_ready_samples_ms)),
+        position_management_rsocket: (!transport_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(transport_samples_ms)),
+        event_count,
+        successful_events,
+        submitted_order_events,
+        non_submitted_events: event_count.saturating_sub(submitted_order_events),
+        response_timing_sample_count,
+        queue_wait: (!queue_wait_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(queue_wait_samples_ms)),
+        cycle_lock_wait: (!cycle_lock_wait_samples_ms.is_empty())
+            .then(|| BenchmarkLatencyDistribution::from_samples_ms(cycle_lock_wait_samples_ms)),
+        dropped_telemetry_events,
+        concurrent_events,
+        distinct_symbols,
+        burst_throughput_events_per_second: concurrent_events.map(|_| {
+            if elapsed_seconds > 0.0 {
+                event_count as f64 / elapsed_seconds
+            } else {
+                0.0
+            }
+        }),
+        elapsed_ms: measured_elapsed.as_secs_f64() * 1_000.0,
+        events_per_second: if elapsed_seconds > 0.0 {
+            event_count as f64 / elapsed_seconds
+        } else {
+            0.0
+        },
+    }
+}
+
+/// Invoke actual precomputed-signal ingress for a sequence of deterministic
+/// Dashboard events on one shared AutoTraderState/settings path. The cycle-
+/// return distribution stops after in-memory reservation. Since the
+/// production submit task runs asynchronously, this function then reads the
+/// resulting per-order local request-preparation and RSocket timings from the
+/// same state; the wait for those timings is excluded from event latency.
+async fn benchmark_precomputed_signal_ingress<F>(
+    state: AutoTraderState,
+    event_count: usize,
+    mut fixture: F,
+) -> ProductionPathBenchmarkMeasurements
+where
+    F: FnMut(usize) -> Dashboard,
+{
+    use std::time::Instant;
+    assert!(event_count > 0, "benchmark event count must be positive");
+    let state = Arc::new(state);
+    let mut event_samples_ms = Vec::with_capacity(event_count);
+    let mut successful_events = 0;
+    let mut pending_decision_ids = Vec::with_capacity(event_count);
+    let mut queue_wait_samples_ms = Vec::with_capacity(event_count);
+    let mut dropped_telemetry_events = 0_usize;
+    let mut submit_ready_samples_ms = Vec::with_capacity(event_count);
+    let mut transport_samples_ms = Vec::with_capacity(event_count);
+    let workload_started = Instant::now();
+    for index in 0..event_count {
+        let mut dashboard = fixture(index);
+        if let Some(queue_wait_ms) = dashboard.queue_wait_ms {
+            queue_wait_samples_ms.push(queue_wait_ms);
+        }
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        for signal in &mut dashboard.best {
+            signal.timestamp = timestamp_ms;
+        }
+        let dropped_before = state.audit_tx.dropped.load(Ordering::Relaxed)
+            + state.execution_audit_tx.dropped.load(Ordering::Relaxed);
+        let started = Instant::now();
+        let result = run_cycle_inner(&state, dashboard).await;
+        event_samples_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+        successful_events += usize::from(result.is_ok());
+        let decision_id = match &result {
+            Ok(cycle) if cycle.status == "order_submitting" => cycle_submission_decision_id(cycle),
+            _ => None,
+        };
+        if let Some(decision_id) = decision_id {
+            pending_decision_ids.push(decision_id);
+        }
+        let dropped_after = state.audit_tx.dropped.load(Ordering::Relaxed)
+            + state.execution_audit_tx.dropped.load(Ordering::Relaxed);
+        dropped_telemetry_events = dropped_telemetry_events
+            .saturating_add(dropped_after.saturating_sub(dropped_before) as usize);
+        let _ = std::hint::black_box(result);
+    }
+    let measured_elapsed = workload_started.elapsed();
+    let submitted_order_events = pending_decision_ids.len();
+    for decision_id in pending_decision_ids {
+        if let Some((local_ms, transport_ms)) =
+            wait_for_shared_state_order_timings(&state, &decision_id).await
+        {
+            submit_ready_samples_ms.push(local_ms);
+            transport_samples_ms.push(transport_ms);
+        }
+    }
+    let cycle_lock_wait_samples_ms = state
+        .cycle_lock_wait_ms
+        .lock()
+        .await
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    production_path_measurements(
+        event_samples_ms,
+        submit_ready_samples_ms,
+        transport_samples_ms,
+        queue_wait_samples_ms,
+        cycle_lock_wait_samples_ms,
+        successful_events,
+        submitted_order_events,
+        dropped_telemetry_events,
+        measured_elapsed,
+        None,
+        None,
+    )
+}
+
+/// Run a simultaneous cross-symbol burst through the production precomputed
+/// signal cycle. Event latency begins when each item is dispatched into the
+/// task set and includes task scheduling/queue wait plus every production
+/// decision gate until local reservation or rejection. Async Position
+/// Management response timing is read afterward from each event's order
+/// stage record and remains a separate distribution.
+async fn benchmark_precomputed_signal_ingress_burst(
+    event_count: usize,
+) -> ProductionPathBenchmarkMeasurements {
+    use std::time::Instant;
+    const SYMBOLS: [&str; 4] = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"];
+    assert!(
+        event_count >= 128,
+        "cross-symbol burst requires at least 128 events"
+    );
+    let state = Arc::new(benchmark_precomputed_ingress_state("ingress-burst"));
+    let dashboards = (0..event_count)
+        .map(|index| benchmark_precomputed_ingress_dashboard(index, SYMBOLS[index % SYMBOLS.len()]))
+        .collect::<Vec<_>>();
+    let mut tasks = JoinSet::new();
+    let workload_started = Instant::now();
+    for mut dashboard in dashboards {
+        let state = Arc::clone(&state);
+        let enqueued_at = Instant::now();
+        dashboard.queued_at = Some(enqueued_at);
+        tasks.spawn(async move {
+            let queue_wait_ms = enqueued_at.elapsed().as_secs_f64() * 1_000.0;
+            dashboard.queue_wait_ms = Some(queue_wait_ms);
+            let result = run_cycle_inner(&state, dashboard).await;
+            let event_latency_ms = enqueued_at.elapsed().as_secs_f64() * 1_000.0;
+            let decision_id = match &result {
+                Ok(cycle) if cycle.status == "order_submitting" => {
+                    cycle_submission_decision_id(cycle)
+                }
+                _ => None,
+            };
+            (event_latency_ms, queue_wait_ms, result.is_ok(), decision_id)
+        });
+    }
+
+    let mut event_samples_ms = Vec::with_capacity(event_count);
+    let mut queue_wait_samples_ms = Vec::with_capacity(event_count);
+    let mut successful_events = 0;
+    let mut submitted_order_events = 0;
+    let mut pending_decision_ids = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((latency_ms, queue_wait_ms, successful, decision_id)) => {
+                event_samples_ms.push(latency_ms);
+                queue_wait_samples_ms.push(queue_wait_ms);
+                successful_events += usize::from(successful);
+                if let Some(decision_id) = decision_id {
+                    submitted_order_events += 1;
+                    pending_decision_ids.push(decision_id);
+                }
+            }
+            Err(_) => {
+                // A worker panic still contributes an event sample and reduces
+                // the success count; the enclosing burst keeps every outcome.
+                event_samples_ms.push(workload_started.elapsed().as_secs_f64() * 1_000.0);
+            }
+        }
+    }
+    let measured_elapsed = workload_started.elapsed();
+
+    let mut submit_ready_samples_ms = Vec::with_capacity(pending_decision_ids.len());
+    let mut transport_samples_ms = Vec::with_capacity(pending_decision_ids.len());
+    for decision_id in pending_decision_ids {
+        if let Some((local_ms, transport_ms)) =
+            wait_for_shared_state_order_timings(&state, &decision_id).await
+        {
+            submit_ready_samples_ms.push(local_ms);
+            transport_samples_ms.push(transport_ms);
+        }
+    }
+    let dropped_telemetry_events = (state.audit_tx.dropped.load(Ordering::Relaxed)
+        + state.execution_audit_tx.dropped.load(Ordering::Relaxed))
+        as usize;
+    let cycle_lock_wait_samples_ms = state
+        .cycle_lock_wait_ms
+        .lock()
+        .await
+        .values()
+        .flatten()
+        .copied()
+        .collect();
+    production_path_measurements(
+        event_samples_ms,
+        submit_ready_samples_ms,
+        transport_samples_ms,
+        queue_wait_samples_ms,
+        cycle_lock_wait_samples_ms,
+        successful_events,
+        submitted_order_events,
+        dropped_telemetry_events,
+        measured_elapsed,
+        Some(event_count),
+        Some(SYMBOLS.len()),
+    )
+}
+
+/// Invoke the production exit decision and IOC submission path repeatedly on
+/// one shared AutoTraderState/settings path. Response timing is split into
+/// local request preparation and Position Management RSocket round trip.
+async fn benchmark_emergency_ioc_exit_path(
+    state: AutoTraderState,
+    symbol: String,
+    strategy_key: String,
+    position: TraderPosition,
+    market: serde_json::Value,
+    event_count: usize,
+) -> ProductionPathBenchmarkMeasurements {
+    let state = Arc::new(state);
+    measure_production_path_events(
+        event_count,
+        |_| {
+            let state = Arc::clone(&state);
+            let symbol = symbol.clone();
+            let strategy_key = strategy_key.clone();
+            let position = position.clone();
+            let market = market.clone();
+            let mut inputs = BTreeMap::from([(symbol.clone(), market)]);
+            async move {
+                evaluate_position_exit(&state, symbol, strategy_key, position, &mut inputs).await
+            }
+        },
+        |result| {
+            result
+                .as_ref()
+                .and_then(|cycle| cycle.order_response.as_ref())
+                .and_then(response_timing_boundaries)
+        },
+    )
+    .await
+}
+
+fn benchmark_fixture_state(settings: Settings, workload: &str, index: usize) -> AutoTraderState {
+    let mut state = benchmark_snapshot_state(settings);
+    // Production-path fixtures must preserve the actual audit availability
+    // gate. The generic snapshot microbenchmark uses one-byte queues because
+    // it never enqueues production events; that capacity rejects every audit
+    // and correctly pauses real signal entries.
+    state.audit_tx = AuditQueue::new(
+        DECISION_AUDIT_QUEUE_CAPACITY,
+        DECISION_AUDIT_QUEUE_MAX_BYTES,
+    );
+    state.execution_audit_tx = AuditQueue::new(
+        EXECUTION_AUDIT_QUEUE_CAPACITY,
+        EXECUTION_AUDIT_QUEUE_MAX_BYTES,
+    );
+    let fixture_id = format!("{}-{workload}-{index}", std::process::id());
+    state.settings_path = std::env::temp_dir().join(format!("auto-trader-bench-{fixture_id}.json"));
+    state.dated_carry_path =
+        std::env::temp_dir().join(format!("auto-trader-bench-{fixture_id}.dated-carry.json"));
+    state
+}
+
+fn cleanup_benchmark_fixture_files(workload: &str, fixture_instances: usize) {
+    for index in 0..fixture_instances {
+        let fixture_id = format!("{}-{workload}-{index}", std::process::id());
+        let settings_path =
+            std::env::temp_dir().join(format!("auto-trader-bench-{fixture_id}.json"));
+        let carry_path =
+            std::env::temp_dir().join(format!("auto-trader-bench-{fixture_id}.dated-carry.json"));
+        let _ = std::fs::remove_file(settings_path);
+        let _ = std::fs::remove_file(carry_path);
+    }
+}
+
+fn benchmark_local_market(updated_at_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "updated_at_ms": updated_at_ms,
+        "bids": [{"price": 99.99, "size": 100.0}],
+        "asks": [{"price": 100.01, "size": 100.0}],
+        "bid": 99.99,
+        "ask": 100.01
+    })
+}
+
+fn benchmark_precomputed_ingress_state(workload: &str) -> AutoTraderState {
+    let strategy =
+        Strategy::from_name("live-momentum").expect("benchmark live strategy must be registered");
+    let mut settings = Settings::default();
+    settings.strategies = vec![strategy];
+    settings.signal_strategies_enabled = true;
+    benchmark_fixture_state(settings, workload, 0)
+}
+
+fn benchmark_precomputed_ingress_dashboard(index: usize, symbol: &str) -> Dashboard {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let strategy =
+        Strategy::from_name("live-momentum").expect("benchmark live strategy must be registered");
+    let mut signal = benchmark_signal("live-momentum", true);
+    signal.symbol = symbol.to_owned();
+    signal.timestamp = timestamp_ms;
+    signal.strategy_decision = Some(serde_json::json!({
+        "live_worker_decision": "enter",
+        "live_worker_event_id": format!("benchmark-live-event-{index}"),
+        "live_worker_decision_id": format!("benchmark-live-decision-{index}"),
+        "score": 1.0,
+        "strength": 1.0,
+        "observed_close": 100.0,
+        "primary_level": 99.0,
+        "secondary_level": 99.0,
+        "primary_metric_value": 1.0,
+        "strategy_order_size_multiplier": 0.5
+    }));
+    let parameters = strategy
+        .parameter_specs()
+        .into_iter()
+        .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+        .collect::<BTreeMap<_, _>>();
+    signal.strategy_decision.as_mut().unwrap()["strategy_parameters"] =
+        serde_json::json!(parameters);
+    let market = benchmark_local_market(timestamp_ms);
+    Dashboard {
+        best: vec![signal],
+        missed_opportunity_bands: Arc::new(Vec::new()),
+        markets: Arc::new(BTreeMap::from([(symbol.to_owned(), market)])),
+        queued_at: None,
+        queue_wait_ms: None,
+    }
+}
+
+fn benchmark_emergency_exit_fixture(
+    index: usize,
+) -> (
+    AutoTraderState,
+    String,
+    String,
+    TraderPosition,
+    serde_json::Value,
+) {
+    let symbol = "BTC-USDT".to_owned();
+    let strategy = "live-vwap-dislocation".to_owned();
+    let position = TraderPosition {
+        quantity: 1.0,
+        average_entry_price: 100.0,
+        entry_decision_id: Some(format!("benchmark-exit-entry-{index}")),
+        strategy: Some(strategy.clone()),
+        stop_loss_percent: Some(1.0),
+        ..TraderPosition::default()
+    };
+    let mut settings = Settings::default();
+    settings.stop_loss_percent = 1.0;
+    settings.take_profit_percent = 2.0;
+    settings.positions.insert(symbol.clone(), position.clone());
+    settings.strategy_positions.insert(
+        symbol.clone(),
+        BTreeMap::from([(strategy.clone(), position.clone())]),
+    );
+    let state = benchmark_fixture_state(settings, "emergency", index);
+    let market = serde_json::json!({"bid": 98.5, "ask": 99.5});
+    (state, symbol, strategy, position, market)
+}
+
+/// Run actual production ingress and emergency-stop wrappers against an
+/// ephemeral local RSocket service double, and return separate machine-readable
+/// evidence records. The service responds deterministically with zero fills;
+/// the resulting records remain unaccepted and cannot satisfy release gates.
+pub async fn run_local_production_path_benchmarks(
+    event_count: usize,
+    hardware: String,
+    git_head: String,
+    build_mode: String,
+) -> anyhow::Result<Vec<AutoTraderPerformanceEvidence>> {
+    use rsocket_rust::prelude::*;
+    use rsocket_rust_transport_websocket::WebsocketServerTransport;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex as StdMutex,
+    };
+
+    #[derive(Clone)]
+    struct ServiceDouble(Arc<StdMutex<Vec<crate::service_rpc::RpcRequest>>>);
+
+    #[rsocket_rust::async_trait]
+    impl RSocket for ServiceDouble {
+        async fn metadata_push(&self, _: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn fire_and_forget(&self, _: Payload) -> anyhow::Result<()> {
+            anyhow::bail!("unsupported")
+        }
+        async fn request_response(&self, payload: Payload) -> anyhow::Result<Option<Payload>> {
+            let request = serde_json::from_slice::<crate::service_rpc::RpcRequest>(
+                payload
+                    .data()
+                    .ok_or_else(|| anyhow::anyhow!("request data missing"))?
+                    .as_ref(),
+            )?;
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+            let (status, body) = match (request.method.as_str(), request.path.as_str()) {
+                ("POST", "/positions/orders") => (
+                    200,
+                    serde_json::json!({
+                        "status": "accepted",
+                        "filled_quantity": 0.0,
+                        "average_execution_price": null,
+                        "estimated_fee": 0.0,
+                        "order": {}
+                    }),
+                ),
+                ("DELETE", _) => (200, serde_json::json!({})),
+                _ => (
+                    404,
+                    serde_json::json!({"error": "unexpected benchmark route"}),
+                ),
+            };
+            let response = crate::service_rpc::RpcResponse {
+                status,
+                body,
+                headers: BTreeMap::from([("x-position-manager-handler-ms".into(), "0.01".into())]),
+            };
+            Ok(Some(
+                Payload::builder()
+                    .set_data(serde_json::to_vec(&response)?)
+                    .build(),
+            ))
+        }
+        fn request_stream(&self, _: Payload) -> Flux<anyhow::Result<Payload>> {
+            Box::pin(futures_util::stream::empty())
+        }
+        fn request_channel(
+            &self,
+            _: Flux<anyhow::Result<Payload>>,
+        ) -> Flux<anyhow::Result<Payload>> {
+            Box::pin(futures_util::stream::empty())
+        }
+    }
+
+    static RUN_ID: AtomicU64 = AtomicU64::new(1);
+    anyhow::ensure!(event_count > 0, "benchmark event count must be positive");
+    let _env_guard = service_endpoint_environment_lock();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let endpoint = format!("ws://{address}");
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let service = ServiceDouble(Arc::clone(&requests));
+    let server = tokio::spawn(async move {
+        RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_, _| Ok(Box::new(service.clone()))))
+            .serve()
+            .await
+            .expect("local benchmark RSocket service must run");
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let previous_endpoint = std::env::var_os("POSITION_MANAGEMENT_RSOCKET_URL");
+    unsafe { std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &endpoint) };
+    let ingress_state = benchmark_precomputed_ingress_state("ingress");
+    let ingress = benchmark_precomputed_signal_ingress(ingress_state, event_count, |index| {
+        benchmark_precomputed_ingress_dashboard(index, "BTC-USDT")
+    })
+    .await;
+    let (emergency_state, symbol, strategy, position, market) = benchmark_emergency_exit_fixture(0);
+    let emergency = benchmark_emergency_ioc_exit_path(
+        emergency_state,
+        symbol,
+        strategy,
+        position,
+        market,
+        event_count,
+    )
+    .await;
+    let burst_event_count = event_count.max(128);
+    let burst = benchmark_precomputed_signal_ingress_burst(burst_event_count).await;
+    if let Some(previous) = previous_endpoint {
+        unsafe { std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", previous) };
+    } else {
+        unsafe { std::env::remove_var("POSITION_MANAGEMENT_RSOCKET_URL") };
+    }
+    server.abort();
+    cleanup_benchmark_fixture_files("ingress", 1);
+    cleanup_benchmark_fixture_files("emergency", 1);
+    cleanup_benchmark_fixture_files("ingress-burst", 1);
+
+    let seen_requests = requests
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    anyhow::ensure!(
+        ingress.event_latency.sample_count == event_count
+            && ingress.response_timing_sample_count > 0
+            && ingress.response_timing_sample_count <= event_count
+            && ingress.response_timing_sample_count == ingress.submitted_order_events,
+        "precomputed ingress event/submit/response samples: {}/{}/{} for {event_count} events",
+        ingress.event_latency.sample_count,
+        ingress.submitted_order_events,
+        ingress.response_timing_sample_count,
+    );
+    anyhow::ensure!(
+        emergency.event_latency.sample_count == event_count
+            && emergency.submitted_order_events == event_count
+            && emergency.response_timing_sample_count == event_count,
+        "emergency exit event/submit/response samples: {}/{}/{} for {event_count} events",
+        emergency.event_latency.sample_count,
+        emergency.submitted_order_events,
+        emergency.response_timing_sample_count,
+    );
+    anyhow::ensure!(
+        burst.event_count == burst_event_count
+            && burst.concurrent_events == Some(burst_event_count)
+            && burst.distinct_symbols == Some(4)
+            && burst.event_latency.sample_count == burst_event_count
+            && burst.submitted_order_events <= 4
+            && burst.response_timing_sample_count > 0
+            && burst.response_timing_sample_count <= burst_event_count
+            && burst.response_timing_sample_count == burst.submitted_order_events,
+        "cross-symbol burst evidence incomplete: {} event samples for {} events, {} submits, {} responses, {:?} concurrent, {:?} symbols",
+        burst.event_latency.sample_count,
+        burst.event_count,
+        burst.submitted_order_events,
+        burst.response_timing_sample_count,
+        burst.concurrent_events,
+        burst.distinct_symbols,
+    );
+    anyhow::ensure!(
+        seen_requests
+            .iter()
+            .filter(|request| request.method == "POST" && request.path == "/positions/orders")
+            .count()
+            >= ingress.response_timing_sample_count
+                + emergency.response_timing_sample_count
+                + burst.response_timing_sample_count,
+        "local service double did not receive both production order workloads"
+    );
+    anyhow::ensure!(
+        seen_requests
+            .iter()
+            .filter(|request| {
+                request.method == "POST"
+                    && request.path == "/positions/orders"
+                    && request
+                        .body
+                        .as_ref()
+                        .and_then(|body| body.get("order_type"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("ioc")
+                    && request
+                        .body
+                        .as_ref()
+                        .and_then(|body| body.get("reduce_only"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            })
+            .count()
+            >= emergency.response_timing_sample_count,
+        "local service double did not observe the emergency IOC reduce-only submissions"
+    );
+    drop(seen_requests);
+
+    let config = serde_json::json!({
+        "fixture_version": 1,
+        "event_count": event_count,
+        "burst_event_count": burst_event_count,
+        "burst_symbols": ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT"],
+        "state_model": "one-shared-autotrader-state-and-settings-path-per-workload",
+        "position_management": "local-rsocket-zero-fill-double",
+        "ingress": "live-momentum-precomputed-enter",
+        "emergency_exit": "one-percent-stop-loss-ioc"
+    });
+    use sha2::Digest as _;
+    let config_hash = format!(
+        "sha256:v1:{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&config)?)
+    );
+    let run_id = RUN_ID.fetch_add(1, Ordering::Relaxed);
+    let build_mode = if cfg!(debug_assertions) {
+        "debug".to_owned()
+    } else {
+        build_mode
+    };
+    let records = vec![
+        AutoTraderPerformanceEvidence::from_production_measurements(
+            &format!("autotrader-precomputed-ingress-{run_id}"),
+            &ingress,
+            hardware.clone(),
+            git_head.clone(),
+            build_mode.clone(),
+            config_hash.clone(),
+        ),
+        AutoTraderPerformanceEvidence::from_production_measurements(
+            &format!("autotrader-emergency-ioc-exit-{run_id}"),
+            &emergency,
+            hardware.clone(),
+            git_head.clone(),
+            build_mode.clone(),
+            config_hash.clone(),
+        ),
+        AutoTraderPerformanceEvidence::from_production_measurements(
+            &format!("autotrader-precomputed-ingress-burst-{run_id}"),
+            &burst,
+            hardware,
+            git_head,
+            build_mode,
+            config_hash,
+        ),
+    ];
+    Ok(records)
+}
+
+/// The AutoTrader executable receives already-computed strategy signals.
+/// There is no supported raw-market-to-feature-evaluation boundary in this
+/// crate, so performance evidence emitted here must preserve this limitation.
+pub const AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES: &[&str] = &[
+    "raw market event ingress and upstream Insights feature evaluation",
+    "exchange transmission, acknowledgement, and fill latency (unless supplied as separate transport evidence)",
+];
 
 impl AutoTraderPerformanceEvidence {
     /// Persist input for performance_gate.py. The writer does not run the gate
@@ -114,6 +950,91 @@ impl AutoTraderPerformanceEvidence {
     pub fn write_json(&self, path: &std::path::Path) -> std::io::Result<()> {
         let bytes = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, bytes)
+    }
+
+    pub fn from_production_measurements(
+        workload_id: &str,
+        measurements: &ProductionPathBenchmarkMeasurements,
+        hardware: String,
+        git_head: String,
+        build_mode: String,
+        benchmark_config_sha256: String,
+    ) -> Self {
+        let mut distributions = BTreeMap::from([(
+            format!("{workload_id}.event_latency"),
+            measurements.event_latency.clone(),
+        )]);
+        if let Some(distribution) = &measurements.queue_wait {
+            distributions.insert(format!("{workload_id}.queue_wait"), distribution.clone());
+        }
+        if let Some(distribution) = &measurements.cycle_lock_wait {
+            distributions.insert(
+                format!("{workload_id}.cycle_lock_wait"),
+                distribution.clone(),
+            );
+        }
+        if let Some(distribution) = &measurements.submit_ready_local {
+            distributions.insert(
+                format!("{workload_id}.submit_ready_local"),
+                distribution.clone(),
+            );
+        }
+        if let Some(distribution) = &measurements.position_management_rsocket {
+            distributions.insert(
+                format!("{workload_id}.position_management_rsocket_request_response"),
+                distribution.clone(),
+            );
+        }
+        Self {
+            hardware,
+            git_head,
+            build_mode,
+            measurement_scope: "AutoTrader production orchestration using one shared AutoTraderState and persisted settings path per workload with deterministic local Position Management RSocket double".into(),
+            workload_id: workload_id.to_owned(),
+            event_latency_boundary: if workload_id.contains("precomputed-ingress") {
+                "run_cycle_inner return after local order reservation; asynchronous submit-ready preparation and RSocket response are separate distributions".into()
+            } else {
+                "evaluate_position_exit return after production IOC submission response".into()
+            },
+            measurement_definition: format!(
+                "event latency measured at the documented production wrapper boundary; {} total events, {} completed operations, {} order-submitting events, {} rejected/skipped events, {:.3} events/sec; submit-ready and RSocket distributions use {} response timing samples; {} audit telemetry events dropped; concurrency={:?}; distinct_symbols={:?}; burst_throughput_events_per_second={:?}; cycle_lock_wait_samples={}",
+                measurements.event_count,
+                measurements.successful_events,
+                measurements.submitted_order_events,
+                measurements.non_submitted_events,
+                measurements.events_per_second,
+                measurements.response_timing_sample_count,
+                measurements.dropped_telemetry_events,
+                measurements.concurrent_events,
+                measurements.distinct_symbols,
+                measurements.burst_throughput_events_per_second,
+                measurements.cycle_lock_wait.as_ref().map_or(0, |distribution| distribution.sample_count),
+            ),
+            benchmark_config_sha256,
+            sampling_method: if measurements.concurrent_events.is_some() {
+                "concurrent cross-symbol burst on one shared AutoTraderState/settings path; every dispatched event is timed including rejected/errors; response distributions include events with production timing metadata".into()
+            } else {
+                "sequential events on one shared AutoTraderState/settings path; every event is timed, response distributions include events with production timing metadata".into()
+            },
+            acceptance_state: AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE.to_owned(),
+            event_count: measurements.event_count,
+            successful_events: measurements.successful_events,
+            submitted_order_events: measurements.submitted_order_events,
+            non_submitted_events: measurements.non_submitted_events,
+            response_timing_sample_count: measurements.response_timing_sample_count,
+            events_per_second: measurements.events_per_second,
+            dropped_telemetry_events: measurements.dropped_telemetry_events,
+            concurrent_events: measurements.concurrent_events,
+            distinct_symbols: measurements.distinct_symbols,
+            burst_throughput_events_per_second: measurements.burst_throughput_events_per_second,
+            signals_per_second: measurements.events_per_second,
+            measurements: distributions,
+            unsupported_boundaries: AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES
+                .iter()
+                .map(|boundary| (*boundary).to_owned())
+                .collect(),
+            exchange_network_latency: None,
+        }
     }
 }
 
@@ -133,15 +1054,177 @@ mod benchmark_measurement_tests {
         assert_eq!(distribution.p999_ms, 999.0);
     }
 
+    #[test]
+    fn production_benchmark_metadata_keeps_submit_boundaries_and_limits_explicit() {
+        assert_eq!(AUTOTRADER_SUBMIT_TIMING_BOUNDARIES.len(), 2);
+        assert_ne!(
+            AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[0],
+            AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[1]
+        );
+        assert!(AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE.starts_with("unaccepted_"));
+        assert!(AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES
+            .iter()
+            .any(|boundary| boundary.contains("raw market event ingress")));
+    }
+
+    #[test]
+    fn response_timing_parser_keeps_local_and_rsocket_samples_at_distinct_boundaries() {
+        let response = serde_json::json!({
+            "performance_timing_boundaries": {
+                "submit_ready_boundary": AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[0],
+                "request_prepare_local_ms": 1.25,
+                "rsocket_boundary": AUTOTRADER_SUBMIT_TIMING_BOUNDARIES[1],
+                "rsocket_request_response_ms": 7.5,
+                "acceptance_state": BENCHMARK_ACCEPTANCE_STATE,
+            }
+        });
+        assert_eq!(response_timing_boundaries(&response), Some((1.25, 7.5)));
+
+        let mut mismatched = response;
+        mismatched["performance_timing_boundaries"]["rsocket_boundary"] =
+            serde_json::json!("exchange_acknowledgement");
+        assert_eq!(response_timing_boundaries(&mismatched), None);
+    }
+
     #[tokio::test]
     async fn async_measurement_counts_failed_events_in_the_sample_population() {
-        let (distribution, elapsed, successful) = measure_async_benchmark_events(4, |index| async move {
-            if index == 1 { Err("deterministic rejection") } else { Ok(index) }
-        })
-        .await;
+        let (distribution, elapsed, successful) =
+            measure_async_benchmark_events(4, |index| async move {
+                if index == 1 {
+                    Err("deterministic rejection")
+                } else {
+                    Ok(index)
+                }
+            })
+            .await;
         assert_eq!(distribution.sample_count, 4);
         assert_eq!(successful, 3);
         assert!(!elapsed.is_zero());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_rsocket_double_runs_production_paths_and_emits_unaccepted_evidence() {
+        const EVENT_COUNT: usize = 128;
+        let git_head_output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse HEAD must run to produce benchmark evidence metadata");
+        assert!(
+            git_head_output.status.success(),
+            "git rev-parse HEAD failed: {}",
+            String::from_utf8_lossy(&git_head_output.stderr)
+        );
+        let git_head = String::from_utf8_lossy(&git_head_output.stdout)
+            .trim()
+            .to_owned();
+        assert!(
+            !git_head.is_empty(),
+            "git rev-parse HEAD returned an empty hash"
+        );
+        let source_status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=normal"])
+            .output()
+            .expect("git status must run to determine the benchmark source-tree state");
+        assert!(
+            source_status.status.success(),
+            "git status failed: {}",
+            String::from_utf8_lossy(&source_status.stderr)
+        );
+        let source_tree_dirty = !source_status.stdout.is_empty();
+        let mut records = run_local_production_path_benchmarks(
+            EVENT_COUNT,
+            format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            git_head,
+            "release".into(),
+        )
+        .await
+        .expect("deterministic local fixture should run both production paths");
+        assert_eq!(records.len(), 3);
+        for record in &mut records {
+            record
+                .sampling_method
+                .push_str(&format!("; source_tree_dirty={source_tree_dirty}"));
+        }
+        println!(
+            "AUTOTRADER_PERFORMANCE_EVIDENCE_JSON={}",
+            serde_json::to_string(&records).expect("evidence JSON must serialize")
+        );
+        for record in records {
+            assert_eq!(
+                record.acceptance_state,
+                AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE
+            );
+            assert!(record
+                .measurement_scope
+                .contains("local Position Management RSocket double"));
+            assert!(record
+                .measurement_scope
+                .contains("one shared AutoTraderState"));
+            assert!(record
+                .unsupported_boundaries
+                .iter()
+                .any(|boundary| { boundary.contains("raw market event ingress") }));
+            assert_eq!(record.event_count, EVENT_COUNT);
+            assert!(record.successful_events <= EVENT_COUNT);
+            assert!(record.submitted_order_events <= EVENT_COUNT);
+            assert_eq!(
+                record.non_submitted_events,
+                EVENT_COUNT - record.submitted_order_events
+            );
+            assert!(record.events_per_second.is_finite() && record.events_per_second > 0.0);
+            assert!(record.response_timing_sample_count <= EVENT_COUNT);
+            assert_eq!(
+                record.response_timing_sample_count,
+                record.submitted_order_events
+            );
+            let burst = record.concurrent_events.is_some();
+            for (name, distribution) in &record.measurements {
+                if name.ends_with(".event_latency") || name.ends_with(".queue_wait") {
+                    assert_eq!(distribution.sample_count, EVENT_COUNT);
+                } else if name.ends_with(".cycle_lock_wait") {
+                    assert!(distribution.sample_count > 0);
+                } else {
+                    assert_eq!(
+                        distribution.sample_count,
+                        record.response_timing_sample_count
+                    );
+                }
+            }
+            if burst {
+                assert_eq!(record.concurrent_events, Some(EVENT_COUNT));
+                assert_eq!(record.distinct_symbols, Some(4));
+                assert!(record.submitted_order_events <= 4);
+                assert!(record.response_timing_sample_count > 0);
+                assert!(
+                    record
+                        .burst_throughput_events_per_second
+                        .unwrap_or_default()
+                        > 0.0
+                );
+                let queue = record
+                    .measurements
+                    .iter()
+                    .find(|(name, _)| name.ends_with(".queue_wait"))
+                    .expect("burst queue wait distribution is required");
+                assert_eq!(queue.1.sample_count, EVENT_COUNT);
+            } else if record.workload_id.contains("emergency-ioc-exit") {
+                assert_eq!(record.response_timing_sample_count, EVENT_COUNT);
+            } else {
+                assert!(record.response_timing_sample_count > 0);
+                assert!(record.response_timing_sample_count <= EVENT_COUNT);
+            }
+            assert!(record.measurements.len() >= 3);
+            let encoded = serde_json::to_vec(&record).expect("evidence must be machine-readable");
+            let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                decoded["acceptance_state"],
+                AUTOTRADER_BENCHMARK_ACCEPTANCE_STATE
+            );
+            assert_eq!(
+                decoded["unsupported_boundaries"][0],
+                AUTOTRADER_UNSUPPORTED_PERFORMANCE_BOUNDARIES[0]
+            );
+        }
     }
 }
 
@@ -194,6 +1277,7 @@ pub fn benchmark_autotrader_paths(iterations: usize) -> Vec<(String, f64)> {
             "bench-order",
             index as u64,
             false,
+            None,
         ));
     }
     results.push((
@@ -249,13 +1333,13 @@ pub fn benchmark_signal_settings_snapshot_path(iterations: usize) -> Vec<(String
             .collect();
         let state = benchmark_snapshot_state(settings);
         let us_per_operation = runtime.block_on(async {
-            snapshot_signal_settings(&state, &signal, u64::MAX - 1)
+            snapshot_signal_settings(&state, &signal, u64::MAX - 1, false)
                 .await
                 .expect("benchmark warmup signal must pass position gates");
             let started = Instant::now();
             for _ in 0..iterations {
                 black_box(
-                    snapshot_signal_settings(&state, &signal, u64::MAX - 1)
+                    snapshot_signal_settings(&state, &signal, u64::MAX - 1, false)
                         .await
                         .expect("benchmark signal must pass position gates"),
                 );
@@ -279,7 +1363,10 @@ pub fn benchmark_decision_parameters_path(
     use std::{hint::black_box, time::Instant};
 
     assert!(iterations > 0, "benchmark iterations must be positive");
-    assert!(retained_variants <= 20_000, "fixture supports at most 20,000 variants");
+    assert!(
+        retained_variants <= 20_000,
+        "fixture supports at most 20,000 variants"
+    );
     let mut settings = Settings::default();
     // Model a persisted learning state with many historical evidence entries;
     // only a small subset belongs to the profiles returned by this endpoint.
@@ -311,8 +1398,10 @@ pub fn benchmark_decision_parameters_path(
             },
         );
         if index < retained_variants {
-            settings.learned_profiles.entry(format!("{symbol}:live-momentum")).or_insert_with(|| {
-                strategy::StrategyProfile {
+            settings
+                .learned_profiles
+                .entry(format!("{symbol}:live-momentum"))
+                .or_insert_with(|| strategy::StrategyProfile {
                     profile_id: format!("{symbol}:live-momentum"),
                     version: 1,
                     symbol: symbol.clone(),
@@ -321,29 +1410,30 @@ pub fn benchmark_decision_parameters_path(
                     learning_samples: 0,
                     positive_samples: 0,
                     realized_pnl: 0.0,
-                }
-            });
-            settings.learned_scout_parameter_variants.push(strategy::ScoutParameterVariant {
-                symbol,
-                strategy: "live-momentum".into(),
-                market_regime: None,
-                baseline_profile_id: String::new(),
-                parameter: "minimum_momentum".into(),
-                candidate_value: 0.01,
-                sample_count: index,
-                minimum_samples: 10,
-                average_net_improvement_percent: 0.02,
-                lower_90_one_sided_improvement_percent: Some(0.01),
-                upper_90_one_sided_improvement_percent: Some(0.03),
-                paired_baseline_increase_samples: 5,
-                paired_baseline_decrease_samples: 4,
-                paired_baseline_same_samples: 1,
-                paired_baseline_unknown_samples: 0,
-                paired_baseline_delta_mean: Some(0.02),
-                paired_baseline_delta_samples: 10,
-                promoted: false,
-                rejected: false,
-            });
+                });
+            settings
+                .learned_scout_parameter_variants
+                .push(strategy::ScoutParameterVariant {
+                    symbol,
+                    strategy: "live-momentum".into(),
+                    market_regime: None,
+                    baseline_profile_id: String::new(),
+                    parameter: "minimum_momentum".into(),
+                    candidate_value: 0.01,
+                    sample_count: index,
+                    minimum_samples: 10,
+                    average_net_improvement_percent: 0.02,
+                    lower_90_one_sided_improvement_percent: Some(0.01),
+                    upper_90_one_sided_improvement_percent: Some(0.03),
+                    paired_baseline_increase_samples: 5,
+                    paired_baseline_decrease_samples: 4,
+                    paired_baseline_same_samples: 1,
+                    paired_baseline_unknown_samples: 0,
+                    paired_baseline_delta_mean: Some(0.02),
+                    paired_baseline_delta_samples: 10,
+                    promoted: false,
+                    rejected: false,
+                });
         }
     }
     let symbols = strategy_profile_symbols(&settings);
@@ -392,20 +1482,63 @@ pub fn benchmark_decision_parameters_path(
         json_time += started.elapsed();
 
         let compact_started = Instant::now();
-        let catalog = strategies.iter().map(|strategy| (strategy.as_str().to_owned(),
-            strategy.parameter_specs().iter().map(|spec| (spec.key.as_str(), spec.label, spec.default, spec.min, spec.max, spec.step, spec.unit)).collect::<Vec<_>>()))
+        let catalog = strategies
+            .iter()
+            .map(|strategy| {
+                (
+                    strategy.as_str().to_owned(),
+                    strategy
+                        .parameter_specs()
+                        .iter()
+                        .map(|spec| {
+                            (
+                                spec.key.as_str(),
+                                spec.label,
+                                spec.default,
+                                spec.min,
+                                spec.max,
+                                spec.step,
+                                spec.unit,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
-        let values = profiles.iter().map(|profile| (&profile.symbol, &profile.strategy,
-            profile.learning_samples, profile.positive_rate, profile.realized_pnl,
-            profile.walk_forward_evidence.as_ref(), &profile.walk_forward_evidence_by_regime,
-            profile.parameters.iter().map(|parameter| (&parameter.key, parameter.value, parameter.learned_value, parameter.configured_value, parameter.overridden)).collect::<Vec<_>>()))
+        let values = profiles
+            .iter()
+            .map(|profile| {
+                (
+                    &profile.symbol,
+                    &profile.strategy,
+                    profile.learning_samples,
+                    profile.positive_rate,
+                    profile.realized_pnl,
+                    profile.walk_forward_evidence.as_ref(),
+                    &profile.walk_forward_evidence_by_regime,
+                    profile
+                        .parameters
+                        .iter()
+                        .map(|parameter| {
+                            (
+                                &parameter.key,
+                                parameter.value,
+                                parameter.learned_value,
+                                parameter.configured_value,
+                                parameter.overridden,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
             .collect::<Vec<_>>();
         let compact = serde_json::to_vec(black_box(&(catalog, values))).unwrap();
         compact_bytes = compact.len();
         black_box(compact);
         black_box(compact_started.elapsed());
     }
-    let to_us = |elapsed: std::time::Duration| elapsed.as_secs_f64() * 1_000_000.0 / iterations as f64;
+    let to_us =
+        |elapsed: std::time::Duration| elapsed.as_secs_f64() * 1_000_000.0 / iterations as f64;
     (
         to_us(snapshot_time),
         to_us(profile_time),
@@ -426,12 +1559,14 @@ fn benchmark_snapshot_state(settings: Settings) -> AutoTraderState {
         strategy_diagnostic: Arc::new(std::sync::Mutex::new(Vec::new())),
         latest_strategy_blockers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_worker_decisions: Arc::new(Mutex::new(BTreeMap::new())),
-            latest_worker_diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
+        latest_worker_diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
         seen_worker_decision_events: Arc::new(Mutex::new(BTreeMap::new())),
         enabled: Arc::new(AtomicBool::new(true)),
         settings: Arc::new(Mutex::new(settings)),
         activity_snapshot: Arc::new(Mutex::new(None)),
         settings_persist_notify: Arc::new(Notify::new()),
+        settings_persist_write_lock: Arc::new(Mutex::new(())),
+        durable_feedback_event_ids: Arc::new(Mutex::new(BTreeSet::new())),
         price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
         live_profile_updates: tokio::sync::broadcast::channel(1).0,

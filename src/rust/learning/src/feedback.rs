@@ -73,6 +73,10 @@ pub(super) async fn accept_feedback(
                 profile: None,
             }));
         }
+        // Keep the in-memory idempotency state aligned with the durable
+        // commit. If SQLite rejects this write, a retry in this process must
+        // be able to apply the event again.
+        let before_feedback = state.clone();
         const MAX_MISSED_OPPORTUNITY_JOBS: usize = 10_000;
         if state.missed_opportunity_jobs.len() >= MAX_MISSED_OPPORTUNITY_JOBS {
             let terminal = state
@@ -126,7 +130,10 @@ pub(super) async fn accept_feedback(
             },
         );
         finalize_feedback(&mut state, &event, event_id);
-        persist(&service.path, &state)?;
+        if let Err(error) = persist(&service.path, &state) {
+            *state = before_feedback;
+            return Err(error);
+        }
         return Ok(Json(FeedbackResult {
             accepted: true,
             duplicate: false,
@@ -164,6 +171,11 @@ pub(super) async fn accept_feedback(
         ));
     }
 
+    // Mutations below update profiles, replay jobs and the in-memory dedupe
+    // set together. Roll them all back if the corresponding SQLite
+    // transaction fails, so a same-process retry cannot be mistaken for a
+    // durable duplicate.
+    let before_feedback = state.clone();
     let profile_key = key(symbol, strategy);
     retention::ensure_active_profile_room(&state, &profile_key)?;
     if let Some(context) = event_context(&event) {
@@ -203,13 +215,17 @@ pub(super) async fn accept_feedback(
     train_threshold_parameters(&mut state, &event, symbol, strategy, &profile_key, &update);
     enqueue_strategy_replay(&mut state, &event);
     finalize_feedback(&mut state, &event, event_id);
-    if matches!(&event, FeedbackEvent::ScoutOutcome { .. })
+    let persistence = if matches!(&event, FeedbackEvent::ScoutOutcome { .. })
         && !full_persist_required
         && !outcome_history_compacted
     {
-        super::persist_scout_outcome_delta(&service.path, &state, &event)?;
+        super::persist_scout_outcome_delta(&service.path, &state, &event)
     } else {
-        persist(&service.path, &state)?;
+        persist(&service.path, &state)
+    };
+    if let Err(error) = persistence {
+        *state = before_feedback;
+        return Err(error);
     }
     Ok(Json(FeedbackResult {
         accepted: true,
@@ -271,6 +287,16 @@ fn validate_trade_replay_context(event: &FeedbackEvent) -> Result<(), (StatusCod
 fn enqueue_strategy_replay(state: &mut LearningState, event: &FeedbackEvent) {
     let FeedbackEvent::TradeOutcome {
         event_id,
+        schema_version,
+        trade_id,
+        opportunity_id,
+        episode_id,
+        entry_profile_id,
+        profile_hash,
+        profile_version,
+        execution_mode,
+        entry_policy,
+        source,
         symbol,
         strategy,
         profile_id,
@@ -326,6 +352,16 @@ fn enqueue_strategy_replay(state: &mut LearningState, event: &FeedbackEvent) {
         event_id.clone(),
         StrategyReplayJob {
             event_id: event_id.clone(),
+            schema_version: *schema_version,
+            trade_id: trade_id.clone(),
+            opportunity_id: opportunity_id.clone(),
+            episode_id: episode_id.clone(),
+            entry_profile_id: entry_profile_id.clone(),
+            profile_hash: profile_hash.clone(),
+            profile_version: *profile_version,
+            execution_mode: execution_mode.clone(),
+            entry_policy: entry_policy.clone(),
+            source: source.clone(),
             symbol: symbol.clone(),
             strategy: strategy.clone(),
             profile_id: profile_id.clone(),
@@ -753,6 +789,16 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
         },
         market_regime: match event {
             FeedbackEvent::ScoutOutcome { market_regime, .. } => market_regime.clone(),
+            _ => None,
+        },
+        horizon_seconds: match event {
+            FeedbackEvent::ScoutOutcome {
+                comparison:
+                    ScoutComparisonMetadata::Paired {
+                        horizon_seconds, ..
+                    },
+                ..
+            } => *horizon_seconds,
             _ => None,
         },
         source: match event {
@@ -1402,6 +1448,24 @@ pub fn update_profile(
 mod tests {
     use super::*;
 
+    fn producer_shaped_missed_opportunity() -> FeedbackEvent {
+        let symbol = "BTC-USDT";
+        let strategy = "live-momentum";
+        let parameters = BTreeMap::from([("minimum_momentum".into(), 0.002)]);
+        FeedbackEvent::MissedOpportunityCandidate {
+            event_id: "missed:BTC-USDT:live-momentum:1000".into(),
+            observed_at_ms: 1_000,
+            symbol: symbol.into(),
+            strategy: strategy.into(),
+            profile_id: strategy::profile_id(symbol, strategy, &parameters),
+            parameters,
+            direction: "bullish".into(),
+            strength: 0.61,
+            score: 0.31,
+            learning_context: "long:trend:BTC-USDT:live-momentum".into(),
+        }
+    }
+
     #[tokio::test]
     async fn missed_opportunity_feedback_is_attributed_deduplicated_and_durable() {
         let path = std::env::temp_dir().join(format!(
@@ -1414,18 +1478,7 @@ mod tests {
             path: path.clone(),
             state_updates: Arc::new(tokio::sync::Notify::new()),
         };
-        let event = FeedbackEvent::MissedOpportunityCandidate {
-            event_id: "missed:BTC-USDT:live-momentum:1000".into(),
-            observed_at_ms: 1_000,
-            symbol: "BTC-USDT".into(),
-            strategy: "live-momentum".into(),
-            profile_id: "profile-1".into(),
-            parameters: BTreeMap::from([("minimum_momentum".into(), 0.002)]),
-            direction: "bullish".into(),
-            strength: 0.61,
-            score: 0.31,
-            learning_context: "trend:btc".into(),
-        };
+        let event = producer_shaped_missed_opportunity();
         let accepted = accept_feedback(State(service.clone()), Json(event.clone()))
             .await
             .unwrap();
@@ -1440,7 +1493,10 @@ mod tests {
             .get("missed:BTC-USDT:live-momentum:1000")
             .unwrap();
         assert_eq!(job.strategy, "live-momentum");
-        assert_eq!(job.profile_id, "profile-1");
+        assert_eq!(
+            job.profile_id,
+            strategy::profile_id("BTC-USDT", "live-momentum", &job.parameters)
+        );
         assert_eq!(job.parameters["minimum_momentum"], 0.002);
         assert!(
             load_state(&path)
@@ -1454,10 +1510,138 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
+    #[tokio::test]
+    async fn missed_opportunity_validation_reports_the_invalid_field() {
+        let invalid_events: [(&str, fn(&mut FeedbackEvent)); 10] = [
+            ("event_id", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { event_id, .. } = event {
+                    event_id.clear();
+                }
+            }),
+            ("strategy", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { strategy, .. } = event {
+                    *strategy = "scout-probe".into();
+                }
+            }),
+            ("profile_id", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { profile_id, .. } = event {
+                    profile_id.clear();
+                }
+            }),
+            ("parameters.count", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { parameters, .. } = event {
+                    for index in 0..65 {
+                        parameters.insert(format!("p{index}"), 0.1);
+                    }
+                }
+            }),
+            ("parameters.key_length", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { parameters, .. } = event {
+                    parameters.insert("x".repeat(129), 0.1);
+                }
+            }),
+            ("parameters.value", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { parameters, .. } = event {
+                    parameters.insert("minimum_momentum".into(), f64::NAN);
+                }
+            }),
+            ("direction", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { direction, .. } = event {
+                    *direction = "sideways".into();
+                }
+            }),
+            ("strength", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { strength, .. } = event {
+                    *strength = f64::INFINITY;
+                }
+            }),
+            ("score", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate { score, .. } = event {
+                    *score = f64::NAN;
+                }
+            }),
+            ("learning_context", |event: &mut FeedbackEvent| {
+                if let FeedbackEvent::MissedOpportunityCandidate {
+                    learning_context, ..
+                } = event
+                {
+                    *learning_context = "x".repeat(257);
+                }
+            }),
+        ];
+        for (field, mutate) in invalid_events {
+            let service = ServiceState {
+                state: Arc::new(Mutex::new(LearningState::default())),
+                path: std::env::temp_dir().join(format!(
+                    "learning-invalid-{field}-{}.sqlite",
+                    std::process::id()
+                )),
+                state_updates: Arc::new(tokio::sync::Notify::new()),
+            };
+            let mut event = producer_shaped_missed_opportunity();
+            mutate(&mut event);
+            let error = accept_feedback(State(service), Json(event))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "field {field}");
+            assert!(error.1.contains(field), "field {field}: {}", error.1);
+        }
+
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: std::env::temp_dir().join(format!(
+                "learning-invalid-symbol-{}.sqlite",
+                std::process::id()
+            )),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let mut invalid_symbol = producer_shaped_missed_opportunity();
+        if let FeedbackEvent::MissedOpportunityCandidate { symbol, .. } = &mut invalid_symbol {
+            *symbol = "NOT-ALLOWED".into();
+        }
+        let error = accept_feedback(State(service), Json(invalid_symbol))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.1.contains("symbol"));
+
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: std::env::temp_dir()
+                .join(format!("learning-oversized-{}.sqlite", std::process::id())),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let mut oversized = producer_shaped_missed_opportunity();
+        if let FeedbackEvent::MissedOpportunityCandidate {
+            learning_context, ..
+        } = &mut oversized
+        {
+            *learning_context = "x".repeat(17 * 1024);
+        }
+        let error = accept_feedback(State(service), Json(oversized))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.1.contains("16 KiB"));
+    }
+
     #[test]
     fn trade_feedback_creates_one_durable_replay_job_and_missing_context_is_unsupported() {
         let event = FeedbackEvent::TradeOutcome {
             event_id: "trade:missing-context".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 1,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -1487,6 +1671,16 @@ mod tests {
     fn dated_trade_replay_is_unsupported_without_exact_daily_inputs() {
         let event = FeedbackEvent::TradeOutcome {
             event_id: "trade:daily".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 1,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -1511,6 +1705,16 @@ mod tests {
     fn pending_replay_job_and_cursor_state_survive_sqlite_reload() {
         let event = FeedbackEvent::TradeOutcome {
             event_id: "trade:replay".into(),
+            schema_version: Some(1),
+            trade_id: Some("trade-1".into()),
+            opportunity_id: Some("opportunity-1".into()),
+            episode_id: Some("episode-1".into()),
+            profile_hash: Some("sha256:profile".into()),
+            profile_version: Some(17),
+            execution_mode: Some("paper".into()),
+            entry_policy: Some("post_only".into()),
+            source: Some("auto_trader".into()),
+            entry_profile_id: Some("entry-profile".into()),
             observed_at_ms: 1,
             learning_context: None,
             symbol: "BTC-USDT".into(),
@@ -1550,6 +1754,20 @@ mod tests {
         persist(&path, &state).unwrap();
         let loaded = super::super::load_state(&path).unwrap();
         let loaded_job = loaded.strategy_replay_jobs.get("trade:replay").unwrap();
+        assert_eq!(loaded_job.schema_version, Some(1));
+        assert_eq!(loaded_job.trade_id.as_deref(), Some("trade-1"));
+        assert_eq!(loaded_job.opportunity_id.as_deref(), Some("opportunity-1"));
+        assert_eq!(loaded_job.episode_id.as_deref(), Some("episode-1"));
+        assert_eq!(
+            loaded_job.entry_profile_id.as_deref(),
+            Some("entry-profile")
+        );
+        assert_eq!(loaded_job.profile_id, "profile");
+        assert_eq!(loaded_job.profile_hash.as_deref(), Some("sha256:profile"));
+        assert_eq!(loaded_job.profile_version, Some(17));
+        assert_eq!(loaded_job.execution_mode.as_deref(), Some("paper"));
+        assert_eq!(loaded_job.entry_policy.as_deref(), Some("post_only"));
+        assert_eq!(loaded_job.source.as_deref(), Some("auto_trader"));
         assert_eq!(loaded_job.history_cursor.as_deref(), Some("1500:42"));
         assert!(loaded_job.counterfactual_position_open);
         assert!(loaded_job.counterfactual_entry_found);
@@ -1562,6 +1780,196 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn canonical_trade_feedback_survives_restart_and_duplicate_acceptance() {
+        let path = std::env::temp_dir().join(format!(
+            "learning-canonical-replay-{}-{}.sqlite",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let failed_path = std::env::temp_dir().join(format!(
+            "learning-canonical-replay-failure-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&failed_path);
+        std::fs::create_dir_all(&failed_path).unwrap();
+        let mut service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            // Opening a directory as the SQLite database deterministically
+            // fails during persistence after the in-memory apply path runs.
+            path: failed_path.clone(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:canonical".into(),
+            schema_version: Some(1),
+            trade_id: Some("trade-42".into()),
+            opportunity_id: Some("opp-42".into()),
+            episode_id: Some("episode-42".into()),
+            profile_hash: Some("hash-42".into()),
+            profile_version: Some(42),
+            execution_mode: Some("paper".into()),
+            entry_policy: Some("maker_only".into()),
+            source: Some("position_ledger".into()),
+            entry_profile_id: Some("profile-at-entry".into()),
+            observed_at_ms: 2_000,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "derived-training-profile".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 1.0,
+            net_return_percent: 1.0,
+            threshold_observations: vec![],
+            replay_context: Some(strategy::TradeReplayContext {
+                market_symbol: "BTC-USDT".into(),
+                entry_timestamp_ms: 1_000,
+                exit_timestamp_ms: 2_000,
+                side: "long".into(),
+                entry_price: 10.0,
+                exit_price: 11.0,
+                quantity: 1.0,
+                entry_fees: 0.01,
+                exit_fees: 0.01,
+                execution_costs_complete: false,
+                entry_walk_forward_evidence: None,
+            }),
+        };
+
+        let failed = accept_feedback(State(service.clone()), Json(event.clone())).await;
+        assert!(failed.is_err());
+        {
+            let state = service.state.lock().await;
+            assert!(!state.seen_event_ids.contains("trade:canonical"));
+            assert_eq!(state.accepted_events, 0);
+            assert!(state.strategy_replay_jobs.is_empty());
+            assert!(state.variants.is_empty());
+        }
+
+        // Retry the exact event in the same process after storage recovers.
+        // It must be applied and committed rather than reported as duplicate.
+        service.path = path.clone();
+        let accepted = accept_feedback(State(service), Json(event.clone()))
+            .await
+            .unwrap();
+        assert!(accepted.0.accepted);
+        assert!(!accepted.0.duplicate);
+
+        let restarted = super::super::service_state(path.clone()).unwrap();
+        let before = restarted.state.lock().await.clone();
+        let job = before.strategy_replay_jobs.get("trade:canonical").unwrap();
+        assert_eq!(job.entry_profile_id.as_deref(), Some("profile-at-entry"));
+        assert_eq!(job.profile_id, "derived-training-profile");
+        assert_eq!(job.trade_id.as_deref(), Some("trade-42"));
+        assert_eq!(job.profile_version, Some(42));
+        let profile_statistics_before = before
+            .variants
+            .iter()
+            .map(|(key, profile)| {
+                (
+                    key.clone(),
+                    profile.samples,
+                    profile.positive,
+                    profile.realized_pnl,
+                    profile.outcomes.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let accepted_events_before = before.accepted_events;
+        drop(before);
+
+        let duplicate = accept_feedback(State(restarted.clone()), Json(event))
+            .await
+            .unwrap();
+        assert!(duplicate.0.accepted);
+        assert!(duplicate.0.duplicate);
+        let after = restarted.state.lock().await;
+        assert_eq!(after.strategy_replay_jobs.len(), 1);
+        let profile_statistics_after = after
+            .variants
+            .iter()
+            .map(|(key, profile)| {
+                (
+                    key.clone(),
+                    profile.samples,
+                    profile.positive,
+                    profile.realized_pnl,
+                    profile.outcomes.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(profile_statistics_after, profile_statistics_before);
+        assert_eq!(after.accepted_events, accepted_events_before);
+
+        drop(after);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        let _ = std::fs::remove_dir_all(failed_path);
+    }
+
+    #[test]
+    fn legacy_replay_job_json_defaults_canonical_lineage_to_none() {
+        let event = FeedbackEvent::TradeOutcome {
+            event_id: "trade:legacy".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
+            observed_at_ms: 1,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "legacy-profile".into(),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: false,
+            realized_pnl_usd: 0.0,
+            net_return_percent: 0.0,
+            threshold_observations: vec![],
+            replay_context: None,
+        };
+        let mut state = LearningState::default();
+        enqueue_strategy_replay(&mut state, &event);
+        let mut legacy_json =
+            serde_json::to_value(state.strategy_replay_jobs.get("trade:legacy").unwrap()).unwrap();
+        for field in [
+            "schema_version",
+            "trade_id",
+            "opportunity_id",
+            "episode_id",
+            "entry_profile_id",
+            "profile_hash",
+            "profile_version",
+            "execution_mode",
+            "entry_policy",
+            "source",
+        ] {
+            legacy_json.as_object_mut().unwrap().remove(field);
+        }
+        let legacy: StrategyReplayJob = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(legacy.schema_version, None);
+        assert_eq!(legacy.trade_id, None);
+        assert_eq!(legacy.opportunity_id, None);
+        assert_eq!(legacy.episode_id, None);
+        assert_eq!(legacy.entry_profile_id, None);
+        assert_eq!(legacy.profile_hash, None);
+        assert_eq!(legacy.profile_version, None);
+        assert_eq!(legacy.execution_mode, None);
+        assert_eq!(legacy.entry_policy, None);
+        assert_eq!(legacy.source, None);
     }
 
     #[test]
@@ -1636,6 +2044,7 @@ mod tests {
                 evidence_group_id: group.map(str::to_owned),
                 learning_context: None,
                 market_regime: None,
+                horizon_seconds: None,
                 source: LearningOutcomeSource::Scout,
                 realized_pnl_usd: None,
                 paired_comparison: true,
@@ -1743,6 +2152,7 @@ mod tests {
                 evidence_group_id: Some(format!("risk-probe-{index}")),
                 learning_context: None,
                 market_regime: None,
+                horizon_seconds: None,
                 source: LearningOutcomeSource::Scout,
                 realized_pnl_usd: None,
                 paired_comparison: true,
@@ -1823,8 +2233,19 @@ mod tests {
             event_evidence_group_id(&horizon).as_deref(),
             Some("comparison")
         );
+        assert_eq!(learning_outcome(&horizon).horizon_seconds, Some(300));
         let trade = FeedbackEvent::TradeOutcome {
             event_id: "t".into(),
+            schema_version: None,
+            trade_id: None,
+            opportunity_id: None,
+            episode_id: None,
+            profile_hash: None,
+            profile_version: None,
+            execution_mode: None,
+            entry_policy: None,
+            source: None,
+            entry_profile_id: None,
             observed_at_ms: 200,
             learning_context: Some("scout:btc:momentum:long:P2".into()),
             symbol: "BTC-USDT".into(),
@@ -1877,6 +2298,16 @@ mod tests {
         for context in [None, Some("btc:momentum"), Some("btc:momentum:long")] {
             let event = FeedbackEvent::TradeOutcome {
                 event_id: "t".into(),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: 1,
                 learning_context: context.map(str::to_owned),
                 symbol: "BTC".into(),
@@ -1901,6 +2332,16 @@ mod tests {
         let mut scout_trade = match scout_event() {
             FeedbackEvent::ScoutOutcome { .. } => FeedbackEvent::TradeOutcome {
                 event_id: "paper-scout".into(),
+                schema_version: None,
+                trade_id: None,
+                opportunity_id: None,
+                episode_id: None,
+                profile_hash: None,
+                profile_version: None,
+                execution_mode: None,
+                entry_policy: None,
+                source: None,
+                entry_profile_id: None,
                 observed_at_ms: 1,
                 learning_context: None,
                 symbol: "BTC-USDT".into(),

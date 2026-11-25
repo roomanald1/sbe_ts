@@ -187,6 +187,7 @@ fn new_position_exit_order(
         ),
         // Link the protective exit to the decision that opened this position.
         decision_id: position.entry_decision_id.clone(),
+        revalidation_snapshot: None,
         strength: 0.0,
         ioc_fallback_for: None,
         quantity,

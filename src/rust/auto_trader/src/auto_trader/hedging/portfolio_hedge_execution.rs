@@ -77,6 +77,7 @@ async fn execute_portfolio_hedge(
         ExecutionParameters::default(),
         timestamp.to_string(),
         false,
+        None,
     )
     .await
     {
@@ -211,6 +212,7 @@ fn new_portfolio_hedge_order(
         exploratory: false,
         strategy: Some("portfolio-hedge".into()),
         decision_id: None,
+        revalidation_snapshot: None,
         strength: 0.0,
         ioc_fallback_for: None,
         quantity,

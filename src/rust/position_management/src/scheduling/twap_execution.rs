@@ -63,6 +63,8 @@ async fn run_twap(
             qty,
             &request.source,
             &run_id,
+            request.client_order_id.as_deref(),
+            request.lifecycle.as_ref(),
         )
         .await
         {
@@ -115,4 +117,3 @@ async fn run_twap(
     }
     persist_vwap_run_status(&store, &status).await;
 }
-

@@ -114,6 +114,8 @@ async fn run_vwap(
                 child_qty,
                 &request.source,
                 &run_id,
+                request.client_order_id.as_deref(),
+                request.lifecycle.as_ref(),
             )
             .await
             {
@@ -155,6 +157,8 @@ async fn execute_vwap_child(
     quantity: f64,
     source: &str,
     parent_order_id: &str,
+    client_order_id: Option<&str>,
+    lifecycle: Option<&CanonicalLifecycleLink>,
 ) -> Result<(f64, Option<f64>), String> {
     let matched = paper_exchange_match(symbol, side, quantity, None)
         .await
@@ -175,8 +179,10 @@ async fn execute_vwap_child(
     let mut ledger = store.ledger.lock().await;
     let offset = ledger.trades.len();
     for (index, (qty, execution_price)) in fills.into_iter().enumerate() {
+        let fill_id = allocate_fill_id(&mut ledger, timestamp);
         ledger.trades.push(PositionTrade {
             id: format!("{timestamp}-{index}-{offset}"),
+            fill_id: Some(fill_id),
             symbol: symbol.to_owned(),
             side: side.clone(),
             quantity: qty,
@@ -185,6 +191,8 @@ async fn execute_vwap_child(
             timestamp,
             source: source.to_owned(),
             parent_order_id: Some(parent_order_id.to_owned()),
+            client_order_id: client_order_id.map(str::to_owned),
+            lifecycle: lifecycle.cloned(),
             fee: -qty * execution_price * fee_rate.abs(),
             fee_known: true,
             fee_currency: symbol
@@ -201,10 +209,20 @@ async fn execute_vwap_child(
             slippage_bps: None,
         });
     }
-    store
-        .persist(&ledger)
-        .await
-        .map_err(|error| format!("Unable to persist VWAP fills: {error}"))?;
+    if lifecycle.is_some() {
+        // Canonical AutoTrader fills must be durable before the child reports
+        // success and advances its scheduled-run progress. Manual/legacy runs
+        // continue to use the coalescing background writer.
+        drop(ledger);
+        store
+            .persist_durable_snapshot(None)
+            .await
+            .map_err(|error| format!("Unable to persist VWAP lifecycle fills: {error}"))?;
+    } else {
+        store
+            .persist(&ledger)
+            .await
+            .map_err(|error| format!("Unable to persist VWAP fills: {error}"))?;
+    }
     Ok((filled, Some(average)))
 }
-

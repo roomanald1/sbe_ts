@@ -128,6 +128,8 @@ mod strategy_cleanup_integration_tests {
             settings: Arc::new(Mutex::new(settings)),
             activity_snapshot: Arc::new(Mutex::new(None)),
             settings_persist_notify: Arc::new(Notify::new()),
+            settings_persist_write_lock: Arc::new(Mutex::new(())),
+            durable_feedback_event_ids: Arc::new(Mutex::new(BTreeSet::new())),
             price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
             state_updates,
             live_profile_updates: tokio::sync::broadcast::channel(1).0,
@@ -308,6 +310,7 @@ mod strategy_cleanup_integration_tests {
             exploratory: false,
             strategy: Some(strategy.into()),
             decision_id: None,
+            revalidation_snapshot: None,
             strength: 0.0,
             ioc_fallback_for: None,
             quantity: 1.0,
@@ -604,3 +607,7 @@ mod strategy_cleanup_integration_tests {
 #[cfg(test)]
 #[path = "auto_trader/dated_carry_tests.rs"]
 mod dated_carry_tests;
+
+#[cfg(test)]
+#[path = "auto_trader/lifecycle_recovery_tests.rs"]
+mod lifecycle_recovery_tests;

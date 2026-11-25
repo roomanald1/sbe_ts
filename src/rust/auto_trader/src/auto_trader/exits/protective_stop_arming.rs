@@ -5,8 +5,9 @@ fn build_protective_stop_request(
     trigger_price: f64,
     trigger_direction: &str,
     client_order_id: String,
+    lifecycle_identity: Option<&CanonicalLifecycleIdentity>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut request = serde_json::json!({
         "symbol": symbol,
         "side": side,
         "order_type": "stop-market",
@@ -15,7 +16,22 @@ fn build_protective_stop_request(
         "trigger_direction": trigger_direction,
         "source": "auto",
         "client_order_id": client_order_id,
-    })
+    });
+    if let Some(identity) = lifecycle_identity {
+        request["lifecycle"] = serde_json::json!({
+            "schema_version": identity.schema_version,
+            "opportunity_id": identity.opportunity_id,
+            "episode_id": identity.episode_id,
+            "trade_id": identity.trade_id,
+            "profile_id": identity.profile_id,
+            "profile_hash": identity.profile_hash,
+            "profile_version": identity.profile_version,
+            "execution_mode": identity.execution_mode,
+            "entry_policy": identity.entry_policy,
+            "source": identity.source,
+        });
+    }
+    request
 }
 
 async fn arm_protective_stop(
@@ -31,14 +47,18 @@ async fn arm_protective_stop(
     if quantity <= 0.0 || entry_price <= 0.0 {
         return Ok(());
     }
-    let (stop_loss_percent, is_enabled, decision_id) = {
+    let (stop_loss_percent, is_enabled, decision_id, lifecycle_identity) = {
         let settings = state.settings.lock().await;
+        let decision_id = settings.strategy_positions.get(symbol)
+            .and_then(|lots| lots.get(strategy))
+            .and_then(|position| position.entry_decision_id.clone());
+        let lifecycle_identity = decision_id.as_deref()
+            .and_then(|id| settings.canonical_lifecycle_links.get(id).cloned());
         (
             stop_loss_override.unwrap_or(settings.stop_loss_percent),
             state.enabled.load(Ordering::Relaxed),
-            settings.strategy_positions.get(symbol)
-                .and_then(|lots| lots.get(strategy))
-                .and_then(|position| position.entry_decision_id.clone()),
+            decision_id,
+            lifecycle_identity,
         )
     };
     if !is_enabled {
@@ -70,6 +90,7 @@ async fn arm_protective_stop(
         trigger_price,
         trigger_direction,
         client_order_id,
+        lifecycle_identity.as_ref(),
     );
     let response = crate::service_rpc::position_request(
         "POST",
@@ -166,6 +187,7 @@ fn new_protective_stop_order(
         exploratory: false,
         strategy: Some(strategy),
         decision_id,
+        revalidation_snapshot: None,
         strength: 0.0,
         ioc_fallback_for: None,
         quantity,

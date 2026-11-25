@@ -7,6 +7,7 @@ import {
 } from './LearningEffectivenessModel';
 import { autoTraderRpc } from '../auto_trader_rsocket';
 import { insightsFetch } from '../insights_rsocket';
+import { learningRpc } from '../learning_rsocket';
 
 export const LEARNING_DECISION_WINDOW_MS = 10 * 60_000;
 export const LEARNING_DECISION_LOOKBACKS = [
@@ -53,6 +54,57 @@ export type DecisionAuditCoverage = {
   latestCycleAt: number;
   stalled: boolean;
   blockers: AutoTraderState['latestStrategyBlockers'];
+};
+
+export type EvidenceRequestCoverage = {
+  request: {
+    symbol: string;
+    strategy: string;
+    profile_id: string;
+    regime: string;
+    horizon: string;
+    status: string;
+    attempts: number;
+    created_at_ms: number;
+    updated_at_ms: number;
+    next_attempt_at_ms: number;
+    reason: string | null;
+  };
+  as_of_ms: number;
+  coverage_scope: string;
+  coverage_status: string | null;
+  gap_reason: string | null;
+  sample_count: number | null;
+  effective_sample_size: number | null;
+  last_sample_timestamp_ms: number | null;
+  last_sample_age_ms: number | null;
+  regime_horizon_coverage: string;
+};
+
+export type EvidenceCoverageCohort = {
+  symbol: string;
+  strategy: string;
+  profile_id: string;
+  regime: string | null;
+  horizon: string | null;
+  coverage_scope: string;
+  coverage_status: string | null;
+  gap_reason: string | null;
+  sample_count: number | null;
+  effective_sample_size: number | null;
+  last_sample_timestamp_ms: number | null;
+  last_sample_age_ms: number | null;
+  regime_horizon_coverage: string;
+};
+
+export type EvidenceRequestsResponse = {
+  as_of_ms: number;
+  total_count: number;
+  omitted_count: number;
+  requests: EvidenceRequestCoverage[];
+  total_coverage_cohorts: number;
+  omitted_coverage_cohorts: number;
+  coverage_cohorts: EvidenceCoverageCohort[];
 };
 
 const DECISION_AUDIT_GAP_MS = 5 * 60_000;
@@ -141,6 +193,8 @@ export type AutoTraderLearningWidgetState = {
   decisions: LearningDecision[];
   decisionCoverage: DecisionAuditCoverage;
   decisionError?: string;
+  evidenceRequests: EvidenceRequestsResponse | null;
+  evidenceRequestError?: string;
 };
 
 type SourceModel = Pick<AutoTraderModel, 'state$' | 'start' | 'stop'>;
@@ -150,6 +204,14 @@ type DecisionHistoryResult = {
   errors: string[];
 };
 type GetDecisions = (lookbackMs?: number) => Promise<DecisionHistoryResult>;
+type GetEvidenceRequests = () => Promise<EvidenceRequestsResponse>;
+
+const requestEvidenceRequests: GetEvidenceRequests = async () => {
+  const response = await learningRpc('GET', '/evidence-requests');
+  if (!response.ok)
+    throw new Error(`Evidence coverage request failed (${response.status}).`);
+  return (await response.json()) as EvidenceRequestsResponse;
+};
 
 const requestLearningDecisions: GetDecisions = async (
   lookbackMs = LEARNING_DECISION_WINDOW_MS,
@@ -215,6 +277,8 @@ export function projectLearningWidgetState(
   promotedOnly: boolean,
   decisions: LearningDecision[] = [],
   decisionError?: string,
+  evidenceRequests: EvidenceRequestsResponse | null = null,
+  evidenceRequestError?: string,
 ): AutoTraderLearningWidgetState {
   const profiles = source.decisionParameters?.strategy_profiles ?? [];
   const rows = profiles.flatMap((profile) =>
@@ -362,6 +426,8 @@ export function projectLearningWidgetState(
     decisions,
     decisionCoverage: decisionAuditCoverage(source, decisions),
     decisionError,
+    evidenceRequests,
+    evidenceRequestError,
   };
 }
 
@@ -385,12 +451,16 @@ export class AutoTraderLearningWidgetModel {
   private summaryError?: string;
   private decisions: LearningDecision[] = [];
   private decisionError?: string;
+  private evidenceRequests: EvidenceRequestsResponse | null = null;
+  private evidenceRequestError?: string;
   private running = false;
   private decisionLookbackMs = LEARNING_DECISION_WINDOW_MS;
   private decisionRequestId = 0;
+  private evidenceRequestId = 0;
   private readonly source: SourceModel;
   private readonly getSummary: GetSummary;
   private readonly getDecisions: GetDecisions;
+  private readonly getEvidenceRequests: GetEvidenceRequests;
   private readonly refreshIntervalMs: number;
 
   constructor(
@@ -398,13 +468,24 @@ export class AutoTraderLearningWidgetModel {
     getSummary: GetSummary = requestLearningSummary,
     refreshIntervalMs = 30_000,
     getDecisions: GetDecisions = requestLearningDecisions,
+    getEvidenceRequests: GetEvidenceRequests = requestEvidenceRequests,
   ) {
     this.source = source;
     this.getSummary = getSummary;
     this.getDecisions = getDecisions;
+    this.getEvidenceRequests = getEvidenceRequests;
     this.refreshIntervalMs = refreshIntervalMs;
     this.state$ = new BehaviorSubject(
-      projectLearningWidgetState(source.state$.value, null, undefined, false),
+      projectLearningWidgetState(
+        source.state$.value,
+        null,
+        undefined,
+        false,
+        [],
+        undefined,
+        null,
+        undefined,
+      ),
     );
   }
 
@@ -417,15 +498,18 @@ export class AutoTraderLearningWidgetModel {
     );
     void this.refreshSummary();
     void this.refreshDecisions();
+    void this.refreshEvidenceRequests();
     this.refreshTimer = setInterval(() => {
       void this.refreshSummary();
       void this.refreshDecisions();
+      void this.refreshEvidenceRequests();
     }, this.refreshIntervalMs);
   }
 
   stop() {
     if (!this.running) return;
     this.running = false;
+    this.evidenceRequestId += 1;
     this.sourceSubscription?.unsubscribe();
     this.sourceSubscription = undefined;
     if (this.refreshTimer) clearInterval(this.refreshTimer);
@@ -470,6 +554,22 @@ export class AutoTraderLearningWidgetModel {
     this.publish(this.source.state$.value);
   }
 
+  async refreshEvidenceRequests() {
+    const requestId = ++this.evidenceRequestId;
+    try {
+      this.evidenceRequests = await this.getEvidenceRequests();
+      if (requestId !== this.evidenceRequestId) return;
+      this.evidenceRequestError = undefined;
+    } catch (error) {
+      if (requestId !== this.evidenceRequestId) return;
+      this.evidenceRequestError =
+        error instanceof Error
+          ? error.message
+          : 'Could not load evidence coverage.';
+    }
+    this.publish(this.source.state$.value);
+  }
+
   setDecisionLookback(lookbackMs: number) {
     if (
       !LEARNING_DECISION_LOOKBACKS.some(
@@ -492,6 +592,8 @@ export class AutoTraderLearningWidgetModel {
         this.promotedOnly,
         this.decisions,
         this.decisionError,
+        this.evidenceRequests,
+        this.evidenceRequestError,
       ),
     );
   }

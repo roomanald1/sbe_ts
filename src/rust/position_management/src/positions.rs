@@ -98,6 +98,8 @@ mod coverage_tests {
             path: PathBuf::from("/tmp/position-management-coverage-test.sqlite"),
             ledger: Arc::new(Mutex::new(Ledger::default())),
             persistence_notify: Arc::new(Notify::new()),
+            persistence_write_lock: Arc::new(Mutex::new(())),
+            pending_client_order_commits: StdMutex::new(HashSet::new()),
             state_updates,
             persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
             trade_index: StdMutex::new(LedgerTradeIndex::default()),
@@ -291,6 +293,7 @@ mod coverage_tests {
             strategy: ExecutionStrategy::Vwap,
             source: "manual".into(),
             client_order_id: None,
+            lifecycle: None,
         };
         assert_status(
             start_vwap(State(Arc::clone(&store)), Json(request())).await,
@@ -340,6 +343,7 @@ mod coverage_tests {
             execution_vwap: 0.0,
             slippage: 0.0,
             error: None,
+            lifecycle: None,
         }));
         run_twap(
             Arc::clone(&store),
@@ -352,6 +356,7 @@ mod coverage_tests {
                 strategy: ExecutionStrategy::Twap,
                 source: "manual".into(),
                 client_order_id: None,
+                lifecycle: None,
             },
             "BTC-USDT".into(),
             Arc::clone(&status),
@@ -392,6 +397,7 @@ mod coverage_tests {
             time_in_force: None,
             source: "manual".into(),
             client_order_id: None,
+            lifecycle: None,
             reduce_only: false,
         };
         assert_status(
@@ -413,6 +419,7 @@ mod coverage_tests {
             time_in_force: None,
             source: "manual".into(),
             client_order_id: None,
+            lifecycle: None,
             reduce_only: false,
         };
         assert_status(

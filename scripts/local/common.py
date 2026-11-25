@@ -71,7 +71,7 @@ def api(service, endpoint):
         "positions": {
             "positions", "account", "realized-pnl",
             "fee-summary", "fee-rates", "usd-rates",
-            "barriers", "persistence-timing"
+            "financial-snapshot", "barriers", "persistence-timing"
         }
     }
     if endpoint not in allowed.get(service, set()):
