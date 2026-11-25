@@ -60,6 +60,10 @@ impl SignalEngine {
                 score: 0.0,
                 ranging_probability: None,
                 entry_quote_timestamp: quote.map(|(quote_time, _, _)| quote_time),
+                scout_path: ScoutPathAccumulator {
+                    source_timestamps_monotonic: true,
+                    ..Default::default()
+                },
                 taker_fee_rate: configured_signal_taker_fee_rate(),
                 first_long_positive_net_timestamp: None,
                 first_short_positive_net_timestamp: None,
@@ -122,6 +126,10 @@ impl SignalEngine {
                     score: snapshot.score,
                     ranging_probability: snapshot.ranging_probability,
                     entry_quote_timestamp: quote.map(|(quote_time, _, _)| quote_time),
+                    scout_path: ScoutPathAccumulator {
+                        source_timestamps_monotonic: true,
+                        ..Default::default()
+                    },
                     taker_fee_rate: configured_signal_taker_fee_rate(),
                     first_long_positive_net_timestamp: None,
                     first_short_positive_net_timestamp: None,
@@ -256,6 +264,12 @@ impl SignalEngine {
             score: 0.0,
             ranging_probability: None,
             entry_quote_timestamp: quote.map(|(quote_time, _, _)| quote_time),
+            scout_path: ScoutPathAccumulator {
+                source_timestamps_monotonic: true,
+                maximum_favorable_excursion_percent: quote.map(|_| 0.0),
+                maximum_adverse_excursion_percent: quote.map(|_| 0.0),
+                ..Default::default()
+            },
             taker_fee_rate: configured_signal_taker_fee_rate(),
             first_long_positive_net_timestamp: None,
             first_short_positive_net_timestamp: None,
@@ -404,6 +418,50 @@ impl SignalEngine {
     ) {
         if best_bid.is_finite() && best_ask.is_finite() && best_bid > 0.0 && best_ask >= best_bid {
             self.best_quote = Some((timestamp, best_bid, best_ask));
+            for pending in self.pending.iter_mut().filter(|pending| {
+                pending.sample_id.is_some()
+                    && timestamp >= pending.timestamp
+                    && (!pending.scout_observation_only
+                        || timestamp
+                            <= pending
+                                .timestamp
+                                .saturating_add(pending.horizon_seconds.saturating_mul(1_000)))
+            }) {
+                let path = &mut pending.scout_path;
+                if let Some(previous) = path.last_source_timestamp {
+                    if timestamp < previous {
+                        path.source_timestamps_monotonic = false;
+                        continue;
+                    }
+                    path.maximum_gap_ms = path.maximum_gap_ms.max(timestamp - previous);
+                } else {
+                    path.first_source_timestamp = Some(timestamp);
+                }
+                let (entry, execution_price) = match pending.direction.as_str() {
+                    "bullish" => (pending.entry_ask, best_bid),
+                    "bearish" => (pending.entry_bid, best_ask),
+                    _ => continue,
+                };
+                if let Some(entry) = entry.filter(|entry| {
+                    pending.entry_quote_timestamp.is_some() && entry.is_finite() && *entry > 0.0
+                }) {
+                    let return_percent = match pending.direction.as_str() {
+                        "bullish" => (execution_price / entry - 1.0) * 100.0,
+                        "bearish" => ((entry - execution_price) / entry) * 100.0,
+                        _ => continue,
+                    };
+                    path.maximum_favorable_excursion_percent = Some(
+                        path.maximum_favorable_excursion_percent
+                            .map_or(return_percent, |current| current.max(return_percent)),
+                    );
+                    path.maximum_adverse_excursion_percent = Some(
+                        path.maximum_adverse_excursion_percent
+                            .map_or(return_percent, |current| current.min(return_percent)),
+                    );
+                }
+                path.sample_count = path.sample_count.saturating_add(1);
+                path.last_source_timestamp = Some(timestamp);
+            }
         }
         self.book_bid_levels.clear();
         self.book_bid_levels
@@ -553,6 +611,182 @@ mod scout_tests {
         assert!(!engine.completed_scout_ids.contains("sample-1"));
     }
 
+    fn start_observation_scout(direction: &str, sample_id: &str) -> SignalEngine {
+        let mut engine = SignalEngine::default();
+        engine.on_book(1_000, 99.9, 100.1, &[1.0], &[1.0], &[], &[]);
+        engine.on_price(1_000, 100.0, 0.0);
+        assert!(engine.track_scout(
+            sample_id.into(),
+            "BTC-USDT".into(),
+            "observation-test".into(),
+            1_000,
+            direction.into(),
+            100.0,
+            5.0,
+            5.0,
+            1.0,
+            0.5,
+            0.1,
+            None,
+            None,
+            None,
+            None,
+        ));
+        engine
+    }
+
+    #[test]
+    fn scout_path_uses_executable_bid_for_longs_and_ask_for_shorts() {
+        for (direction, favorable_quote, adverse_quote, favorable, adverse, side) in [
+            (
+                "bullish",
+                (100.3, 100.5),
+                (99.9, 100.1),
+                0.1998,
+                -0.1998,
+                "sell_bid_for_long",
+            ),
+            (
+                "bearish",
+                (99.5, 99.7),
+                (99.9, 100.1),
+                0.2002,
+                -0.2002,
+                "buy_ask_for_short",
+            ),
+        ] {
+            let mut engine = start_observation_scout(direction, "path-case");
+            for second in 2..=61 {
+                let quote = if second == 2 {
+                    favorable_quote
+                } else if second == 3 {
+                    adverse_quote
+                } else {
+                    (99.9, 100.1)
+                };
+                engine.on_book(second * 1_000, quote.0, quote.1, &[1.0], &[1.0], &[], &[]);
+            }
+            let after_horizon_quote = if direction == "bullish" {
+                (101.0, 101.1)
+            } else {
+                (98.8, 99.0)
+            };
+            engine.on_book(
+                62_000,
+                after_horizon_quote.0,
+                after_horizon_quote.1,
+                &[1.0],
+                &[1.0],
+                &[],
+                &[],
+            );
+            let outcomes = engine.on_price(62_000, 100.0, 0.0);
+            let observation = outcomes
+                .iter()
+                .find(|outcome| outcome.scout_observation_only)
+                .unwrap();
+            let path = observation.evaluation.scout_path_evidence.as_ref().unwrap();
+            assert_eq!(path.direction, direction);
+            assert_eq!(path.executable_side, side);
+            assert!(path.observation_only);
+            assert_eq!(path.sample_count, 60);
+            assert_eq!(path.last_source_event_timestamp, Some(61_000));
+            assert_eq!(path.maximum_gap_ms, 1_000);
+            assert!(path.source_timestamps_monotonic);
+            assert!(path.complete, "{}", path.completeness_reason);
+            assert!((path.maximum_favorable_excursion_percent.unwrap() - favorable).abs() < 0.002);
+            assert!((path.maximum_adverse_excursion_percent.unwrap() - adverse).abs() < 0.002);
+            assert!(outcomes.iter().all(|outcome| {
+                outcome.scout_observation_only
+                    == outcome
+                        .evaluation
+                        .scout_path_evidence
+                        .as_ref()
+                        .unwrap()
+                        .observation_only
+            }));
+        }
+    }
+
+    #[test]
+    fn scout_path_marks_out_of_order_and_wide_gaps_incomplete() {
+        let mut engine = start_observation_scout("bullish", "ordering-case");
+        engine.on_book(2_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        engine.on_book(1_500, 100.1, 100.3, &[1.0], &[1.0], &[], &[]);
+        engine.on_book(8_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        engine.on_book(61_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        let outcomes = engine.on_price(61_000, 100.1, 0.0);
+        let path = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert!(!path.source_timestamps_monotonic);
+        assert!(!path.complete);
+        assert_eq!(path.completeness_reason, "non_monotonic_source_timestamps");
+        assert!(path.maximum_gap_ms > MAX_BOOK_AGE_MS);
+    }
+
+    #[test]
+    fn scout_path_requires_fresh_source_coverage_at_observation_horizon() {
+        let mut engine = start_observation_scout("bullish", "stale-case");
+        engine.on_book(2_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        let outcomes = engine.on_price(61_000, 100.0, 0.0);
+        let path = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert!(!path.complete);
+        assert_eq!(path.completeness_reason, "stale_at_evaluation");
+        assert_eq!(path.source_freshness_ms, Some(59_000));
+    }
+
+    #[test]
+    fn scout_path_without_authoritative_entry_quote_does_not_impute_excursions() {
+        let mut engine = SignalEngine::default();
+        engine.on_price(1_000, 100.0, 0.0);
+        assert!(engine.track_scout(
+            "no-entry-book".into(),
+            "BTC-USDT".into(),
+            "observation-test".into(),
+            1_000,
+            "bullish".into(),
+            100.0,
+            5.0,
+            5.0,
+            1.0,
+            0.5,
+            0.1,
+            None,
+            None,
+            None,
+            None,
+        ));
+        for second in 2..=61 {
+            engine.on_book(second * 1_000, 99.9, 100.1, &[1.0], &[1.0], &[], &[]);
+        }
+        let outcomes = engine.on_price(61_000, 100.0, 0.0);
+        let path = outcomes
+            .iter()
+            .find(|outcome| outcome.scout_observation_only)
+            .unwrap()
+            .evaluation
+            .scout_path_evidence
+            .as_ref()
+            .unwrap();
+        assert_eq!(path.maximum_favorable_excursion_percent, None);
+        assert_eq!(path.maximum_adverse_excursion_percent, None);
+        assert_eq!(path.completeness_reason, "missing_entry_quote");
+        assert!(!path.complete);
+    }
+
     #[test]
     fn rejected_late_observation_only_outcome_increments_its_horizon_metric() {
         let mut engine = SignalEngine::default();
@@ -594,8 +828,8 @@ mod scout_tests {
             ["dropped"]
             .as_u64()
             .unwrap();
-        let before_total_lateness = before
-            ["late_scout_observation_only_drops_by_horizon_seconds"]["3600"]["total_lateness_ms"]
+        let before_total_lateness = before["late_scout_observation_only_drops_by_horizon_seconds"]
+            ["3600"]["total_lateness_ms"]
             .as_u64()
             .unwrap();
 
@@ -605,7 +839,8 @@ mod scout_tests {
         assert!(outcomes.is_empty());
 
         let after = crate::latency::snapshot();
-        let one_hour_metric = &after["late_scout_observation_only_drops_by_horizon_seconds"]["3600"];
+        let one_hour_metric =
+            &after["late_scout_observation_only_drops_by_horizon_seconds"]["3600"];
         assert!(one_hour_metric["dropped"].as_u64().unwrap() >= before_count + 1);
         assert!(
             one_hour_metric["total_lateness_ms"].as_u64().unwrap()
@@ -931,6 +1166,10 @@ mod scout_tests {
             score: 0.0,
             ranging_probability: None,
             entry_quote_timestamp: Some(1_000),
+            scout_path: ScoutPathAccumulator {
+                source_timestamps_monotonic: true,
+                ..Default::default()
+            },
             taker_fee_rate: 0.001,
             first_long_positive_net_timestamp: None,
             first_short_positive_net_timestamp: None,

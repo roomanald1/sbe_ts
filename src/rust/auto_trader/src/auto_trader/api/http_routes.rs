@@ -49,8 +49,12 @@ async fn apply_learning_snapshot(
 ) {
     let exit_protection_policies =
         apply_exit_protection_policies(snapshot.exit_protection_policies, current_time_ms());
-    snapshot.profiles.retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
-    snapshot.scout_parameter_variants.retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
+    snapshot
+        .profiles
+        .retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
+    snapshot
+        .scout_parameter_variants
+        .retain(|variant| strategy::is_autotrader_symbol_allowed(&variant.symbol));
     let allowed_profile_ids = snapshot.registered_profile_ids.clone();
     snapshot.walk_forward_evidence.retain(|key, _| {
         key.split('|').next().is_some_and(|identity| {
@@ -58,8 +62,16 @@ async fn apply_learning_snapshot(
                 || allowed_profile_ids.contains(identity)
         })
     });
-    snapshot.recent_profile_context_returns.retain(|key, _| key.split('|').next().is_some_and(|profile_id| allowed_profile_ids.contains(profile_id)));
-    snapshot.missed_opportunity_bands.retain(|band| band.symbol.as_deref().is_none_or(strategy::is_autotrader_symbol_allowed));
+    snapshot.recent_profile_context_returns.retain(|key, _| {
+        key.split('|')
+            .next()
+            .is_some_and(|profile_id| allowed_profile_ids.contains(profile_id))
+    });
+    snapshot.missed_opportunity_bands.retain(|band| {
+        band.symbol
+            .as_deref()
+            .is_none_or(strategy::is_autotrader_symbol_allowed)
+    });
     let bands = snapshot
         .missed_opportunity_bands
         .iter()
@@ -222,9 +234,8 @@ fn next_profile_registration_for_feedback(
 }
 
 fn next_feedback_event(feedback: &[FeedbackEvent], missed_lane: bool) -> Option<&FeedbackEvent> {
-    let is_missed = |event: &&FeedbackEvent| {
-        matches!(event, FeedbackEvent::MissedOpportunityCandidate { .. })
-    };
+    let is_missed =
+        |event: &&FeedbackEvent| matches!(event, FeedbackEvent::MissedOpportunityCandidate { .. });
     if missed_lane {
         feedback.iter().find(is_missed)
     } else {
@@ -338,7 +349,9 @@ fn enqueue_scheduled_missed_opportunity_feedback(
             else {
                 break;
             };
-            settings.missed_opportunity_last_enqueued_at_ms.remove(&oldest);
+            settings
+                .missed_opportunity_last_enqueued_at_ms
+                .remove(&oldest);
         }
     }
     result
@@ -351,7 +364,10 @@ fn enqueue_missed_opportunity_feedback(
     let FeedbackEvent::MissedOpportunityCandidate { event_id, .. } = &event else {
         return MissedFeedbackEnqueueResult::Duplicate;
     };
-    if outbox.iter().any(|pending| feedback_event_id(pending) == event_id) {
+    if outbox
+        .iter()
+        .any(|pending| feedback_event_id(pending) == event_id)
+    {
         return MissedFeedbackEnqueueResult::Duplicate;
     }
     let case_key = missed_opportunity_case_key(&event);
@@ -366,17 +382,20 @@ fn enqueue_missed_opportunity_feedback(
     if outbox.len() >= FEEDBACK_OUTBOX_CAPACITY {
         // Keep the newest missed-opportunity observations useful while never
         // evicting acknowledged-value outcomes (trade and scout feedback).
-        let Some(oldest_missed) = outbox
-            .iter()
-            .position(|pending| matches!(pending, FeedbackEvent::MissedOpportunityCandidate { .. }))
-        else {
+        let Some(oldest_missed) = outbox.iter().position(|pending| {
+            matches!(pending, FeedbackEvent::MissedOpportunityCandidate { .. })
+        }) else {
             return MissedFeedbackEnqueueResult::DroppedOutcomeCapacity;
         };
         outbox.remove(oldest_missed);
         evicted = true;
     }
     outbox.push(event);
-    if evicted { MissedFeedbackEnqueueResult::EvictedOldestMissed } else { MissedFeedbackEnqueueResult::Queued }
+    if evicted {
+        MissedFeedbackEnqueueResult::EvictedOldestMissed
+    } else {
+        MissedFeedbackEnqueueResult::Queued
+    }
 }
 
 #[cfg(test)]
@@ -486,11 +505,9 @@ mod strategy_pause_snapshot_tests {
             settings.profile_registration_outbox[0].profile.profile_id,
             profile.profile_id
         );
-        assert!(
-            !settings
-                .registered_profile_ids
-                .contains(&profile.profile_id)
-        );
+        assert!(!settings
+            .registered_profile_ids
+            .contains(&profile.profile_id));
         assert!(!queue_snapshot_profile_registration(
             &mut settings,
             &profile
@@ -652,7 +669,10 @@ mod strategy_pause_snapshot_tests {
             *event_id = "missed-later".into();
         }
         let mut feedback = vec![missed.clone(), trade.clone(), later_missed];
-        assert_eq!(feedback_event_id(next_feedback_event(&feedback, true).unwrap()), "missed");
+        assert_eq!(
+            feedback_event_id(next_feedback_event(&feedback, true).unwrap()),
+            "missed"
+        );
         assert!(rotate_feedback_event_to_back(&mut feedback, "missed"));
         assert_eq!(
             feedback_event_id(next_feedback_event(&feedback, true).unwrap()),
@@ -761,7 +781,10 @@ mod strategy_pause_snapshot_tests {
 
         feedback.swap(0, 1);
         assert_eq!(feedback_event_id(&feedback[0]), "trade-outcome");
-        assert!(rotate_feedback_event_to_back(&mut feedback, "trade-outcome"));
+        assert!(rotate_feedback_event_to_back(
+            &mut feedback,
+            "trade-outcome"
+        ));
         assert_eq!(feedback_event_id(&feedback[0]), "bad-missed");
         assert_eq!(feedback_event_id(&feedback[1]), "trade-outcome");
     }
@@ -783,10 +806,17 @@ mod strategy_pause_snapshot_tests {
         let mut outbox = (0..FEEDBACK_OUTBOX_CAPACITY)
             .map(|index| missed(format!("missed-{index}")))
             .collect::<Vec<_>>();
-        assert_eq!(enqueue_missed_opportunity_feedback(&mut outbox, missed("newest".into())), MissedFeedbackEnqueueResult::EvictedOldestMissed);
+        assert_eq!(
+            enqueue_missed_opportunity_feedback(&mut outbox, missed("newest".into())),
+            MissedFeedbackEnqueueResult::EvictedOldestMissed
+        );
         assert_eq!(outbox.len(), FEEDBACK_OUTBOX_CAPACITY);
-        assert!(!outbox.iter().any(|event| feedback_event_id(event) == "missed-0"));
-        assert!(outbox.iter().any(|event| feedback_event_id(event) == "newest"));
+        assert!(!outbox
+            .iter()
+            .any(|event| feedback_event_id(event) == "missed-0"));
+        assert!(outbox
+            .iter()
+            .any(|event| feedback_event_id(event) == "newest"));
 
         outbox.clear();
         outbox.resize_with(FEEDBACK_OUTBOX_CAPACITY, || FeedbackEvent::TradeOutcome {
@@ -814,9 +844,14 @@ mod strategy_pause_snapshot_tests {
             threshold_observations: vec![],
             replay_context: None,
         });
-        assert_eq!(enqueue_missed_opportunity_feedback(&mut outbox, missed("cannot-fit".into())), MissedFeedbackEnqueueResult::DroppedOutcomeCapacity);
+        assert_eq!(
+            enqueue_missed_opportunity_feedback(&mut outbox, missed("cannot-fit".into())),
+            MissedFeedbackEnqueueResult::DroppedOutcomeCapacity
+        );
         assert_eq!(outbox.len(), FEEDBACK_OUTBOX_CAPACITY);
-        assert!(outbox.iter().all(|event| matches!(event, FeedbackEvent::TradeOutcome { .. })));
+        assert!(outbox
+            .iter()
+            .all(|event| matches!(event, FeedbackEvent::TradeOutcome { .. })));
     }
 }
 
@@ -1019,6 +1054,12 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         activity_snapshot: Arc::new(Mutex::new(None)),
         settings_persist_notify: Arc::new(Notify::new()),
         settings_persist_write_lock: Arc::new(Mutex::new(())),
+        settings_persist_revision: Arc::new(AtomicU64::new(0)),
+        settings_persist_durable_revision: Arc::new(AtomicU64::new(0)),
+        settings_persist_durable_waiters: Arc::new(AtomicU64::new(0)),
+        settings_persist_batch_notify: Arc::new(Notify::new()),
+        durable_entry_reservation_batch: Arc::new(Mutex::new(Vec::new())),
+        durable_entry_reservation_batch_scheduled: Arc::new(AtomicBool::new(false)),
         durable_feedback_event_ids: Arc::new(Mutex::new(BTreeSet::new())),
         price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
         state_updates,
@@ -1255,7 +1296,9 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         .route("/positions/auto-trader", get(get_status).put(set_enabled))
         .route(
             "/positions/auto-trader/dated-carry",
-            get(get_dated_carry).put(update_dated_carry).post(close_dated_carry),
+            get(get_dated_carry)
+                .put(update_dated_carry)
+                .post(close_dated_carry),
         )
         .route(
             "/positions/auto-trader/parameters",
@@ -1316,15 +1359,16 @@ async fn get_learning_summary(
         let totals = summaries.entry(profile.strategy.clone()).or_default();
         totals.0 = totals.0.saturating_add(profile.learning_samples);
         totals.1 = totals.1.saturating_add(profile.positive_samples);
-        if let Some(evidence) = settings.learned_walk_forward_evidence.get(&profile.profile_id) {
+        if let Some(evidence) = settings
+            .learned_walk_forward_evidence
+            .get(&profile.profile_id)
+        {
             totals.2 = totals.2.saturating_add(evidence.sample_count);
             totals.3 = totals.3.saturating_add(
                 (evidence.positive_net_rate.unwrap_or_default() * evidence.sample_count as f64)
                     .round() as usize,
             );
-            totals.4 += evidence
-                .average_net_return_percent
-                .unwrap_or_default()
+            totals.4 += evidence.average_net_return_percent.unwrap_or_default()
                 * evidence.sample_count as f64;
         }
     }
@@ -1351,27 +1395,34 @@ async fn get_learning_feedback_queue_status(
     let settings = state.settings.lock().await;
     let now_ms = current_time_ms();
     let ages = |class: &str| {
-        settings.feedback_outbox.iter().filter_map(|event| {
-            let event_class = match event {
-                FeedbackEvent::MissedOpportunityCandidate { .. } => "missed_opportunity",
-                FeedbackEvent::ScoutOutcome { .. } => "scout_outcome",
-                FeedbackEvent::TradeOutcome { .. } => "trade_outcome",
-            };
-            if (class == "trade_and_scout" && event_class == "missed_opportunity")
-                || (class != "trade_and_scout" && class != event_class)
-            {
-                return None;
-            }
-            let observed_at = match event {
-                FeedbackEvent::MissedOpportunityCandidate { observed_at_ms, .. }
-                | FeedbackEvent::ScoutOutcome { observed_at_ms, .. }
-                | FeedbackEvent::TradeOutcome { observed_at_ms, .. } => *observed_at_ms,
-            };
-            Some(now_ms.saturating_sub(observed_at))
-        }).max()
+        settings
+            .feedback_outbox
+            .iter()
+            .filter_map(|event| {
+                let event_class = match event {
+                    FeedbackEvent::MissedOpportunityCandidate { .. } => "missed_opportunity",
+                    FeedbackEvent::ScoutOutcome { .. } => "scout_outcome",
+                    FeedbackEvent::TradeOutcome { .. } => "trade_outcome",
+                };
+                if (class == "trade_and_scout" && event_class == "missed_opportunity")
+                    || (class != "trade_and_scout" && class != event_class)
+                {
+                    return None;
+                }
+                let observed_at = match event {
+                    FeedbackEvent::MissedOpportunityCandidate { observed_at_ms, .. }
+                    | FeedbackEvent::ScoutOutcome { observed_at_ms, .. }
+                    | FeedbackEvent::TradeOutcome { observed_at_ms, .. } => *observed_at_ms,
+                };
+                Some(now_ms.saturating_sub(observed_at))
+            })
+            .max()
     };
-    let execution_oldest_age_ms = settings.execution_feedback_outbox.iter()
-        .map(|event| now_ms.saturating_sub(event.observed_at_ms)).max();
+    let execution_oldest_age_ms = settings
+        .execution_feedback_outbox
+        .iter()
+        .map(|event| now_ms.saturating_sub(event.observed_at_ms))
+        .max();
     axum::Json(serde_json::json!({
         "feedback_capacity": FEEDBACK_OUTBOX_CAPACITY,
         "feedback_depth": settings.feedback_outbox.len(),
@@ -1437,7 +1488,10 @@ fn apply_feedback_delivery_stats(
 
 async fn record_feedback_attempt(state: &AutoTraderState, class: &str) {
     let mut settings = state.settings.lock().await;
-    let stats = settings.learning_feedback_stats.entry(class.to_owned()).or_default();
+    let stats = settings
+        .learning_feedback_stats
+        .entry(class.to_owned())
+        .or_default();
     stats.attempts = stats.attempts.saturating_add(1);
     stats.last_attempt_at_ms = Some(current_time_ms());
     drop(settings);
@@ -1450,7 +1504,10 @@ async fn record_feedback_delivery(
     result: FeedbackDeliveryResult,
 ) {
     let mut settings = state.settings.lock().await;
-    let stats = settings.learning_feedback_stats.entry(class.to_owned()).or_default();
+    let stats = settings
+        .learning_feedback_stats
+        .entry(class.to_owned())
+        .or_default();
     apply_feedback_delivery_stats(stats, result, current_time_ms());
     drop(settings);
     let _ = request_settings_persist(state);
@@ -1463,7 +1520,10 @@ async fn record_feedback_terminal_drop(
     drop_kind: FeedbackTerminalDropKind,
 ) {
     let mut settings = state.settings.lock().await;
-    let stats = settings.learning_feedback_stats.entry(class.to_owned()).or_default();
+    let stats = settings
+        .learning_feedback_stats
+        .entry(class.to_owned())
+        .or_default();
     apply_feedback_terminal_drop_stats(stats, reason, drop_kind, current_time_ms());
     drop(settings);
     let _ = request_settings_persist(state);
@@ -1488,8 +1548,7 @@ fn apply_feedback_terminal_drop_stats(
             stats.evicted_oldest = stats.evicted_oldest.saturating_add(1);
         }
         FeedbackTerminalDropKind::OutcomeCapacity => {
-            stats.outcome_capacity_rejections =
-                stats.outcome_capacity_rejections.saturating_add(1);
+            stats.outcome_capacity_rejections = stats.outcome_capacity_rejections.saturating_add(1);
         }
         FeedbackTerminalDropKind::PermanentRejection => {
             stats.permanent_rejections = stats.permanent_rejections.saturating_add(1);
@@ -1529,7 +1588,10 @@ async fn deliver_learning_payload(
                 },
             )
             .await;
-            crate::service_log!("WARN", "Learning rejected {class} with status {status}: {reason}");
+            crate::service_log!(
+                "WARN",
+                "Learning rejected {class} with status {status}: {reason}"
+            );
             if is_permanent_learning_rejection(status) {
                 FeedbackDeliveryOutcome::PermanentRejection { status, reason }
             } else {
@@ -1564,11 +1626,21 @@ async fn ensure_feedback_event_durable(
     state: &AutoTraderState,
     event_id: &str,
 ) -> Result<bool, (StatusCode, String)> {
-    if state.durable_feedback_event_ids.lock().await.contains(event_id) {
+    if state
+        .durable_feedback_event_ids
+        .lock()
+        .await
+        .contains(event_id)
+    {
         return Ok(false);
     }
+    request_settings_persist(state)?;
     persist_settings_snapshot_durable(state).await?;
-    state.durable_feedback_event_ids.lock().await.insert(event_id.to_owned());
+    state
+        .durable_feedback_event_ids
+        .lock()
+        .await
+        .insert(event_id.to_owned());
     Ok(true)
 }
 
@@ -1615,12 +1687,26 @@ mod durable_feedback_event_tests {
         };
         state.settings.lock().await.feedback_outbox.push(event);
 
-        assert!(ensure_feedback_event_durable(&state, "trade:durable-before-send").await.unwrap());
-        assert!(!ensure_feedback_event_durable(&state, "trade:durable-before-send").await.unwrap());
+        assert!(
+            ensure_feedback_event_durable(&state, "trade:durable-before-send")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !ensure_feedback_event_durable(&state, "trade:durable-before-send")
+                .await
+                .unwrap()
+        );
         let restored = read_settings_database(&path).unwrap().unwrap();
         let Some(FeedbackEvent::TradeOutcome {
-            trade_id, opportunity_id, episode_id, profile_version, entry_profile_id, ..
-        }) = restored.feedback_outbox.first() else {
+            trade_id,
+            opportunity_id,
+            episode_id,
+            profile_version,
+            entry_profile_id,
+            ..
+        }) = restored.feedback_outbox.first()
+        else {
             panic!("canonical feedback was not committed before delivery")
         };
         assert_eq!(trade_id.as_deref(), Some("trade-v1"));
@@ -1687,7 +1773,7 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             service_lane = (service_lane + 1) % 4;
             if lane == 0 {
                 let registration = {
-                let settings = publisher_state.settings.lock().await;
+                    let settings = publisher_state.settings.lock().await;
                     next_profile_registration_for_feedback(
                         &settings.profile_registration_outbox,
                         None,
@@ -1707,7 +1793,9 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                         settings
                             .profile_registration_outbox
                             .retain(|pending| pending.profile.profile_id != profile_id);
-                        settings.profile_registration_enqueued_at_ms.remove(&profile_id);
+                        settings
+                            .profile_registration_enqueued_at_ms
+                            .remove(&profile_id);
                         settings.registered_profile_ids.insert(profile_id);
                         drop(settings);
                         if let Err(error) = request_settings_persist(&publisher_state) {
@@ -1717,11 +1805,17 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                                 error.1
                             );
                         }
-                    } else if matches!(delivery, FeedbackDeliveryOutcome::PermanentRejection { .. }) {
+                    } else if matches!(delivery, FeedbackDeliveryOutcome::PermanentRejection { .. })
+                    {
                         let mut settings = publisher_state.settings.lock().await;
-                        if let Some(index) = settings.profile_registration_outbox.iter().position(
-                            |pending| pending.profile.profile_id == registration.profile.profile_id,
-                        ) {
+                        if let Some(index) =
+                            settings
+                                .profile_registration_outbox
+                                .iter()
+                                .position(|pending| {
+                                    pending.profile.profile_id == registration.profile.profile_id
+                                })
+                        {
                             if index + 1 < settings.profile_registration_outbox.len() {
                                 let rejected = settings.profile_registration_outbox.remove(index);
                                 settings.profile_registration_outbox.push(rejected);
@@ -1739,7 +1833,9 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                 };
                 if let Some(event) = event {
                     let event_id = feedback_event_id(&event).to_owned();
-                    if let Err(error) = ensure_feedback_event_durable(&publisher_state, &event_id).await {
+                    if let Err(error) =
+                        ensure_feedback_event_durable(&publisher_state, &event_id).await
+                    {
                         crate::service_log!(
                             "WARN",
                             "Could not durably persist Learning feedback before delivery: {}",
@@ -1783,9 +1879,9 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                         FeedbackDeliveryOutcome::PermanentRejection { status, reason } => {
                             let mut settings = publisher_state.settings.lock().await;
                             if matches!(&event, FeedbackEvent::MissedOpportunityCandidate { .. }) {
-                                settings.feedback_outbox.retain(|pending| {
-                                    feedback_event_id(pending) != event_id
-                                });
+                                settings
+                                    .feedback_outbox
+                                    .retain(|pending| feedback_event_id(pending) != event_id);
                                 drop(settings);
                                 publisher_state
                                     .durable_feedback_event_ids
@@ -1795,7 +1891,9 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
                                 record_feedback_terminal_drop(
                                     &publisher_state,
                                     class,
-                                    &format!("permanent HTTP {status} rejection for {event_id}: {reason}"),
+                                    &format!(
+                                        "permanent HTTP {status} rejection for {event_id}: {reason}"
+                                    ),
                                     FeedbackTerminalDropKind::PermanentRejection,
                                 )
                                 .await;
@@ -1829,12 +1927,12 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             }
             if lane == 2 {
                 let execution_event = publisher_state
-                .settings
-                .lock()
-                .await
-                .execution_feedback_outbox
-                .first()
-                .cloned();
+                    .settings
+                    .lock()
+                    .await
+                    .execution_feedback_outbox
+                    .first()
+                    .cloned();
                 if let Some(event) = execution_event {
                     match deliver_learning_payload(
                         &publisher_state,
@@ -1881,7 +1979,6 @@ fn start_learning_feedback_worker(state: &AutoTraderState) {
             }
         }
     });
-
 }
 
 async fn receive_strategy_decision(
@@ -2153,16 +2250,32 @@ async fn receive_strategy_decision(
                 }
                 MissedFeedbackEnqueueResult::EvictedOldestMissed => {
                     drop(settings);
-                    record_feedback_terminal_drop(&state, "missed_opportunity", "Evicted oldest missed-opportunity candidate at queue capacity", FeedbackTerminalDropKind::EvictedOldest).await;
+                    record_feedback_terminal_drop(
+                        &state,
+                        "missed_opportunity",
+                        "Evicted oldest missed-opportunity candidate at queue capacity",
+                        FeedbackTerminalDropKind::EvictedOldest,
+                    )
+                    .await;
                     let _ = request_settings_persist(&state);
                 }
                 MissedFeedbackEnqueueResult::DroppedOutcomeCapacity => {
                     drop(settings);
-                    record_feedback_terminal_drop(&state, "missed_opportunity", "Rejected candidate: feedback outbox is full of trade/scout outcomes", FeedbackTerminalDropKind::OutcomeCapacity).await;
-                    crate::service_log!("WARN", "Dropped missed-opportunity feedback {}: feedback outbox is full of trade/scout outcomes", event_id);
+                    record_feedback_terminal_drop(
+                        &state,
+                        "missed_opportunity",
+                        "Rejected candidate: feedback outbox is full of trade/scout outcomes",
+                        FeedbackTerminalDropKind::OutcomeCapacity,
+                    )
+                    .await;
+                    crate::service_log!(
+                        "WARN",
+                        "Dropped missed-opportunity feedback {}: feedback outbox is full of trade/scout outcomes",
+                        event_id
+                    );
                 }
-                MissedFeedbackEnqueueResult::Duplicate
-                | MissedFeedbackEnqueueResult::Throttled => {}
+                MissedFeedbackEnqueueResult::Duplicate | MissedFeedbackEnqueueResult::Throttled => {
+                }
             }
         }
         return Ok(StatusCode::ACCEPTED);
@@ -2281,18 +2394,12 @@ async fn receive_strategy_worker_diagnostic(
         diagnostic.profile_id.clone().unwrap_or_default(),
     );
     let mut diagnostics = state.latest_worker_diagnostics.lock().await;
-    diagnostics.retain(|_, previous| {
-        now_ms.saturating_sub(previous.event_time_ms) <= 10 * 60_000
-    });
+    diagnostics.retain(|_, previous| now_ms.saturating_sub(previous.event_time_ms) <= 10 * 60_000);
     if state
         .latest_worker_decisions
         .lock()
         .await
-        .get(&(
-            key.0.clone(),
-            key.1.clone(),
-            key.2.clone(),
-        ))
+        .get(&(key.0.clone(), key.1.clone(), key.2.clone()))
         .is_some_and(|report| report.event_time_ms >= diagnostic.event_time_ms)
     {
         return Ok(StatusCode::ACCEPTED);
@@ -2505,10 +2612,7 @@ fn migrate_closed_trade_metrics(settings: &mut Settings) {
                 let return_percent = settings.closed_trade_returns_percent[index];
                 let realized = settings.closed_trade_realized_usd[index];
                 let fees = settings.closed_trade_fees_usd[index];
-                if return_percent.is_finite()
-                    && realized.is_finite()
-                    && fees.is_finite()
-                {
+                if return_percent.is_finite() && realized.is_finite() && fees.is_finite() {
                     valid.push((
                         index,
                         return_percent,
@@ -2542,7 +2646,9 @@ fn migrate_closed_trade_metrics(settings: &mut Settings) {
     }
 
     let count = settings.closed_trade_returns_percent.len();
-    settings.closed_trade_audit.resize(count, ClosedTradeAuditRecord::default());
+    settings
+        .closed_trade_audit
+        .resize(count, ClosedTradeAuditRecord::default());
     settings.closed_trade_audit.truncate(count);
     for index in 0..count {
         if settings.closed_trade_audit[index].status == ClosedTradeAuditStatus::NeedsAudit {
@@ -2556,14 +2662,22 @@ fn migrate_closed_trade_metrics(settings: &mut Settings) {
             };
             continue;
         }
-        let timestamp = settings.closed_trade_timestamps_ms.get(index).copied().unwrap_or_default();
-        let matching_orders = settings.orders.iter().filter(|order| {
-            order.purpose == "strategy-disabled"
-                && order.status == "filled"
-                && order.strategy.as_deref() == Some("unattributed")
-                && order.timestamp <= timestamp
-                && timestamp.saturating_sub(order.timestamp) <= 5_000
-        }).collect::<Vec<_>>();
+        let timestamp = settings
+            .closed_trade_timestamps_ms
+            .get(index)
+            .copied()
+            .unwrap_or_default();
+        let matching_orders = settings
+            .orders
+            .iter()
+            .filter(|order| {
+                order.purpose == "strategy-disabled"
+                    && order.status == "filled"
+                    && order.strategy.as_deref() == Some("unattributed")
+                    && order.timestamp <= timestamp
+                    && timestamp.saturating_sub(order.timestamp) <= 5_000
+            })
+            .collect::<Vec<_>>();
         if !matching_orders.is_empty() {
             let unique_symbol = matching_orders
                 .iter()
@@ -2654,14 +2768,26 @@ mod closed_trade_metrics_migration_tests {
         let metrics = calculate_activity_learning_metrics(&settings, 0);
 
         assert_eq!(settings.closed_trade_returns_percent, vec![-90.0, 0.5]);
-        assert_eq!(settings.closed_trade_audit[0].status, ClosedTradeAuditStatus::NeedsAudit);
-        assert_eq!(settings.closed_trade_audit[0].symbol.as_deref(), Some("BNB-USDT"));
-        assert_eq!(settings.closed_trade_audit[1].status, ClosedTradeAuditStatus::Eligible);
+        assert_eq!(
+            settings.closed_trade_audit[0].status,
+            ClosedTradeAuditStatus::NeedsAudit
+        );
+        assert_eq!(
+            settings.closed_trade_audit[0].symbol.as_deref(),
+            Some("BNB-USDT")
+        );
+        assert_eq!(
+            settings.closed_trade_audit[1].status,
+            ClosedTradeAuditStatus::Eligible
+        );
         assert_eq!(metrics.exit_learning_samples, 1);
         assert_eq!(metrics.closed_trade_average_return_percent, Some(0.5));
         assert_eq!(metrics.closed_trade_realized_usd, Some(0.05));
         assert_eq!(metrics.closed_trade_needs_audit_count, 1);
-        assert_eq!(metrics.closed_trade_needs_audit_recent[0].reason, "legacy_unattributed_strategy_disabled_close");
+        assert_eq!(
+            metrics.closed_trade_needs_audit_recent[0].reason,
+            "legacy_unattributed_strategy_disabled_close"
+        );
     }
 
     #[test]

@@ -111,6 +111,10 @@ fn position_router(store: Arc<PositionStore>) -> Router {
         .route("/positions/realized-pnl", get(get_realized_pnl))
         .route("/positions/fee-summary", get(get_fee_summary))
         .route("/positions/financial-snapshot", get(get_financial_snapshot))
+        .route(
+            "/positions/portfolio-evidence/intervals",
+            get(get_portfolio_evidence_intervals).post(request_portfolio_evidence_baseline),
+        )
         .route("/positions/account", get(get_account))
         .route("/account", get(get_account))
         .route("/positions/account/topups", post(top_up_account))
@@ -132,6 +136,7 @@ fn position_router(store: Arc<PositionStore>) -> Router {
                 .post(submit_order)
                 .layer(middleware::from_fn(order_handler_timing)),
         )
+        .route("/positions/orders/history", get(get_orders_history))
         .route("/positions/barriers", get(get_barrier_orders))
         .route(
             "/positions/barriers/profit-target",
@@ -154,6 +159,7 @@ pub async fn start_test_rsocket_service(
     path: PathBuf,
     address: String,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    crate::positions::paper_exchange_client::clear_paper_exchange_client_for_tests();
     let store = Arc::new(PositionStore::load_from_path_without_writer(path).await?);
     let _ = POSITION_STORE_FOR_QUEUE_METRICS.set(Arc::clone(&store));
     let router = position_router(Arc::clone(&store));

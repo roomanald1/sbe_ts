@@ -30,6 +30,13 @@ fn paper_exchange_client() -> &'static StdMutex<Option<Arc<Client>>> {
     CLIENT.get_or_init(|| StdMutex::new(None))
 }
 
+#[cfg(feature = "test-support")]
+pub(crate) fn clear_paper_exchange_client_for_tests() {
+    *paper_exchange_client()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
 async fn get_paper_exchange_client() -> anyhow::Result<Arc<Client>> {
     if let Some(client) = paper_exchange_client()
         .lock()

@@ -61,11 +61,14 @@ async fn sync_protective_stops(
                 .map(|position| position.average_entry_price)
                 .filter(|price| *price > 0.0)
                 .unwrap_or(fill_price);
-            let (price_path, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry, strategy_decision, trade_id) = settings
+            let (price_path, price_path_total_samples, price_path_truncated, position_quantity, effective_stop_loss_percent, effective_take_profit_percent, entry_fees, entry_quantity, position_entry_timestamp_ms, prior_realized_pnl, initial_entry_notional, prior_total_fees, total_entry_fees_paid, entry_context, scout_entry, strategy_decision, trade_id) = settings
                 .strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .map(|position| (
                     position.price_path.clone(),
+                    position.price_path_total_samples,
+                    position.price_path_truncated,
+                    position.quantity,
                     position.stop_loss_percent.unwrap_or(settings.stop_loss_percent),
                     position.take_profit_percent.or(position.horizon_take_profit_percent).unwrap_or(settings.take_profit_percent),
                     position.entry_fees,
@@ -81,7 +84,8 @@ async fn sync_protective_stops(
                     position.trade_id.clone(),
                 ))
                 .unwrap_or((
-                    Vec::new(), settings.stop_loss_percent, settings.take_profit_percent,
+                    Vec::new(), 0, false, 0.0,
+                    settings.stop_loss_percent, settings.take_profit_percent,
                     0.0, 0.0, 0, 0.0, 0.0, 0.0, 0.0, String::new(), false, None, None,
                 ));
             let (realized_delta, _learned_key) = apply_auto_fill(
@@ -224,6 +228,9 @@ async fn sync_protective_stops(
                 .and_then(|order| order.strategy_realized_pnl)
                 .unwrap_or(strategy_realized_delta);
             drop(settings);
+            if post_stop_cooldown_started {
+                notify_live_profile_updates(state);
+            }
             if trade_feedback_enqueued || post_stop_cooldown_started {
                 if let Err(error) = persist_settings_snapshot_durable(state).await {
                     crate::service_log!("ERROR", "Could not durably persist closed-trade or post-stop state: {}", error.1);
@@ -234,6 +241,15 @@ async fn sync_protective_stops(
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
+                let price_path_evidence = price_path_excursion_evidence_for_samples(
+                    &price_path,
+                    price_path_total_samples,
+                    price_path_truncated,
+                    entry_price_before,
+                    position_quantity,
+                    position_entry_timestamp_ms,
+                    update_timestamp,
+                );
                 let mut payload = protective_stop_audit_payload(
                     &decision_id,
                     &stop,
@@ -255,6 +271,7 @@ async fn sync_protective_stops(
                     effective_stop_loss_percent,
                     effective_take_profit_percent,
                     &price_path,
+                    price_path_evidence,
                     fully_closed,
                 );
                 if let Some(trade_id) = trade_id.as_deref() {
@@ -315,6 +332,7 @@ fn protective_stop_audit_payload(
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
     price_path: &[TradePriceSample],
+    price_path_evidence: serde_json::Value,
     trade_closed: bool,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -361,7 +379,12 @@ fn protective_stop_audit_payload(
             "timestamp": sample.timestamp,
             "bid": sample.bid,
             "ask": sample.ask,
+            "source_updated_at_ms": sample.source_updated_at_ms,
+            "freshness_contract_version": sample.freshness_contract_version,
+            "freshness_max_age_ms": sample.freshness_max_age_ms,
+            "source_fresh": sample.source_fresh,
         })).collect::<Vec<_>>(),
+        "price_path_evidence": price_path_evidence,
         "net_return_percent": (entry_price_before > 0.0).then_some(
             cumulative_pnl / initial_entry_notional.max(1e-12) * 100.0
         ),
@@ -376,9 +399,18 @@ mod protective_stop_audit_tests {
     #[test]
     fn audit_payload_records_barrier_fill_and_duration() {
         let stop = ProtectiveStop { barrier_id: "barrier-1".into(), order_timestamp: 1_000, quantity: 2.0, ..ProtectiveStop::default() };
-        let path = [TradePriceSample { timestamp: 1_500, bid: 99.0, ask: 101.0 }];
+        let path = [TradePriceSample { timestamp: 1_500, bid: 99.0, ask: 101.0, ..TradePriceSample::default() }];
         let barrier = serde_json::json!({"side":"sell","triggered_at":1200,"average_execution_price":98.0,"trigger_price":99.0,"trigger_direction":"below"});
-        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "strategy-a", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 200.0, 0.2, 0.3, 1_000, 5.0, 10.0, &path, true);
+        let path_evidence = price_path_excursion_evidence_for_samples(
+            &path,
+            1,
+            false,
+            100.0,
+            2.0,
+            1_000,
+            2_000,
+        );
+        let payload = protective_stop_audit_payload("decision-3", &stop, 2_000, "BTC-USDT", "strategy-a", "filled", &barrier, 2.0, 0.1, -4.1, 100.0, 0.2, 2.0, 200.0, 0.2, 0.3, 1_000, 5.0, 10.0, &path, path_evidence, true);
 
         assert_eq!(payload["stage"], "exit:stop:1000");
         assert_eq!(payload["barrier_order_id"], "barrier-1");

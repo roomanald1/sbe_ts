@@ -24,6 +24,18 @@ function why(row: Record<string, unknown>) {
   return 'Strategy worker returned this evaluation; no specific explanation was attached.';
 }
 
+function formatElapsedSinceDispatch(elapsedMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}h ${minutes}m`
+    : minutes > 0
+      ? `${minutes}m ${seconds}s`
+      : `${seconds}s`;
+}
+
 export function LearningScoutActivityWidget() {
   const model = useMemo(() => new LearningScoutActivityModel(), []);
   useEffect(() => {
@@ -50,6 +62,82 @@ export function LearningScoutActivityWidget() {
         <p className="auto-trader-learning-error" role="alert">
           Could not load Scout profiles: {state.profilesError}
         </p>
+      )}
+      <header className="auto-trader-learning-decisions-head">
+        <strong>Scout assignments dispatched</strong>
+        <small>
+          These assignments have been dispatched to workers. The API does not
+          report whether a worker has started processing them.
+        </small>
+      </header>
+      {!state.activeAssignmentsAvailable && (
+        <p>
+          Active Scout assignment details are unavailable from this response.
+        </p>
+      )}
+      {state.activeAssignmentsAvailable &&
+        state.activeAssignments.length === 0 && (
+          <p>No Scout assignments are currently dispatched.</p>
+        )}
+      {state.activeAssignments.length > 0 && (
+        <div className="auto-trader-learning-decisions-table-wrap">
+          <table className="auto-trader-learning-decisions-table">
+            <thead>
+              <tr>
+                <th>Assignment</th>
+                <th>Symbol</th>
+                <th>Strategy</th>
+                <th>Profile</th>
+                <th>Status</th>
+                <th>Time since dispatch</th>
+                <th>Mode</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.activeAssignments.map((assignment) => {
+                const profile = assignment.profile;
+                const profileText = profile
+                  ? [
+                      profile.profile_id ?? 'Profile ID unavailable',
+                      profile.version == null ? null : `v${profile.version}`,
+                      profile.parameters
+                        ? JSON.stringify(profile.parameters)
+                        : null,
+                      profile.learning_samples == null
+                        ? null
+                        : `samples ${profile.learning_samples}`,
+                      profile.positive_samples == null
+                        ? null
+                        : `positive ${profile.positive_samples}`,
+                      profile.realized_pnl == null
+                        ? null
+                        : `realized P&L ${profile.realized_pnl}`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : 'Profile unavailable';
+                return (
+                  <tr key={assignment.assignment_id}>
+                    <td>{assignment.assignment_id}</td>
+                    <td>{assignment.symbol}</td>
+                    <td>{assignment.strategy}</td>
+                    <td title={profileText}>{profileText}</td>
+                    <td>
+                      {assignment.lifecycle_status === 'assigned'
+                        ? 'Assigned; worker start not reported'
+                        : assignment.lifecycle_status}
+                    </td>
+                    <td>
+                      {formatElapsedSinceDispatch(assignment.elapsed_ms)} since{' '}
+                      {new Date(assignment.assigned_at_ms).toLocaleTimeString()}
+                    </td>
+                    <td>{assignment.mode}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
       {!state.loading && !state.profilesError && profiles.length === 0 && (
         <p>No Scout profiles are currently configured.</p>
@@ -121,6 +209,7 @@ export function LearningScoutActivityWidget() {
                 <th>Symbol</th>
                 <th>Strategy</th>
                 <th>Profile / parameters</th>
+                <th>Recorded runtime context</th>
                 <th>Decision</th>
                 <th>Prior Scout n</th>
                 <th>Why / evidence</th>
@@ -144,7 +233,12 @@ export function LearningScoutActivityWidget() {
                 const profileText =
                   [profile, parameters && JSON.stringify(parameters)]
                     .filter(Boolean)
-                    .join(' · ') || 'Baseline profile';
+                    .join(' · ') || 'Profile unavailable in activity response';
+                const runtimeContext = [
+                  `Mode: ${row.mode || 'unavailable'}`,
+                  `Request: ${row.request_id || 'unavailable'}`,
+                  `Assignment: ${row.assignment_id || 'unavailable'}`,
+                ].join(' · ');
                 const evidenceText = evidence
                   ? `Prior outcomes: ${evidence.sample_count}; positive ${((evidence.positive_net_rate ?? 0) * 100).toFixed(0)}%; average ${(evidence.average_net_return_percent ?? 0).toFixed(3)}%; lower bound ${evidence.expectancy_ci_low_percent?.toFixed(3) ?? 'unavailable'}%.`
                   : 'No prior matching Scout outcomes.';
@@ -155,6 +249,7 @@ export function LearningScoutActivityWidget() {
                     <td>{row.symbol}</td>
                     <td>{row.strategy}</td>
                     <td title={profileText}>{profileText}</td>
+                    <td title={runtimeContext}>{runtimeContext}</td>
                     <td>{row.decision.replaceAll('_', ' ')}</td>
                     <td>{row.evidence_sample_count}</td>
                     <td title={explanation}>

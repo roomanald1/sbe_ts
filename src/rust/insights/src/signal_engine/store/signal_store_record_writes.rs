@@ -74,10 +74,14 @@ mod evaluation_write_tests {
             path_low_timestamp: 10_000,
             long_time_to_positive_net_seconds: None,
             short_time_to_positive_net_seconds: None,
+            scout_path_evidence: None,
         };
 
         let records = evaluation_records(&evaluation);
         assert_eq!(records.len(), 1);
-        assert!(matches!(records.as_slice(), [StoredSignalRecord::Evaluation(_)]));
+        assert!(matches!(
+            records.as_slice(),
+            [StoredSignalRecord::Evaluation(_)]
+        ));
     }
 }

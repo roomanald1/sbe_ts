@@ -258,6 +258,9 @@ pub struct ScoutMarkoutRequest {
     pub long_time_to_positive_net_seconds: Option<u64>,
     #[serde(default)]
     pub short_time_to_positive_net_seconds: Option<u64>,
+    /// Versioned Insights executable-price-path summary; legacy inputs omit it.
+    #[serde(default)]
+    pub scout_path_evidence: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

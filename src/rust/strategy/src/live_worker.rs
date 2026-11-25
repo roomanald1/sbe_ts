@@ -28,6 +28,92 @@ fn live_worker_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn live_thesis_event_identity(
+    source_event_id: &str,
+    strategy: Strategy,
+    signal: &crate::StrategyMarketSignal,
+    profile: &crate::LiveStrategyProfile,
+    active_market_state_key: Option<&str>,
+) -> crate::LiveStrategyEventIdentity {
+    live_thesis_event_identity_with_reset_generation(
+        source_event_id,
+        strategy,
+        signal,
+        profile,
+        active_market_state_key,
+        0,
+    )
+}
+
+fn live_thesis_event_identity_with_reset_generation(
+    source_event_id: &str,
+    strategy: Strategy,
+    signal: &crate::StrategyMarketSignal,
+    profile: &crate::LiveStrategyProfile,
+    active_market_state_key: Option<&str>,
+    episode_reset_generation: u64,
+) -> crate::LiveStrategyEventIdentity {
+    crate::LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+        source_event_id,
+        strategy,
+        &signal.symbol,
+        &profile.profile_id,
+        &signal.direction,
+        active_market_state_key,
+        episode_reset_generation,
+    )
+}
+
+fn live_episode_reset_generation(
+    resets: &[crate::LiveStrategyEpisodeResetGeneration],
+    symbol: &str,
+    profile_id: &str,
+) -> u64 {
+    resets
+        .iter()
+        .find(|reset| reset.symbol == symbol && reset.profile_id == profile_id)
+        .map(|reset| reset.generation)
+        .unwrap_or(0)
+}
+
+fn apply_identity_to_signal(
+    signal: &mut crate::StrategyMarketSignal,
+    identity: &crate::LiveStrategyEventIdentity,
+) {
+    let mut metadata = signal
+        .strategy_decision
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.insert(
+        "live_worker_event_id".into(),
+        serde_json::Value::String(identity.event_id.clone()),
+    );
+    metadata.insert(
+        "live_worker_event_identity_version".into(),
+        serde_json::Value::from(identity.schema_version),
+    );
+    metadata.insert(
+        "live_worker_episode_id".into(),
+        serde_json::Value::String(identity.episode_id.clone()),
+    );
+    metadata.insert(
+        "live_worker_episode_reset_generation".into(),
+        serde_json::Value::from(identity.episode_reset_generation),
+    );
+    signal.strategy_decision = Some(serde_json::Value::Object(metadata));
+}
+
+fn apply_identity_to_report(
+    report: &mut crate::LiveStrategyDecisionReport,
+    identity: &crate::LiveStrategyEventIdentity,
+) {
+    report.event_id = identity.event_id.clone();
+    report.event_identity_version = identity.schema_version;
+    report.episode_id = identity.episode_id.clone();
+    apply_identity_to_signal(&mut report.signal, identity);
+}
+
 fn route_live_profiles(
     eligible_profiles: Vec<crate::LiveStrategyProfile>,
     market_state: Option<&crate::LiveMarketStateClassification>,
@@ -320,6 +406,16 @@ impl LiveWorker {
             }),
             "pushed profile set contains an open position without its profile"
         );
+        let mut reset_keys = std::collections::BTreeSet::new();
+        anyhow::ensure!(
+            update.episode_reset_generations.iter().all(|reset| {
+                !reset.symbol.trim().is_empty()
+                    && reset.generation > 0
+                    && profile_ids.contains(&reset.profile_id)
+                    && reset_keys.insert((reset.symbol.as_str(), reset.profile_id.as_str()))
+            }),
+            "pushed profile set contains an invalid or duplicate episode reset"
+        );
         self.metrics.set_profile_set_version(update.set_version);
         self.metrics.record_profile_update(live_worker_now_ms());
         *self.profiles.write().await = Some(update);
@@ -426,7 +522,6 @@ impl LiveWorker {
         {
             return self.evaluate_dated_carry_update(update).await;
         }
-        let identity = crate::LiveStrategyEventIdentity::from_source_event_id(&update.event_id);
         if let Some(snapshot) = update.daily_snapshot.clone() {
             if !self.remember_insight_event("daily", &update.event_id).await
                 || update.event_time_ms != snapshot.as_of_ms
@@ -460,6 +555,7 @@ impl LiveWorker {
             .await?;
             return Ok(());
         };
+        let episode_reset_generations = profile_set.episode_reset_generations.clone();
         if !profile_set.enabled {
             self.report_worker_diagnostic(
                 &update,
@@ -561,6 +657,20 @@ impl LiveWorker {
                 signal.market_regime = Some(state.evidence_regime.to_owned());
             }
             signal.market_state = market_state.clone();
+            let identity = live_thesis_event_identity_with_reset_generation(
+                &update.event_id,
+                self.config.strategy,
+                &signal,
+                &profile,
+                market_state
+                    .as_ref()
+                    .map(|state| state.profile_key.as_str()),
+                live_episode_reset_generation(
+                    &episode_reset_generations,
+                    &signal.symbol,
+                    &profile.profile_id,
+                ),
+            );
             signal.strategy_decision = Some(serde_json::json!({
                 "strategy": self.config.strategy.as_str(),
                 "strategy_parameters": profile.parameters,
@@ -576,6 +686,7 @@ impl LiveWorker {
                 "profile_state_key": profile.market_state_key,
                 "profile_fallback_reason": if profile.market_regime.is_none() && profile.market_state_key.is_none() && !symbol_has_open_position { Some(if market_state.is_none() { "market_state_uncertain" } else { "matching_regime_profile_missing_or_under_sampled" }) } else { None },
             }));
+            apply_identity_to_signal(&mut signal, &identity);
             let make_entry_request = |walk_forward_evidence| crate::LiveEvaluationRequest {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                 request_id: format!(
@@ -672,6 +783,7 @@ impl LiveWorker {
                 "strategy_walk_forward": walk_forward_evidence,
                 "direction_source": "insights_subscription",
             }));
+            apply_identity_to_signal(&mut signal, &identity);
             let missing_entry_decision = !has_open_position && response.decision.is_none();
             let decision = if has_open_position {
                 let position_request = crate::LiveEvaluationRequest {
@@ -791,9 +903,9 @@ impl LiveWorker {
             };
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: identity.event_id.clone(),
-                event_identity_version: identity.schema_version,
-                episode_id: identity.episode_id.clone(),
+                event_id: String::new(),
+                event_identity_version: 0,
+                episode_id: String::new(),
                 strategy: self.config.strategy,
                 symbol: signal.symbol.clone(),
                 profile_id: profile.profile_id.clone(),
@@ -823,6 +935,8 @@ impl LiveWorker {
                 dated_carry_candidate: None,
                 dated_carry_settlement: None,
             };
+            let mut report = report;
+            apply_identity_to_report(&mut report, &identity);
             let callback_stage = if priority_callback {
                 "AutoTrader entry/position callback"
             } else {
@@ -880,7 +994,8 @@ impl LiveWorker {
         &self,
         update: crate::StrategyInsightUpdate,
     ) -> anyhow::Result<()> {
-        let identity = crate::LiveStrategyEventIdentity::from_source_event_id(&update.event_id);
+        let source_identity =
+            crate::LiveStrategyEventIdentity::from_source_event_id(&update.event_id);
         if self.config.strategy != Strategy::DatedCarry
             || live_worker_now_ms().saturating_sub(update.event_time_ms) > 120_000
             || !self
@@ -894,11 +1009,11 @@ impl LiveWorker {
         }
         if let Some(scan) = update.dated_carry_scan {
             let signal = carry_placeholder_signal("BTCUSDT", update.event_time_ms, None);
-            let report = crate::LiveStrategyDecisionReport {
+            let mut report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: identity.event_id.clone(),
-                event_identity_version: identity.schema_version,
-                episode_id: identity.episode_id.clone(),
+                event_id: source_identity.event_id.clone(),
+                event_identity_version: source_identity.schema_version,
+                episode_id: source_identity.episode_id.clone(),
                 strategy: Strategy::DatedCarry,
                 symbol: signal.symbol.clone(),
                 profile_id: String::new(),
@@ -913,6 +1028,7 @@ impl LiveWorker {
                 dated_carry_candidate: None,
                 dated_carry_settlement: None,
             };
+            apply_identity_to_report(&mut report, &source_identity);
             return self.report_dated_carry_decision(report).await;
         }
         if let Some(candidate) = update.dated_carry_candidate {
@@ -921,6 +1037,7 @@ impl LiveWorker {
             let Some(profile_set) = profile_set.filter(|set| set.enabled) else {
                 return Ok(());
             };
+            let episode_reset_generations = profile_set.episode_reset_generations.clone();
             let Some(profile) = profile_set
                 .profiles
                 .into_iter()
@@ -951,7 +1068,22 @@ impl LiveWorker {
                 update.event_time_ms,
                 Some(&eval_profile),
             );
-            let report = crate::LiveStrategyDecisionReport {
+            let candidate_state_key =
+                format!("{}:{}", candidate.future_symbol, candidate.expiry_ms);
+            let identity = crate::LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+                &update.event_id,
+                Strategy::DatedCarry,
+                &candidate.spot_symbol,
+                &profile.profile_id,
+                "carry",
+                Some(&candidate_state_key),
+                live_episode_reset_generation(
+                    &episode_reset_generations,
+                    &candidate.spot_symbol,
+                    &profile.profile_id,
+                ),
+            );
+            let mut report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                 event_id: identity.event_id.clone(),
                 event_identity_version: identity.schema_version,
@@ -970,6 +1102,7 @@ impl LiveWorker {
                 dated_carry_candidate: Some(candidate),
                 dated_carry_settlement: None,
             };
+            apply_identity_to_report(&mut report, &identity);
             return self.report_dated_carry_decision(report).await;
         }
         if let Some(settlement) = update.dated_carry_settlement {
@@ -978,6 +1111,7 @@ impl LiveWorker {
             let Some(profile_set) = profile_set else {
                 return Ok(());
             };
+            let episode_reset_generations = profile_set.episode_reset_generations.clone();
             let Some(profile) = profile_set
                 .profiles
                 .into_iter()
@@ -1016,7 +1150,22 @@ impl LiveWorker {
                 update.event_time_ms,
                 Some(&eval_profile),
             );
-            let report = crate::LiveStrategyDecisionReport {
+            let settlement_state_key =
+                format!("{}:{}", settlement.future_symbol, settlement.expiry_ms);
+            let identity = crate::LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+                &update.event_id,
+                Strategy::DatedCarry,
+                &settlement.spot_symbol,
+                &profile.profile_id,
+                "carry",
+                Some(&settlement_state_key),
+                live_episode_reset_generation(
+                    &episode_reset_generations,
+                    &settlement.spot_symbol,
+                    &profile.profile_id,
+                ),
+            );
+            let mut report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                 event_id: identity.event_id.clone(),
                 event_identity_version: identity.schema_version,
@@ -1035,6 +1184,7 @@ impl LiveWorker {
                 dated_carry_candidate: None,
                 dated_carry_settlement: Some(settlement),
             };
+            apply_identity_to_report(&mut report, &identity);
             return self.report_dated_carry_decision(report).await;
         }
         Ok(())
@@ -1066,6 +1216,7 @@ impl LiveWorker {
         let Some(profile_set) = self.profiles.read().await.clone().filter(|set| set.enabled) else {
             return Ok(());
         };
+        let episode_reset_generations = profile_set.episode_reset_generations.clone();
         let open_positions = profile_set.open_positions;
         let signals = snapshot
             .generated_signals
@@ -1178,6 +1329,22 @@ impl LiveWorker {
                     decision_data["strategy_walk_forward"] = serde_json::to_value(evidence)?;
                 }
                 signal.strategy_decision = Some(decision_data);
+                let identity = live_thesis_event_identity_with_reset_generation(
+                    &update.event_id,
+                    self.config.strategy,
+                    &signal,
+                    &profile,
+                    signal
+                        .market_state
+                        .as_ref()
+                        .map(|state| state.profile_key.as_str()),
+                    live_episode_reset_generation(
+                        &episode_reset_generations,
+                        &signal.symbol,
+                        &profile.profile_id,
+                    ),
+                );
+                apply_identity_to_signal(&mut signal, &identity);
                 let input = if is_open {
                     crate::LiveEvaluationInput::OpenPosition {
                         position: crate::LivePositionContext {
@@ -1237,7 +1404,7 @@ impl LiveWorker {
                 {
                     continue;
                 }
-                let report = crate::LiveStrategyDecisionReport {
+                let mut report = crate::LiveStrategyDecisionReport {
                     contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
                     event_id: identity.event_id.clone(),
                     event_identity_version: identity.schema_version,
@@ -1256,6 +1423,7 @@ impl LiveWorker {
                     dated_carry_candidate: None,
                     dated_carry_settlement: None,
                 };
+                apply_identity_to_report(&mut report, &identity);
                 let report_time_ms = report.event_time_ms;
                 match self.report_decision(report).await {
                     Ok(()) => self.metrics.record_decision_report(report_time_ms, true),
@@ -1990,6 +2158,110 @@ mod tests {
         })
     }
 
+    #[test]
+    fn distinct_market_events_keep_one_episode_for_an_unchanged_thesis() {
+        let parameters = Strategy::LiveMomentum
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let profile = crate::LiveStrategyProfile {
+            profile_id: crate::profile_id("BTC-USDT", Strategy::LiveMomentum.as_str(), &parameters),
+            profile_symbol: "BTC-USDT".into(),
+            version: 1,
+            market_regime: None,
+            market_state_key: None,
+            parameters,
+            walk_forward_evidence: None,
+            walk_forward_evidence_by_regime: Default::default(),
+        };
+        let signal = |timestamp| StrategyMarketSignal {
+            symbol: "BTC-USDT".into(),
+            direction: "bullish".into(),
+            timestamp,
+            ..StrategyMarketSignal::default()
+        };
+        let first = live_thesis_event_identity(
+            "BTC-USDT:1000:source-a",
+            Strategy::LiveMomentum,
+            &signal(1_000),
+            &profile,
+            Some("v2:trend_up:normal"),
+        );
+        let next_market_update = live_thesis_event_identity(
+            "BTC-USDT:2000:source-b",
+            Strategy::LiveMomentum,
+            &signal(2_000),
+            &profile,
+            Some("v2:trend_up:normal"),
+        );
+        assert_ne!(first.event_id, next_market_update.event_id);
+        assert_eq!(first.episode_id, next_market_update.episode_id);
+
+        let report_for = |identity: &crate::LiveStrategyEventIdentity,
+                          mut signal: StrategyMarketSignal| {
+            signal.strategy_decision = Some(serde_json::json!({"strategy": "live-momentum"}));
+            let mut report = crate::LiveStrategyDecisionReport {
+                contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
+                event_id: String::new(),
+                event_identity_version: 0,
+                episode_id: String::new(),
+                strategy: Strategy::LiveMomentum,
+                symbol: signal.symbol.clone(),
+                profile_id: profile.profile_id.clone(),
+                profile_version: profile.version,
+                parameter_hash: profile.profile_id.clone(),
+                event_time_ms: signal.timestamp,
+                decision: crate::LiveStrategyDecision::Hold,
+                reason: None,
+                walk_forward_evidence: None,
+                signal,
+                dated_carry_scan: None,
+                dated_carry_candidate: None,
+                dated_carry_settlement: None,
+            };
+            apply_identity_to_report(&mut report, identity);
+            report
+        };
+        let first_report = report_for(&first, signal(1_000));
+        let next_report = report_for(&next_market_update, signal(2_000));
+        assert_ne!(first_report.event_id, next_report.event_id);
+        assert_eq!(
+            first_report.event_identity_version,
+            next_report.event_identity_version
+        );
+        assert_eq!(first_report.episode_id, next_report.episode_id);
+        for report in [&first_report, &next_report] {
+            let nested = report.signal.strategy_decision.as_ref().unwrap();
+            assert_eq!(nested["live_worker_event_id"], report.event_id);
+            assert_eq!(
+                nested["live_worker_event_identity_version"],
+                report.event_identity_version
+            );
+            assert_eq!(nested["live_worker_episode_id"], report.episode_id);
+        }
+
+        let changed_direction = live_thesis_event_identity(
+            "BTC-USDT:3000:source-c",
+            Strategy::LiveMomentum,
+            &StrategyMarketSignal {
+                direction: "bearish".into(),
+                ..signal(3_000)
+            },
+            &profile,
+            Some("v2:trend_up:normal"),
+        );
+        let changed_state = live_thesis_event_identity(
+            "BTC-USDT:4000:source-d",
+            Strategy::LiveMomentum,
+            &signal(4_000),
+            &profile,
+            Some("v2:range:normal"),
+        );
+        assert_ne!(first.episode_id, changed_direction.episode_id);
+        assert_ne!(first.episode_id, changed_state.episode_id);
+    }
+
     fn pushed_profile_set(set_version: u64, symbol: &str) -> crate::LiveStrategyProfileSet {
         let parameters = Strategy::LiveMomentum
             .parameter_specs()
@@ -2013,6 +2285,7 @@ mod tests {
             enabled: true,
             profiles: vec![profile],
             open_positions: Vec::new(),
+            episode_reset_generations: Vec::new(),
         }
     }
 
@@ -2130,6 +2403,11 @@ mod tests {
             enabled: true,
             profiles: vec![fallback, regime_profile],
             open_positions: Vec::new(),
+            episode_reset_generations: vec![crate::LiveStrategyEpisodeResetGeneration {
+                symbol: "BTC-USDT".into(),
+                profile_id: selected_profile_id.clone(),
+                generation: 7,
+            }],
         };
         worker.apply_profile_set(profile_set.clone()).await.unwrap();
         let mut invalid_replacement = profile_set;
@@ -2176,6 +2454,20 @@ mod tests {
         let reports = reports.lock().await;
         assert_eq!(reports.len(), 1, "only one profile should be evaluated");
         assert_eq!(reports[0].profile_id, selected_profile_id);
+        assert_eq!(
+            reports[0].signal.strategy_decision.as_ref().unwrap()["live_worker_episode_reset_generation"],
+            7
+        );
+        let expected_identity = crate::LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+            "regime-route-integration",
+            Strategy::LiveMomentum,
+            "BTC-USDT",
+            &selected_profile_id,
+            "bullish",
+            Some("v2:range:unknown"),
+            7,
+        );
+        assert_eq!(reports[0].episode_id, expected_identity.episode_id);
         assert_eq!(reports[0].signal.market_regime.as_deref(), Some("range"));
         assert_eq!(
             worker.market_state_transitions.read().await["BTC-USDT"]
@@ -2597,6 +2889,7 @@ mod tests {
             enabled: true,
             profiles: vec![request.profile.clone()],
             open_positions: Vec::new(),
+            episode_reset_generations: Vec::new(),
         };
         let response = client
             .request_response(

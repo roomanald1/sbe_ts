@@ -388,7 +388,18 @@ function PositionsComponent({
           {state.error}
         </div>
       )}
-      <div className="data-grid-wrap positions-grid-wrap">
+      <div
+        className="data-grid-wrap positions-grid-wrap"
+        style={{ maxHeight: '60vh' }}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          if (
+            element.scrollHeight - element.scrollTop - element.clientHeight <
+            120
+          )
+            void model.loadMoreHistory();
+        }}
+      >
         <AgGridReact<PositionGridRow>
           rowData={displayedRowData}
           columnDefs={columnDefs}
@@ -402,6 +413,18 @@ function PositionsComponent({
           groupHeaderHeight={18}
           suppressColumnMoveAnimation
         />
+        {(state.hasMoreOrdersHistory || state.hasMoreBarrierHistory) && (
+          <button
+            type="button"
+            className="positions-cancel-button"
+            disabled={state.loadingMoreHistory}
+            onClick={() => void model.loadMoreHistory()}
+          >
+            {state.loadingMoreHistory
+              ? 'Loading older orders...'
+              : 'Load older orders'}
+          </button>
+        )}
         {!state.loading &&
           state.orders.length === 0 &&
           state.barrierOrders.length === 0 &&

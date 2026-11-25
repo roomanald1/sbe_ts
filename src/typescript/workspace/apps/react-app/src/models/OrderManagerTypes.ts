@@ -47,6 +47,14 @@ export type OrdersResponse = {
   orders: RestingOrder[];
   barrier_orders?: BarrierOrder[];
 };
+export type OrdersHistoryResponse = OrdersResponse & {
+  active_orders: RestingOrder[];
+  active_barrier_orders: BarrierOrder[];
+  next_orders_cursor?: string;
+  has_more_orders: boolean;
+  next_barrier_orders_cursor?: string;
+  has_more_barrier_orders: boolean;
+};
 export type VwapRun = {
   id: string;
   symbol: string;
@@ -81,6 +89,9 @@ export type OrderManagerState = {
   barrierDirection: BarrierDirection;
   orders: RestingOrder[];
   barrierOrders: BarrierOrder[];
+  loadingMoreHistory: boolean;
+  hasMoreOrdersHistory: boolean;
+  hasMoreBarrierHistory: boolean;
   vwapRuns: VwapRun[];
   rows: OrderRow[];
   selectedCurrentPrice?: number;

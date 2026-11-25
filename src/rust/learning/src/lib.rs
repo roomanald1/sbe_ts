@@ -80,6 +80,10 @@ struct LearningOutcome {
     tested_parameter_keys: Vec<String>,
     #[serde(default)]
     baseline_parameters: BTreeMap<String, f64>,
+    /// Authoritative execution lineage for real exploratory trade outcomes.
+    /// Legacy rows remain readable with no lineage.
+    #[serde(default)]
+    lineage: Option<strategy::TradeOutcomeLineage>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -2462,6 +2466,7 @@ mod tests {
                 paired_comparison: false,
                 tested_parameter_keys: Vec::new(),
                 baseline_parameters: BTreeMap::new(),
+                lineage: None,
             });
 
         let delta_connection = open_state_db(&delta_path).unwrap();

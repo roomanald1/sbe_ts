@@ -65,7 +65,9 @@ fn record_closed_trade_outcome(
         settings.closed_trade_fees_usd.clear();
         settings.closed_trade_audit.clear();
     }
-    settings.closed_trade_audit.resize(count, ClosedTradeAuditRecord::default());
+    settings
+        .closed_trade_audit
+        .resize(count, ClosedTradeAuditRecord::default());
     settings.closed_trade_audit.truncate(count);
     settings.closed_trade_returns_percent.push(return_percent);
     settings.closed_trade_timestamps_ms.push(current_time_ms());
@@ -89,14 +91,22 @@ fn closed_trade_audit_for_position(
     position: &TraderPosition,
     symbol: &str,
 ) -> ClosedTradeAuditRecord {
-    let needs_audit = position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT;
+    let needs_audit = position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT
+        || position.trade_id.as_deref().is_none_or(str::is_empty);
+    let reason = if position.entry_context == UNATTRIBUTED_POSITION_MANAGER_CONTEXT {
+        Some("unattributed_position_manager_reconciliation")
+    } else if position.trade_id.as_deref().is_none_or(str::is_empty) {
+        Some("missing_stable_trade_identity")
+    } else {
+        None
+    };
     ClosedTradeAuditRecord {
         status: if needs_audit {
             ClosedTradeAuditStatus::NeedsAudit
         } else {
             ClosedTradeAuditStatus::Eligible
         },
-        reason: needs_audit.then(|| "unattributed_position_manager_reconciliation".into()),
+        reason: reason.map(str::to_owned),
         symbol: Some(symbol.to_owned()),
         trade_id: position.trade_id.clone(),
     }
@@ -108,13 +118,20 @@ fn strategy_scout_learning_key(symbol: &str, strategy: &str, scenario: &str) -> 
 }
 
 #[cfg(test)]
-fn strategy_parameter_probe_learning_key(symbol: &str, strategy: &str, parameter: &str, value: f64) -> String {
+fn strategy_parameter_probe_learning_key(
+    symbol: &str,
+    strategy: &str,
+    parameter: &str,
+    value: f64,
+) -> String {
     format!("probe:{symbol}:{strategy}:{parameter}:{value:.8}")
 }
 
 #[cfg(test)]
 fn strategy_parameter_scout_combination_learning_key(
-    symbol: &str, strategy: &str, combination: &str,
+    symbol: &str,
+    strategy: &str,
+    combination: &str,
 ) -> String {
     format!("probe_combo_scout:{symbol}:{strategy}:{combination}")
 }
@@ -146,11 +163,17 @@ fn record_strategy_trade_outcome(
     {
         return false;
     }
+    // A context or symbol is not a per-trade identity. Using either as an
+    // event ID causes unrelated legacy closes to collide in Learning's
+    // durable feedback dedupe set, so only stable trade IDs may be ingested.
+    let Some(trade_id) = trade_id.filter(|value| !value.is_empty()) else {
+        return false;
+    };
     // Closed spot trades cannot lose more than their entry notional. Keep
     // strategy-specific feedback aligned with the legacy closed-trade window
     // and activity metrics, which already reject returns below -100%.
-    let Some(net_return_percent) = net_return_percent
-        .filter(|value| value.is_finite() && *value >= -100.0)
+    let Some(net_return_percent) =
+        net_return_percent.filter(|value| value.is_finite() && *value >= -100.0)
     else {
         return false;
     };
@@ -174,19 +197,31 @@ fn record_strategy_trade_outcome(
             .collect::<BTreeMap<_, _>>();
         if let Some(kind) = Strategy::from_name(strategy) {
             let specs = kind.parameter_specs();
-            if specs.iter().any(|spec| !parameters.contains_key(spec.key.as_str())) {
+            if specs
+                .iter()
+                .any(|spec| !parameters.contains_key(spec.key.as_str()))
+            {
                 let signal_parameters = parameters.clone();
                 parameters = learned_strategy_parameter_profile(settings, profile_symbol, kind)
-                    .parameters.into_iter().map(|parameter| (parameter.key, parameter.value))
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| (parameter.key, parameter.value))
                     .collect();
                 parameters.extend(signal_parameters);
                 if let Some(decision) = entry_decision {
                     if let (Some(key), Some(value)) = (
-                        decision.get("scout_parameter_key").and_then(serde_json::Value::as_str),
-                        decision.get("scout_parameter_value").and_then(serde_json::Value::as_f64),
+                        decision
+                            .get("scout_parameter_key")
+                            .and_then(serde_json::Value::as_str),
+                        decision
+                            .get("scout_parameter_value")
+                            .and_then(serde_json::Value::as_f64),
                     ) {
-                        if !key.starts_with("combo:") { parameters.insert(key.to_owned(), value); }
-                        else if let Some(variant) = parse_scout_combination(key, kind) { parameters.extend(variant); }
+                        if !key.starts_with("combo:") {
+                            parameters.insert(key.to_owned(), value);
+                        } else if let Some(variant) = parse_scout_combination(key, kind) {
+                            parameters.extend(variant);
+                        }
                     }
                 }
             }
@@ -202,9 +237,8 @@ fn record_strategy_trade_outcome(
                 }]
             })
             .unwrap_or_default();
-        let event_id = format!("trade:{}", trade_id.filter(|value| !value.is_empty()).unwrap_or(learning_context.unwrap_or(symbol)));
-        let lifecycle_identity = trade_id
-            .and_then(|id| settings.canonical_lifecycle_links.get(id));
+        let event_id = format!("trade:{trade_id}");
+        let lifecycle_identity = settings.canonical_lifecycle_links.get(trade_id);
         if !settings.feedback_outbox.iter().any(|event| matches!(event,
             strategy::FeedbackEvent::TradeOutcome { event_id: pending, .. } if pending == &event_id
         )) {
@@ -257,9 +291,12 @@ fn replay_context_from_close_audit(
         let fill_price = fill["execution_price"].as_f64()?;
         let fill_timestamp = fill["timestamp"].as_u64()?;
         let fee = fill["fee"].as_f64().unwrap_or_default();
-        if !fill_quantity.is_finite() || fill_quantity <= 0.0
-            || !fill_price.is_finite() || fill_price <= 0.0
-            || !fee.is_finite() || fee < 0.0
+        if !fill_quantity.is_finite()
+            || fill_quantity <= 0.0
+            || !fill_price.is_finite()
+            || fill_price <= 0.0
+            || !fee.is_finite()
+            || fee < 0.0
         {
             return None;
         }
@@ -279,15 +316,19 @@ fn replay_context_from_close_audit(
         .or_else(|| audit["entry_context"]["total_entry_fees_paid"].as_f64())?;
     let exit_price = (quantity > 0.0).then_some(notional / quantity)?;
     let side = audit["entry_position_side"].as_str()?.to_owned();
-    if entry_timestamp_ms == 0 || exit_timestamp_ms <= entry_timestamp_ms
-        || !entry_price.is_finite() || entry_price <= 0.0
-        || !entry_quantity.is_finite() || entry_quantity <= 0.0
+    if entry_timestamp_ms == 0
+        || exit_timestamp_ms <= entry_timestamp_ms
+        || !entry_price.is_finite()
+        || entry_price <= 0.0
+        || !entry_quantity.is_finite()
+        || entry_quantity <= 0.0
         || quantity + 1e-12 < entry_quantity
-        || !entry_fees.is_finite() || entry_fees < 0.0
+        || !entry_fees.is_finite()
+        || entry_fees < 0.0
     {
         return None;
     }
-    Some(strategy::TradeReplayContext {
+    let mut context = strategy::TradeReplayContext {
         market_symbol: audit["symbol"].as_str()?.to_owned(),
         entry_timestamp_ms,
         exit_timestamp_ms,
@@ -299,11 +340,81 @@ fn replay_context_from_close_audit(
         exit_fees,
         entry_walk_forward_evidence: serde_json::from_value(
             audit["strategy_decision"]["strategy_walk_forward"].clone(),
-        ).ok(),
+        )
+        .ok(),
         // The fill prices and fees are known; historical executable quotes
         // needed to compare alternate exit costs are not present here.
         execution_costs_complete: false,
-    })
+        lineage: None,
+    };
+    if let (Some(trade_key), Ok(identity)) = (
+        audit["trade_id"].as_str(),
+        serde_json::from_value::<CanonicalLifecycleIdentity>(
+            audit["entry_context"]["lifecycle_identity"].clone(),
+        ),
+    ) {
+        let entry_fill_ids = audit["entry_context"]["entry_fill_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let exit_fill_ids = fills
+            .iter()
+            .filter_map(|fill| fill["fill_id"].as_str())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut fee_currencies = audit["entry_context"]["entry_fee_currencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let mut fees_complete = audit["entry_context"]["entry_fill_costs_complete"].as_bool()
+            == Some(true)
+            && !entry_fill_ids.is_empty()
+            && !exit_fill_ids.is_empty();
+        for fill in fills {
+            if fill["fee_known"].as_bool() != Some(true) {
+                fees_complete = false;
+            }
+            if let Some(currency) = fill["fee_currency"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+            {
+                fee_currencies.insert(currency.to_owned());
+            } else {
+                fees_complete = false;
+            }
+        }
+        let fee_currency =
+            (fee_currencies.len() == 1).then(|| fee_currencies.into_iter().next().unwrap());
+        fees_complete &= fee_currency.is_some();
+        context.lineage = Some(strategy::TradeOutcomeLineage {
+            outcome_event_id: format!("trade:{trade_key}"),
+            source_event_id: audit["strategy_decision"]["live_worker_event_id"]
+                .as_str()
+                .map(str::to_owned),
+            episode_id: Some(identity.episode_id.clone()),
+            opportunity_id: Some(identity.opportunity_id.clone()),
+            trade_id: Some(identity.trade_id.clone()),
+            profile_hash: identity.profile_hash,
+            profile_version: identity.profile_version,
+            execution_mode: Some(identity.execution_mode),
+            entry_policy: Some(identity.entry_policy),
+            source: Some(identity.source),
+            entry_fill_ids,
+            exit_fill_ids,
+            fee_currency,
+            fees_complete,
+            evidence_gain_correlation: audit["strategy_decision"]["evidence_gain_correlation_id"]
+                .as_str()
+                .map(str::to_owned),
+        });
+    }
+    Some(context)
 }
 
 fn build_trade_replay_context(
@@ -318,17 +429,33 @@ fn build_trade_replay_context(
     exit_fees: f64,
     entry_walk_forward_evidence: Option<strategy::StrategyWalkForwardEvidence>,
 ) -> Option<strategy::TradeReplayContext> {
-    if market_symbol.is_empty() || entry_timestamp_ms == 0 || exit_timestamp_ms <= entry_timestamp_ms
-        || ![entry_price, exit_price, quantity, entry_fees, exit_fees].iter().all(|v| v.is_finite())
-        || entry_price <= 0.0 || exit_price <= 0.0 || quantity <= 0.0 || entry_fees < 0.0 || exit_fees < 0.0
+    if market_symbol.is_empty()
+        || entry_timestamp_ms == 0
+        || exit_timestamp_ms <= entry_timestamp_ms
+        || ![entry_price, exit_price, quantity, entry_fees, exit_fees]
+            .iter()
+            .all(|v| v.is_finite())
+        || entry_price <= 0.0
+        || exit_price <= 0.0
+        || quantity <= 0.0
+        || entry_fees < 0.0
+        || exit_fees < 0.0
     {
         return None;
     }
     Some(strategy::TradeReplayContext {
-        market_symbol: market_symbol.to_owned(), entry_timestamp_ms, exit_timestamp_ms,
-        side: side.to_owned(), entry_price, exit_price, quantity, entry_fees, exit_fees,
+        market_symbol: market_symbol.to_owned(),
+        entry_timestamp_ms,
+        exit_timestamp_ms,
+        side: side.to_owned(),
+        entry_price,
+        exit_price,
+        quantity,
+        entry_fees,
+        exit_fees,
         entry_walk_forward_evidence,
         execution_costs_complete: false,
+        lineage: None,
     })
 }
 
@@ -365,38 +492,69 @@ mod feedback_outbox_tests {
     #[test]
     fn completed_trade_is_queued_for_external_learning_with_its_exact_profile() {
         let mut settings = Settings::default();
-        settings.canonical_lifecycle_links.insert("trade-42".into(), CanonicalLifecycleIdentity {
-            schema_version: 1,
-            opportunity_id: "autotrader:v1:opportunity:17".into(),
-            episode_id: "autotrader:v1:episode:17".into(),
-            trade_id: "autotrader:v1:trade:17".into(),
-            profile_id: Some("profile-v1".into()),
-            profile_hash: None,
-            profile_version: Some(4),
-            execution_mode: "paper".into(),
-            entry_policy: "strict".into(),
-            source: "auto_trader_entry_reservation".into(),
-        });
+        settings.canonical_lifecycle_links.insert(
+            "trade-42".into(),
+            CanonicalLifecycleIdentity {
+                schema_version: 1,
+                opportunity_id: "autotrader:v1:opportunity:17".into(),
+                episode_id: "autotrader:v1:episode:17".into(),
+                trade_id: "autotrader:v1:trade:17".into(),
+                profile_id: Some("profile-v1".into()),
+                profile_hash: None,
+                profile_version: Some(4),
+                execution_mode: "paper".into(),
+                entry_policy: "strict".into(),
+                source: "auto_trader_entry_reservation".into(),
+            },
+        );
         let decision = serde_json::json!({
             "strategy_parameters": { "minimum_momentum": 0.003 },
             "learning_profile_id": "ignored-stale-id"
         });
         record_strategy_trade_outcome(
-            &mut settings, "BTC-USDT", Some("live-momentum"), Some("scout:btc"), false,
-            1.25, Some(0.8), Some(&decision), Some("trade-42"), None,
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("scout:btc"),
+            false,
+            1.25,
+            Some(0.8),
+            Some(&decision),
+            Some("trade-42"),
+            None,
         );
-        assert!(settings.learning.is_empty(), "the trader must not update learner state inline");
+        assert!(
+            settings.learning.is_empty(),
+            "the trader must not update learner state inline"
+        );
         let Some(FeedbackEvent::TradeOutcome {
-            event_id, schema_version, trade_id, opportunity_id, episode_id,
-            profile_hash, profile_version, execution_mode, entry_policy, source, entry_profile_id,
-            profile_id, parameters, realized_pnl_usd, net_return_percent, ..
-        }) = settings.feedback_outbox.first() else {
+            event_id,
+            schema_version,
+            trade_id,
+            opportunity_id,
+            episode_id,
+            profile_hash,
+            profile_version,
+            execution_mode,
+            entry_policy,
+            source,
+            entry_profile_id,
+            profile_id,
+            parameters,
+            realized_pnl_usd,
+            net_return_percent,
+            ..
+        }) = settings.feedback_outbox.first()
+        else {
             panic!("trade outcome was not queued")
         };
         assert_eq!(event_id, "trade:trade-42");
         assert_eq!(*schema_version, Some(1));
         assert_eq!(trade_id.as_deref(), Some("autotrader:v1:trade:17"));
-        assert_eq!(opportunity_id.as_deref(), Some("autotrader:v1:opportunity:17"));
+        assert_eq!(
+            opportunity_id.as_deref(),
+            Some("autotrader:v1:opportunity:17")
+        );
         assert_eq!(episode_id.as_deref(), Some("autotrader:v1:episode:17"));
         assert_eq!(profile_hash.as_deref(), None);
         assert_eq!(*profile_version, Some(4));
@@ -405,7 +563,10 @@ mod feedback_outbox_tests {
         assert_eq!(source.as_deref(), Some("auto_trader_entry_reservation"));
         assert_eq!(entry_profile_id.as_deref(), Some("profile-v1"));
         assert_eq!(parameters["minimum_momentum"], 0.003);
-        assert_eq!(profile_id, &strategy::profile_id("BTC-USDT", "live-momentum", parameters));
+        assert_eq!(
+            profile_id,
+            &strategy::profile_id("BTC-USDT", "live-momentum", parameters)
+        );
         assert_eq!(*realized_pnl_usd, 1.25);
         assert_eq!(*net_return_percent, 0.8);
     }
@@ -415,12 +576,24 @@ mod feedback_outbox_tests {
         let mut settings = Settings::default();
         let decision = serde_json::json!({"strategy_parameters": {"minimum_momentum": 0.003}});
         record_strategy_trade_outcome(
-            &mut settings, "BTC-USDT", Some("live-momentum"), Some("legacy-context"), false,
-            1.25, Some(0.8), Some(&decision), Some("legacy-trade"), None,
+            &mut settings,
+            "BTC-USDT",
+            Some("live-momentum"),
+            Some("legacy-context"),
+            false,
+            1.25,
+            Some(0.8),
+            Some(&decision),
+            Some("legacy-trade"),
+            None,
         );
         let Some(FeedbackEvent::TradeOutcome {
-            schema_version, opportunity_id, episode_id, ..
-        }) = settings.feedback_outbox.first() else {
+            schema_version,
+            opportunity_id,
+            episode_id,
+            ..
+        }) = settings.feedback_outbox.first()
+        else {
             panic!("legacy trade outcome was not queued")
         };
         assert_eq!(*schema_version, None);
@@ -439,8 +612,49 @@ mod feedback_outbox_tests {
             "source",
             "entry_profile_id",
         ] {
-            assert!(serialized.get(field).is_none(), "legacy wire payload added {field}");
+            assert!(
+                serialized.get(field).is_none(),
+                "legacy wire payload added {field}"
+            );
         }
+    }
+
+    #[test]
+    fn missing_trade_identity_is_quarantined_instead_of_deduped_by_context() {
+        let mut settings = Settings::default();
+        let position = TraderPosition {
+            entry_context: "btc:momentum".into(),
+            strategy: Some("live-momentum".into()),
+            trade_id: None,
+            ..TraderPosition::default()
+        };
+        let audit = closed_trade_audit_for_position(&position, "BTC-USDT");
+        assert_eq!(audit.status, ClosedTradeAuditStatus::NeedsAudit);
+        assert_eq!(
+            audit.reason.as_deref(),
+            Some("missing_stable_trade_identity")
+        );
+        record_closed_trade_outcome(&mut settings, 0.5, 1.0, 0.1, audit);
+
+        for realized_pnl in [1.0, -0.5] {
+            assert!(!record_strategy_trade_outcome(
+                &mut settings,
+                "BTC-USDT",
+                Some("live-momentum"),
+                Some("btc:momentum"),
+                false,
+                realized_pnl,
+                Some(realized_pnl),
+                Some(&serde_json::json!({"strategy_parameters":{"minimum_momentum":0.003}})),
+                None,
+                None,
+            ));
+        }
+        assert!(settings.feedback_outbox.is_empty());
+        let metrics = calculate_activity_learning_metrics(&settings, 0);
+        assert_eq!(metrics.exit_learning_samples, 0);
+        assert_eq!(metrics.closed_trade_needs_audit_count, 1);
+        assert_eq!(metrics.closed_trade_realized_usd, None);
     }
 
     #[test]
@@ -530,7 +744,10 @@ mod feedback_outbox_tests {
             Some("total-loss"),
             None,
         );
-        assert!(matches!(settings.feedback_outbox.first(), Some(FeedbackEvent::TradeOutcome { .. })));
+        assert!(matches!(
+            settings.feedback_outbox.first(),
+            Some(FeedbackEvent::TradeOutcome { .. })
+        ));
     }
 
     #[test]
@@ -565,9 +782,18 @@ mod feedback_outbox_tests {
         assert_eq!(settings.closed_trade_returns_percent, vec![-0.5]);
         assert_eq!(settings.closed_trade_realized_usd, vec![-0.005]);
         assert_eq!(settings.closed_trade_audit.len(), 1);
-        assert_eq!(settings.closed_trade_audit[0].status, ClosedTradeAuditStatus::NeedsAudit);
-        assert_eq!(settings.closed_trade_audit[0].reason.as_deref(), Some("unattributed_position_manager_reconciliation"));
-        assert_eq!(settings.closed_trade_audit[0].trade_id.as_deref(), Some("recovered-trade-7"));
+        assert_eq!(
+            settings.closed_trade_audit[0].status,
+            ClosedTradeAuditStatus::NeedsAudit
+        );
+        assert_eq!(
+            settings.closed_trade_audit[0].reason.as_deref(),
+            Some("unattributed_position_manager_reconciliation")
+        );
+        assert_eq!(
+            settings.closed_trade_audit[0].trade_id.as_deref(),
+            Some("recovered-trade-7")
+        );
         assert!(settings.feedback_outbox.is_empty());
         let metrics = calculate_activity_learning_metrics(&settings, 0);
         assert_eq!(metrics.exit_learning_samples, 0);
@@ -631,4 +857,3 @@ fn record_learning_outcome(stats: &mut LearningStats, realized_pnl: f64) {
     stats.realized_pnl += realized_pnl;
     stats.updated_at_ms = now_ms;
 }
-

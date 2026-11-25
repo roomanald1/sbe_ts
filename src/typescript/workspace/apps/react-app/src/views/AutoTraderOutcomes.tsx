@@ -1663,6 +1663,11 @@ function AutoTraderOutcomesComponent({
         headerName: 'Net USD',
         headerTooltip:
           'Total net realized P&L for this closed trade, including fees, converted to USD.',
+        // The formatter emits a fixed number of fractional digits and an
+        // explicit sign. Right alignment plus tabular digits keeps decimals
+        // in one scan line without changing the value or sign color.
+        cellClass: 'ag-right-aligned-cell',
+        cellStyle: { fontVariantNumeric: 'tabular-nums' },
         cellClassRules: signed,
         valueFormatter: ({ value }) =>
           typeof value === 'number' && Number.isFinite(value)

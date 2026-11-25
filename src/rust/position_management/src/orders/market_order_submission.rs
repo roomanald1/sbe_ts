@@ -11,7 +11,24 @@ async fn submit_order(
     State(store): State<Arc<PositionStore>>,
     Json(request): Json<NewOrder>,
 ) -> Result<Json<OrderResponse>, (StatusCode, String)> {
-    let mut request = request;
+    submit_order_inner(store, request, None).await
+}
+
+// The test route exercises the same handler and durable ledger path as the
+// production endpoint while supplying a deterministic Paper Exchange match.
+#[cfg(test)]
+async fn submit_order_with_test_match(
+    State((store, prepared)): State<(Arc<PositionStore>, PreparedMarketMatch)>,
+    Json(request): Json<NewOrder>,
+) -> Result<Json<OrderResponse>, (StatusCode, String)> {
+    submit_order_inner(store, request, Some(prepared)).await
+}
+
+async fn submit_order_inner(
+    store: Arc<PositionStore>,
+    mut request: NewOrder,
+    prepared_override: Option<PreparedMarketMatch>,
+) -> Result<Json<OrderResponse>, (StatusCode, String)> {
     let symbol = request.symbol.to_ascii_uppercase();
     if !valid_position_symbol(&symbol) {
         return Err((StatusCode::BAD_REQUEST, "Invalid instrument symbol".into()));
@@ -79,7 +96,10 @@ async fn submit_order(
     };
     // Paper matching runs in the Paper Exchange service and can perform
     // network I/O; do not hold the position ledger lock while waiting on it.
-    let prepared = prepare_market_match(&symbol, &request, &options).await?;
+    let prepared = match prepared_override {
+        Some(prepared) => prepared,
+        None => prepare_market_match(&symbol, &request, &options).await?,
+    };
     let mut matched = prepared.matched;
     let decision_timestamp = prepared.decision_timestamp;
     let decision_price = prepared.decision_price;
@@ -152,6 +172,7 @@ async fn submit_order(
                 average_execution_price: None,
                 order: None,
                 barrier_order: None,
+                fill_evidence: Vec::new(),
                 processing_timings_ms,
             }));
         }
@@ -182,6 +203,7 @@ async fn submit_order(
                 average_execution_price: None,
                 order: None,
                 barrier_order: None,
+                fill_evidence: Vec::new(),
                 processing_timings_ms,
             }));
         }
@@ -353,6 +375,20 @@ async fn submit_order(
             );
         }
     }
+    let fill_evidence = request
+        .client_order_id
+        .as_deref()
+        .map_or_else(Vec::new, |client_id| {
+            ledger
+                .trades
+                .iter()
+                .filter(|trade| {
+                    trade.client_order_id.as_deref() == Some(client_id)
+                        || trade.parent_order_id.as_deref() == Some(client_id)
+                })
+                .cloned()
+                .collect()
+        });
     let persistence_started = Instant::now();
     if request.client_order_id.is_some() {
         let client_order_id = request.client_order_id.as_deref().unwrap();
@@ -391,6 +427,7 @@ async fn submit_order(
         average_execution_price,
         order,
         barrier_order: None,
+        fill_evidence,
         processing_timings_ms,
     }))
 }
@@ -434,6 +471,7 @@ fn existing_order_response(
                 average_execution_price: record.average_execution_price,
                 order: None,
                 barrier_order: None,
+                fill_evidence: Vec::new(),
                 processing_timings_ms: BTreeMap::new(),
             });
     }
@@ -457,6 +495,7 @@ fn existing_order_response(
             .then_some(filled_notional / filled_quantity),
         order,
         barrier_order,
+        fill_evidence: fills.into_iter().cloned().collect(),
         processing_timings_ms: BTreeMap::new(),
     })
 }
@@ -540,6 +579,7 @@ mod order_ledger_contention_tests {
             average_execution_price: Some(100.0),
             order: None,
             barrier_order: None,
+            fill_evidence: vec![],
             processing_timings_ms: BTreeMap::new(),
         };
         let json = serde_json::to_value(response).unwrap();
@@ -558,6 +598,145 @@ mod order_ledger_contention_tests {
         assert!(!pending.is_finished());
         drop(held);
         assert!(pending.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_fill_submitted_through_pm_route_survives_sqlite_restart() {
+        use axum::{body::to_bytes, routing::post};
+        use tower::ServiceExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "position-management-lifecycle-restart-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let lifecycle = serde_json::json!({
+            "schema_version": 1,
+            "opportunity_id": "opp-v35-42",
+            "episode_id": "episode-v35-42",
+            "trade_id": "trade-v35-42",
+            "profile_id": "profile-7",
+            "profile_hash": "sha256:profile-hash",
+            "profile_version": 7,
+            "execution_mode": "paper",
+            "entry_policy": "explore",
+            "source": "auto"
+        });
+        let legacy: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": "legacy-position-fill",
+            "symbol": "BTC-USDT",
+            "side": "buy",
+            "quantity": 0.25,
+            "execution_price": 100.0,
+            "timestamp": 1,
+            "source": "auto"
+        }))
+        .unwrap();
+        assert_eq!(legacy.fill_id, None);
+        assert_eq!(legacy.lifecycle, None);
+
+        let mut ledger = Ledger::default();
+        // This historical row supplies the open quantity for the reduce-only
+        // order and deliberately has no retrospectively inferred identities.
+        ledger.trades.push(legacy);
+        let store = Arc::new(response_store(ledger, path.clone()));
+        let prepared = PreparedMarketMatch {
+            matched: MatcherResponse {
+                reference_price: Some(110.0),
+                best_bid: Some(109.0),
+                best_ask: Some(111.0),
+                worst_ask: Some(111.0),
+                book_updated_at_ms: 2,
+                fills: vec![MatcherFill {
+                    quantity: 0.25,
+                    price: 110.0,
+                }],
+                remaining_quantity: 0.0,
+                filled_quantity: 0.25,
+                average_execution_price: Some(110.0),
+            },
+            decision_timestamp: None,
+            decision_price: None,
+            decision_mid_price: None,
+            processing_timings_ms: BTreeMap::new(),
+        };
+        let submit_router = Router::new()
+            .route("/positions/orders", post(submit_order_with_test_match))
+            .with_state((Arc::clone(&store), prepared));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/positions/orders")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "symbol": "BTC-USDT",
+                    "side": "sell",
+                    "order_type": "market",
+                    "quantity": 0.25,
+                    "source": "auto",
+                    "client_order_id": "auto-close-v35-42",
+                    "reduce_only": true,
+                    "lifecycle": lifecycle
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = submit_router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The normal request handler performs the durable client-order commit.
+        let before_restart = store.ledger.lock().await;
+        let submitted = before_restart
+            .trades
+            .iter()
+            .find(|trade| trade.client_order_id.as_deref() == Some("auto-close-v35-42"))
+            .expect("PM route appends the requested lifecycle fill");
+        let stable_fill_id = submitted
+            .fill_id
+            .clone()
+            .expect("PM allocates a durable fill identity");
+        assert!(stable_fill_id.starts_with("pm-fill:v1:"));
+        assert_eq!(
+            submitted.lifecycle.as_ref().unwrap().trade_id,
+            "trade-v35-42"
+        );
+        drop(before_restart);
+
+        let restored = load_sqlite_ledger(&path).unwrap();
+        let restarted_store = Arc::new(response_store(restored, path.clone()));
+        let history_router = position_router(Arc::clone(&restarted_store));
+        let history_request = Request::builder()
+            .method("GET")
+            .uri("/positions/trades?source=auto")
+            .body(Body::empty())
+            .unwrap();
+        let history_response = history_router.oneshot(history_request).await.unwrap();
+        assert_eq!(history_response.status(), StatusCode::OK);
+        let history_body = to_bytes(history_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let history: serde_json::Value = serde_json::from_slice(&history_body).unwrap();
+        let trades = history["trades"].as_array().unwrap();
+        let recovered = trades
+            .iter()
+            .find(|trade| trade["client_order_id"] == "auto-close-v35-42")
+            .expect("restarted PM trade-history projection includes the submitted fill");
+        assert_eq!(recovered["fill_id"], stable_fill_id);
+        assert_eq!(recovered["lifecycle"], lifecycle);
+
+        let legacy_projection = trades
+            .iter()
+            .find(|trade| trade["id"] == "legacy-position-fill")
+            .expect("legacy fill remains in trade history");
+        assert!(legacy_projection.get("fill_id").is_none());
+        assert!(legacy_projection.get("lifecycle").is_none());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[tokio::test]
@@ -627,7 +806,7 @@ mod order_ledger_contention_tests {
                 .as_nanos(),
         ));
         let fill: PositionTrade = serde_json::from_value(serde_json::json!({
-            "id":"fill-1", "symbol":"BTC-USDT", "side":"buy", "quantity":0.25,
+            "id":"fill-1", "fill_id":"pm-fill:v1:2:1", "symbol":"BTC-USDT", "side":"buy", "quantity":0.25,
             "execution_price":40000.0, "timestamp":10, "parent_order_id":"filled-id",
             "client_order_id":"filled-client-id",
             "fee":-1.0, "fee_known":true, "fee_currency":"USDT"
@@ -658,15 +837,36 @@ mod order_ledger_contention_tests {
 
         let filled = existing_order_response(&restarted_store, &restored, "filled-id").unwrap();
         assert_eq!(filled.filled_quantity, 0.25);
-        assert_eq!(restored.trades[0].client_order_id.as_deref(), Some("filled-client-id"));
+        assert_eq!(filled.fill_evidence.len(), 1);
+        assert_eq!(
+            filled.fill_evidence[0].fill_id.as_deref(),
+            Some("pm-fill:v1:2:1")
+        );
+        assert_eq!(filled.fill_evidence[0].fee_currency, "USDT");
+        assert!(filled.fill_evidence[0].fee_known);
+        let response_json = serde_json::to_value(&filled).unwrap();
+        assert_eq!(
+            response_json["fill_evidence"][0]["fill_id"],
+            "pm-fill:v1:2:1"
+        );
+        assert_eq!(
+            restored.trades[0].client_order_id.as_deref(),
+            Some("filled-client-id")
+        );
         let resting = existing_order_response(&restarted_store, &restored, "resting-id").unwrap();
         assert_eq!(resting.remaining_quantity, 0.5);
         assert!(resting.order.is_some());
-        assert_eq!(restored.orders[0].client_order_id.as_deref(), Some("resting-client-id"));
+        assert_eq!(
+            restored.orders[0].client_order_id.as_deref(),
+            Some("resting-client-id")
+        );
         let barrier = existing_order_response(&restarted_store, &restored, "barrier-id").unwrap();
         assert_eq!(barrier.remaining_quantity, 0.25);
         assert!(barrier.barrier_order.is_some());
-        assert_eq!(restored.barrier_orders[0].client_order_id.as_deref(), Some("barrier-client-id"));
+        assert_eq!(
+            restored.barrier_orders[0].client_order_id.as_deref(),
+            Some("barrier-client-id")
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));

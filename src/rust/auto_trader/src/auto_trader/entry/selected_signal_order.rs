@@ -42,6 +42,33 @@ struct SignalSettingsSnapshot {
 
 const MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS: usize = 10_000;
 
+fn source_episode_id_for_decision(
+    decision: Option<&serde_json::Value>,
+) -> Result<Option<String>, ()> {
+    let Some(decision) = decision else {
+        return Ok(None);
+    };
+    let Some(raw_version) = decision.get("live_worker_event_identity_version") else {
+        return Ok(None);
+    };
+    let identity_version = raw_version
+        .as_u64()
+        .and_then(|version| u16::try_from(version).ok())
+        .ok_or(())?;
+    match identity_version {
+        0 => Ok(None),
+        strategy::LIVE_STRATEGY_EVENT_ID_VERSION => {
+            let episode_id = decision
+                .get("live_worker_episode_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty() && value.len() <= 512)
+                .ok_or(())?;
+            Ok(Some(episode_id.to_owned()))
+        }
+        _ => Err(()),
+    }
+}
+
 fn exploratory_event_key(
     identity_version: u16,
     event_id: &str,
@@ -66,10 +93,18 @@ fn exploratory_event_key(
     {
         return None;
     }
+    // Versioned event IDs identify individual source updates. Deduplication
+    // uses the stable thesis episode so routine market updates cannot create
+    // a fresh exploratory reservation. Legacy records retain best-effort
+    // event-level deduplication because no episode identity was supplied.
+    let episode_key = if identity_version == strategy::LIVE_STRATEGY_EVENT_ID_VERSION {
+        episode_id
+    } else {
+        event_id
+    };
     let encoded = serde_json::to_vec(&serde_json::json!({
         "identity_version": identity_version,
-        "event_id": event_id,
-        "episode_id": episode_id,
+        "episode_key": episode_key,
         "symbol": symbol,
         "strategy": strategy,
         "direction": direction,
@@ -368,6 +403,13 @@ async fn submit_selected_signal(
             signal,
             signal.strategy.as_deref().and_then(Strategy::from_name),
         );
+    if !exploratory {
+        if let Some(reason) =
+            strict_net_edge_blocker(strategy_edge, contextual_net_edge, reducing_rebalance)
+        {
+            return Ok(skipped_for_signal(signal, reason));
+        }
+    }
     let (edge_percent, edge_source, fee_bps, fee_assumption, edge_is_net) = if let Some(edge) =
         strategy_edge
     {
@@ -548,7 +590,7 @@ async fn submit_selected_signal(
         deep_book.map(|assessment| assessment.impact_bps + configured_taker_fee_rate() * 10_000.0);
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let reservation_cycle_lock_started = Instant::now();
-    let (quantity, lifecycle_identity) = {
+    let (quantity, lifecycle_identity, persisted_request) = {
         let reservation_lock_started = Instant::now();
         let mut settings = state.settings.lock().await;
         stage_timings_ms.insert(
@@ -709,7 +751,7 @@ async fn submit_selected_signal(
         let profile_hash = profile_id.as_deref().and_then(|profile_id| {
             canonical_profile_hash_v1(&signal.symbol, strategy_key, profile_id, &entry_parameters)
         });
-        let profile_version = signal
+        let learned_profile_version = signal
             .strategy
             .as_deref()
             .and_then(|strategy| {
@@ -719,6 +761,16 @@ async fn submit_selected_signal(
             })
             .filter(|profile| profile_id.as_deref() == Some(profile.profile_id.as_str()))
             .map(|profile| profile.version);
+        let profile_version = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| {
+                decision
+                    .get("learning_profile_version")
+                    .or_else(|| decision.get("profile_version"))
+            })
+            .and_then(serde_json::Value::as_u64)
+            .or(learned_profile_version);
         let existing_trade_id = settings
             .strategy_positions
             .get(&signal.symbol)
@@ -726,6 +778,16 @@ async fn submit_selected_signal(
             .and_then(|position| position.trade_id.as_deref())
             .and_then(|trade_id| settings.canonical_lifecycle_links.get(trade_id))
             .map(|identity| identity.trade_id.clone());
+        let source_episode_id =
+            match source_episode_id_for_decision(signal.strategy_decision.as_ref()) {
+                Ok(episode_id) => episode_id,
+                Err(()) => {
+                    return Ok(skipped_for_signal(
+                        signal,
+                        "Worker event identity version has no supported stable episode ID",
+                    ));
+                }
+            };
         let Some(lifecycle_identity) = canonical_lifecycle_identity_for_reservation(
             &mut settings,
             &decision_id,
@@ -734,12 +796,82 @@ async fn submit_selected_signal(
             profile_version,
             exploratory,
             existing_trade_id,
+            source_episode_id,
         ) else {
             return Ok(skipped_for_signal(
                 signal,
                 "Canonical lifecycle identity sequence is exhausted",
             ));
         };
+        let (request_path, request_body) = build_order_request(
+            &signal.symbol,
+            side,
+            quantity,
+            bid,
+            ask,
+            order_type,
+            execution_params,
+            &lifecycle_identity.opportunity_id,
+            now_ms,
+            false,
+            Some(&lifecycle_identity),
+        );
+        let persisted_request = PersistedEntryRequest {
+            schema_version: 1,
+            method: "POST".to_owned(),
+            path: request_path.to_owned(),
+            body: request_body,
+        };
+        let recovery_context = serde_json::json!({
+            "schema_version": 1,
+            "signal": signal,
+            "exploratory": exploratory,
+            "counterfactual_stop_loss_percent": counterfactual_stop_loss_percent,
+            "counterfactual_take_profit_percent": counterfactual_take_profit_percent,
+            "effective_stop_loss_percent": effective_stop_loss_percent,
+            "effective_take_profit_percent": effective_take_profit_percent,
+            "side": side,
+            "quantity": quantity,
+            "notional": notional,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "order_type": order_type,
+            "execution_parameters": {
+                "post_only_timeout_minutes": execution_params.post_only_timeout_minutes,
+                "vwap_duration_minutes": execution_params.vwap_duration_minutes,
+                "vwap_participation_rate": execution_params.vwap_participation_rate,
+                "limit_offset_bps": execution_params.limit_offset_bps,
+                "trigger_offset_bps": execution_params.trigger_offset_bps,
+                "trailing_distance_percent": execution_params.trailing_distance_percent,
+            },
+            "timestamp": timestamp,
+            "decision_id": decision_id,
+            "lifecycle_identity": lifecycle_identity,
+            "learning_context": learning_context,
+            "exploration_risk_adjustment": {
+                "scale": exploration_risk_adjustment.scale,
+                "sample_count": exploration_risk_adjustment.sample_count,
+                "weighted_net_return_percent": exploration_risk_adjustment.weighted_net_return_percent,
+                "weighted_net_return_lcb_percent": exploration_risk_adjustment.weighted_net_return_lcb_percent,
+                "regime_scoped": exploration_risk_adjustment.regime_scoped,
+            },
+            "horizon_take_profit_percent": horizon_take_profit_percent,
+            "stage_timings_ms": stage_timings_ms,
+            "deep_book": deep_book.map(|book| serde_json::json!({
+                "available_within_band": book.available_within_band,
+                "notional_cap": book.notional_cap,
+                "impact_bps": book.impact_bps,
+                "bid_depth_10bps": book.bid_depth_10bps,
+                "ask_depth_10bps": book.ask_depth_10bps,
+                "depth_imbalance_10bps": book.depth_imbalance_10bps,
+            })),
+            "estimated_ioc_all_in_bps": estimated_ioc_all_in_bps,
+            "submitted_limit_price": submitted_limit_price,
+            "limit_to_mid_bps": limit_to_mid_bps,
+            "limit_to_crossing_quote_bps": limit_to_crossing_quote_bps,
+            "expires_at": expires_at,
+        });
         consume_post_stop_reentry_cooldown(&mut settings, signal, now_ms);
         stage_timings_ms.insert(
             "order_reservation_record_local".to_owned(),
@@ -798,6 +930,8 @@ async fn submit_selected_signal(
                     .as_ref()
                     .and_then(|decision| decision["live_worker_episode_id"].as_str())
                     .map(str::to_owned),
+                submission_request: Some(persisted_request.clone()),
+                submission_recovery_context: Some(recovery_context),
             }),
             strength: signal.strength,
             ioc_fallback_for,
@@ -835,12 +969,38 @@ async fn submit_selected_signal(
         });
         if settings.orders.len() > MAX_RETAINED_AUTO_TRADER_ORDERS {
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
-            settings.orders.drain(..excess);
+            let mut remaining = excess;
+            settings.orders.retain(|order| {
+                if remaining > 0
+                    && !matches!(order.status.as_str(), "submitting" | "unknown_submission")
+                {
+                    remaining -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
         }
         prune_canonical_lifecycle_links(&mut settings);
+        request_settings_persist(state)?;
         drop(settings);
+        // The reservation and global portfolio-cap check are now committed in
+        // shared memory while the Settings mutex kept portfolio cap checking
+        // and reservation atomic. The durable intent row contains the exact
+        // retry-stable PM request and lifecycle identity; no PM request is sent
+        // until that small transaction commits. The coalescing full-state
+        // writer later normalizes the snapshot and removes resolved intents.
+        record_cycle_lock_scope(
+            state,
+            "signal_order_reservation_memory_critical_section",
+            reservation_cycle_lock_started.elapsed(),
+        );
+        drop(cycle_guard);
         let settings_persist_started = Instant::now();
-        if let Err(error) = persist_settings_snapshot_durable(state).await {
+        if let Err(error) =
+            persist_entry_reservation_durable(state, &decision_id, exploratory_event_key.as_deref())
+                .await
+        {
             let mut settings = state.settings.lock().await;
             if let Some(order) = settings
                 .orders
@@ -870,16 +1030,11 @@ async fn submit_selected_signal(
             order.stage_timings_ms = stage_timings_ms.clone();
         }
         request_settings_persist(state)?;
-        (quantity, lifecycle_identity)
+        (quantity, lifecycle_identity, persisted_request)
     };
-    record_cycle_lock_scope(
-        state,
-        "signal_order_reservation",
-        reservation_cycle_lock_started.elapsed(),
-    );
-    // The pending order and notional reservation are durable-in-memory now.
-    // Other cycles can proceed while Position Manager handles the request.
-    drop(cycle_guard);
+    // The pending order and notional reservation are durable before this
+    // function sends any external request; cross-symbol cycles can reserve
+    // against the visible in-memory notional while persistence completes.
     let submission = SelectedOrderExecution {
         state: state.clone(),
         signal: signal.clone(),
@@ -909,6 +1064,8 @@ async fn submit_selected_signal(
         limit_to_mid_bps,
         limit_to_crossing_quote_bps,
         expires_at,
+        persisted_request,
+        is_recovery: false,
     };
     let worker_state = state.clone();
     tokio::spawn(async move {
@@ -957,6 +1114,21 @@ fn exploratory_contextual_net_edge(adjustment: &ExplorationRiskAdjustment) -> Op
         return None;
     }
     Some(lower_bound)
+}
+
+fn strict_net_edge_blocker(
+    strategy_net_edge: Option<f64>,
+    contextual_net_edge: Option<f64>,
+    reducing_rebalance: bool,
+) -> Option<&'static str> {
+    if reducing_rebalance
+        || strategy_net_edge.is_some_and(f64::is_finite)
+        || contextual_net_edge.is_some_and(f64::is_finite)
+    {
+        None
+    } else {
+        Some("Strict production entry blocked: validated net-edge evidence is unavailable")
+    }
 }
 
 fn recent_exploratory_exit_fee_rate(
@@ -1022,6 +1194,43 @@ fn exploratory_round_trip_fee_bps(maker_rate: f64, taker_rate: f64) -> f64 {
 mod selected_signal_order_fee_tests {
     use super::*;
 
+    #[test]
+    fn strict_entries_do_not_use_take_profit_distance_as_expected_net_edge() {
+        assert!(strict_net_edge_blocker(None, None, false).is_some());
+        assert!(strict_net_edge_blocker(Some(f64::NAN), None, false).is_some());
+        assert_eq!(strict_net_edge_blocker(Some(0.2), None, false), None);
+        assert_eq!(strict_net_edge_blocker(None, Some(-0.1), false), None);
+        assert_eq!(strict_net_edge_blocker(None, None, true), None);
+    }
+
+    #[test]
+    fn canonical_episode_uses_worker_episode_and_fails_closed_for_malformed_v1() {
+        let report = serde_json::json!({
+            "live_worker_event_identity_version": strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+            "live_worker_event_id": "event-1",
+            "live_worker_episode_id": "strategy:v1:episode:thesis-1"
+        });
+        assert_eq!(
+            source_episode_id_for_decision(Some(&report))
+                .unwrap()
+                .as_deref(),
+            Some("strategy:v1:episode:thesis-1")
+        );
+
+        let malformed = serde_json::json!({
+            "live_worker_event_identity_version": strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+            "live_worker_event_id": "event-2"
+        });
+        assert!(source_episode_id_for_decision(Some(&malformed)).is_err());
+        assert!(
+            source_episode_id_for_decision(Some(&serde_json::json!({
+                "live_worker_event_identity_version": 65_536
+            })))
+            .is_err()
+        );
+        assert_eq!(source_episode_id_for_decision(None).unwrap(), None);
+    }
+
     fn exploratory_exit_order(
         timestamp: u64,
         decision_id: &str,
@@ -1086,7 +1295,7 @@ mod selected_signal_order_fee_tests {
     }
 
     #[test]
-    fn exploration_event_identity_distinguishes_new_event_profile_and_direction() {
+    fn exploration_dedup_continues_across_events_in_the_same_episode() {
         let base = exploratory_event_key(
             strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
             "worker-event-7",
@@ -1109,9 +1318,21 @@ mod selected_signal_order_fee_tests {
             ),
             Some(base.clone())
         );
+        assert_eq!(
+            exploratory_event_key(
+                strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+                "worker-event-8",
+                "episode-a",
+                "BTC-USDT",
+                "live-momentum",
+                "bullish",
+                "profile-a",
+            ),
+            Some(base.clone()),
+            "a distinct event inside the unchanged thesis episode must remain deduplicated"
+        );
         for (event_id, episode_id, direction, profile) in [
             ("worker-event-8", "episode-b", "bullish", "profile-a"),
-            ("worker-event-7", "episode-b", "bullish", "profile-a"),
             ("worker-event-7", "episode-a", "bearish", "profile-a"),
             ("worker-event-7", "episode-a", "bullish", "profile-b"),
         ] {

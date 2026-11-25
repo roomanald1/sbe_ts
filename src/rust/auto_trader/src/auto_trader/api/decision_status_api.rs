@@ -424,6 +424,25 @@ fn build_live_strategy_profile_set(
             })
         })
         .collect::<Vec<_>>();
+    let mut episode_reset_generations = settings
+        .strategy_episode_reset_generations
+        .values()
+        .filter(|reset| {
+            reset.strategy == strategy.as_str()
+                && reset.generation > 0
+                && profiles
+                    .iter()
+                    .any(|profile| profile.profile_id == reset.profile_id)
+        })
+        .map(|reset| strategy::LiveStrategyEpisodeResetGeneration {
+            symbol: reset.symbol.clone(),
+            profile_id: reset.profile_id.clone(),
+            generation: reset.generation,
+        })
+        .collect::<Vec<_>>();
+    episode_reset_generations.sort_by(|left, right| {
+        (&left.symbol, &left.profile_id).cmp(&(&right.symbol, &right.profile_id))
+    });
     let enabled = trader_enabled
         && (settings.strategies.contains(&strategy) || !open_positions.is_empty());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -462,6 +481,11 @@ fn build_live_strategy_profile_set(
         position.symbol.hash(&mut hasher);
         position.profile_id.hash(&mut hasher);
     }
+    for reset in &episode_reset_generations {
+        reset.symbol.hash(&mut hasher);
+        reset.profile_id.hash(&mut hasher);
+        reset.generation.hash(&mut hasher);
+    }
     strategy::LiveStrategyProfileSet {
         contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
         set_version: hasher.finish(),
@@ -469,6 +493,61 @@ fn build_live_strategy_profile_set(
         enabled,
         profiles,
         open_positions,
+        episode_reset_generations,
+    }
+}
+
+#[cfg(test)]
+mod episode_reset_profile_set_tests {
+    use super::*;
+
+    #[test]
+    fn live_profile_set_publishes_durable_reset_generation_and_versions_the_push() {
+        let strategy_kind = Strategy::LiveMomentum;
+        let parameters = strategy_kind
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let profile_id = strategy::profile_id("BTC-USDT", strategy_kind.as_str(), &parameters);
+        let profile = strategy::LiveStrategyProfile {
+            profile_id: profile_id.clone(),
+            profile_symbol: "BTC-USDT".into(),
+            version: 1,
+            market_regime: None,
+            market_state_key: None,
+            parameters,
+            walk_forward_evidence: None,
+            walk_forward_evidence_by_regime: BTreeMap::new(),
+        };
+        let mut settings = Settings::default();
+        settings.strategies.push(strategy_kind);
+        settings.active_live_strategy_profiles.insert(
+            strategy_kind.as_str().to_owned(),
+            vec![profile],
+        );
+        settings.strategy_episode_reset_generations.insert(
+            format!("BTC-USDT|{}|{profile_id}", strategy_kind.as_str()),
+            StrategyEpisodeResetState {
+                symbol: "BTC-USDT".into(),
+                strategy: strategy_kind.as_str().into(),
+                profile_id: profile_id.clone(),
+                generation: 1,
+                last_reset_episode_id: Some("stopped-episode".into()),
+            },
+        );
+
+        let first = build_live_strategy_profile_set(&settings, true, strategy_kind);
+        assert_eq!(first.episode_reset_generation("BTC-USDT", &profile_id), 1);
+        settings
+            .strategy_episode_reset_generations
+            .values_mut()
+            .next()
+            .unwrap()
+            .generation = 2;
+        let second = build_live_strategy_profile_set(&settings, true, strategy_kind);
+        assert_eq!(second.episode_reset_generation("BTC-USDT", &profile_id), 2);
+        assert_ne!(first.set_version, second.set_version);
     }
 }
 

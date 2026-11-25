@@ -107,6 +107,7 @@ async fn build_activity_response(
     let today_start = utc_day_start_ms();
     let ActivityPositionSnapshot {
         mut orders,
+        lifecycle_links,
         auto_positions,
         mut strategy_positions,
         open_position_symbols,
@@ -169,6 +170,7 @@ async fn build_activity_response(
     let realized_by_parent = realized_by_parent.as_ref();
     let closed_ledger_rows = build_closed_ledger_rows(
         &orders,
+        &lifecycle_links,
         &strategy_positions,
         &carry_positions,
         &ledger_trades,

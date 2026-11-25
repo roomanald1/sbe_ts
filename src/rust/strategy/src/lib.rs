@@ -45,11 +45,11 @@ pub use live_evaluation::{
     DatedCarryScanUpdate, DatedCarrySettlementUpdate, LIVE_EVALUATION_CONTRACT_VERSION,
     LIVE_STRATEGY_EVENT_ID_VERSION, LiveEvaluationError, LiveEvaluationErrorCode,
     LiveEvaluationInput, LiveEvaluationRequest, LiveEvaluationResponse, LivePositionContext,
-    LiveStrategyDecision, LiveStrategyDecisionReport, LiveStrategyEventIdentity,
-    LiveStrategyOpenPosition, LiveStrategyProfile, LiveStrategyProfileSet,
-    LiveStrategySocketRequest, LiveStrategySocketResponse, LiveStrategyWorkerDiagnostic,
-    STRATEGY_INSIGHT_UPDATE_VERSION, StrategyInsightUpdate, decode_learning_snapshot_payload,
-    encode_learning_snapshot_payload,
+    LiveStrategyDecision, LiveStrategyDecisionReport, LiveStrategyEpisodeResetGeneration,
+    LiveStrategyEventIdentity, LiveStrategyOpenPosition, LiveStrategyProfile,
+    LiveStrategyProfileSet, LiveStrategySocketRequest, LiveStrategySocketResponse,
+    LiveStrategyWorkerDiagnostic, STRATEGY_INSIGHT_UPDATE_VERSION, StrategyInsightUpdate,
+    decode_learning_snapshot_payload, encode_learning_snapshot_payload,
 };
 #[cfg(feature = "service")]
 pub use live_worker::{LiveWorkerConfig, serve_live_worker};

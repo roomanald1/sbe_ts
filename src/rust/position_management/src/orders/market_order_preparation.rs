@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct PreparedMarketMatch {
     matched: MatcherResponse,
     decision_timestamp: Option<u64>,
@@ -13,7 +14,8 @@ async fn prepare_market_match(
 ) -> Result<PreparedMarketMatch, (StatusCode, String)> {
     let mut timings = BTreeMap::new();
     let matching_started = Instant::now();
-    let matched = paper_exchange_match(symbol, &request.side, request.quantity, options.limit_price).await?;
+    let matched =
+        paper_exchange_match(symbol, &request.side, request.quantity, options.limit_price).await?;
     reject_crossing_post_only(request, options, matched.best_bid, matched.best_ask)?;
     let (decision_timestamp, decision_price, decision_mid_price) = execution_reference_prices(
         request,
@@ -43,7 +45,10 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
         let filled = remaining.min(fill.quantity);
         if filled > EPSILON {
             notional += filled * fill.price;
-            fills.push(MatcherFill { quantity: filled, price: fill.price });
+            fills.push(MatcherFill {
+                quantity: filled,
+                price: fill.price,
+            });
             remaining -= filled;
         }
     }
@@ -51,8 +56,8 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
     result.fills = fills;
     result.filled_quantity = filled_quantity;
     result.remaining_quantity = remaining;
-    result.average_execution_price = (filled_quantity > EPSILON)
-        .then_some(notional / filled_quantity);
+    result.average_execution_price =
+        (filled_quantity > EPSILON).then_some(notional / filled_quantity);
 }
 
 async fn paper_exchange_match(
@@ -75,9 +80,18 @@ async fn paper_exchange_match(
         }),
     )
     .await
-    .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Paper exchange match failed: {error}")))?;
-    serde_json::from_value(result)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Invalid paper exchange result: {error}")))
+    .map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Paper exchange match failed: {error}"),
+        )
+    })?;
+    serde_json::from_value(result).map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid paper exchange result: {error}"),
+        )
+    })
 }
 
 fn reject_crossing_post_only(
@@ -163,13 +177,23 @@ mod market_order_preparation_tests {
             fill_or_kill: false,
             limit_price: Some(101.0),
         };
-        let error = reject_crossing_post_only(&request(TradeSide::Buy, false), &options, Some(99.0), Some(101.0))
-            .unwrap_err();
+        let error = reject_crossing_post_only(
+            &request(TradeSide::Buy, false),
+            &options,
+            Some(99.0),
+            Some(101.0),
+        )
+        .unwrap_err();
         assert_eq!(error.0, StatusCode::CONFLICT);
 
         options.limit_price = Some(99.0);
-        let error = reject_crossing_post_only(&request(TradeSide::Sell, false), &options, Some(99.0), Some(101.0))
-            .unwrap_err();
+        let error = reject_crossing_post_only(
+            &request(TradeSide::Sell, false),
+            &options,
+            Some(99.0),
+            Some(101.0),
+        )
+        .unwrap_err();
         assert_eq!(error.0, StatusCode::CONFLICT);
     }
 
@@ -183,10 +207,25 @@ mod market_order_preparation_tests {
             fill_or_kill: false,
             limit_price: Some(100.0),
         };
-        assert!(reject_crossing_post_only(&request(TradeSide::Buy, false), &options, Some(99.0), Some(101.0)).is_ok());
+        assert!(
+            reject_crossing_post_only(
+                &request(TradeSide::Buy, false),
+                &options,
+                Some(99.0),
+                Some(101.0)
+            )
+            .is_ok()
+        );
         options.post_only = false;
         options.limit_price = Some(101.0);
-        assert!(reject_crossing_post_only(&request(TradeSide::Buy, false), &options, Some(99.0), Some(101.0)).is_ok());
+        assert!(
+            reject_crossing_post_only(
+                &request(TradeSide::Buy, false),
+                &options,
+                Some(99.0),
+                Some(101.0)
+            )
+            .is_ok()
+        );
     }
-
 }

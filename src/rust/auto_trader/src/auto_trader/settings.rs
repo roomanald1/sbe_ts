@@ -107,6 +107,10 @@ struct Settings {
     /// Persisted stop-fill re-entry gates keyed by symbol and strategy.
     #[serde(default)]
     post_stop_reentry_cooldowns: BTreeMap<String, PostStopReentryCooldown>,
+    /// Durable reset generations advanced only after a completed stop closes
+    /// a versioned strategy thesis. Routine market events never advance these.
+    #[serde(default)]
+    strategy_episode_reset_generations: BTreeMap<String, StrategyEpisodeResetState>,
     #[serde(default)]
     positions: BTreeMap<String, TraderPosition>,
     #[serde(default)]
@@ -206,6 +210,21 @@ struct PostStopReentryCooldown {
     event_identity_version: u16,
     stopped_event_id: Option<String>,
     stopped_episode_id: Option<String>,
+    #[serde(default)]
+    episode_reset_generation: Option<u64>,
+    /// New v1 stops require the worker to acknowledge reset before re-entry.
+    /// Legacy cooldowns remain best-effort and use their original event gate.
+    #[serde(default)]
+    episode_reset_required: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct StrategyEpisodeResetState {
+    symbol: String,
+    strategy: String,
+    profile_id: String,
+    generation: u64,
+    last_reset_episode_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -401,6 +420,7 @@ impl Default for Settings {
             canonical_lifecycle_epoch: new_canonical_lifecycle_epoch(),
             exploratory_event_reservations: BTreeMap::new(),
             post_stop_reentry_cooldowns: BTreeMap::new(),
+            strategy_episode_reset_generations: BTreeMap::new(),
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),
@@ -495,6 +515,7 @@ fn canonical_lifecycle_identity_for_reservation(
     profile_version: Option<u64>,
     exploratory: bool,
     existing_trade_id: Option<String>,
+    source_episode_id: Option<String>,
 ) -> Option<CanonicalLifecycleIdentity> {
     if let Some(existing) = settings.canonical_lifecycle_links.get(decision_key) {
         return Some(existing.clone());
@@ -508,10 +529,12 @@ fn canonical_lifecycle_identity_for_reservation(
     let identity = CanonicalLifecycleIdentity {
         schema_version: 1,
         opportunity_id: format!("autotrader:v1:opportunity:{epoch}:{sequence}"),
-        // V1 starts one episode for each accepted decision thesis. Continuation
-        // and reset grouping can extend this only after signal semantics define
-        // those boundaries explicitly.
-        episode_id: format!("autotrader:v1:episode:{epoch}:{sequence}"),
+        // The versioned strategy worker owns thesis continuation/reset
+        // semantics. Preserve its stable episode across distinct accepted
+        // decisions; legacy callers without a versioned episode retain the
+        // conservative per-reservation identity.
+        episode_id: source_episode_id
+            .unwrap_or_else(|| format!("autotrader:v1:episode:{epoch}:{sequence}")),
         trade_id: existing_trade_id
             .unwrap_or_else(|| format!("autotrader:v1:trade:{epoch}:{sequence}")),
         profile_id,
@@ -569,6 +592,7 @@ mod canonical_lifecycle_identity_tests {
             None,
             false,
             None,
+            None,
         )
         .unwrap();
         let persisted = serde_json::to_value(&settings).unwrap();
@@ -581,6 +605,7 @@ mod canonical_lifecycle_identity_tests {
             None,
             false,
             None,
+            None,
         )
         .unwrap();
         let next = canonical_lifecycle_identity_for_reservation(
@@ -591,12 +616,46 @@ mod canonical_lifecycle_identity_tests {
             None,
             true,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(first, retried);
         assert_ne!(first.opportunity_id, next.opportunity_id);
         assert_ne!(first.episode_id, next.episode_id);
         assert_eq!(restarted.canonical_lifecycle_sequence, 2);
+    }
+
+    #[test]
+    fn distinct_reservations_in_one_worker_episode_keep_distinct_trade_ids() {
+        let mut settings = Settings::default();
+        let source_episode = "strategy:v1:episode:sha256:v1:stable-thesis".to_owned();
+        let first = canonical_lifecycle_identity_for_reservation(
+            &mut settings,
+            "decision-a",
+            Some("profile-a".into()),
+            None,
+            None,
+            false,
+            None,
+            Some(source_episode.clone()),
+        )
+        .unwrap();
+        let second = canonical_lifecycle_identity_for_reservation(
+            &mut settings,
+            "decision-b",
+            Some("profile-a".into()),
+            None,
+            None,
+            false,
+            None,
+            Some(source_episode.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(first.episode_id, source_episode);
+        assert_eq!(second.episode_id, first.episode_id);
+        assert_ne!(first.opportunity_id, second.opportunity_id);
+        assert_ne!(first.trade_id, second.trade_id);
     }
 
     #[test]

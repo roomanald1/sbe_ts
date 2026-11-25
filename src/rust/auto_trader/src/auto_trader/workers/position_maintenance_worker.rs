@@ -1,6 +1,7 @@
 async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
     let position_rsocket_url = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    recover_submitting_entry_orders(state).await;
     // Consume fills before classifying disappeared resting orders as inactive.
     reconcile_maker_fills(&position_rsocket_url, state)
         .await
@@ -21,6 +22,247 @@ async fn run_position_maintenance(state: &AutoTraderState) -> Result<(), (Status
         .await
         .map_err(|(status, error)| (status, format!("Exit evaluation: {error}")))?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct PersistedEntryRecoveryContext {
+    schema_version: u16,
+    signal: Signal,
+    exploratory: bool,
+    counterfactual_stop_loss_percent: f64,
+    counterfactual_take_profit_percent: f64,
+    effective_stop_loss_percent: f64,
+    effective_take_profit_percent: f64,
+    side: String,
+    quantity: f64,
+    notional: f64,
+    bid: f64,
+    ask: f64,
+    mid: f64,
+    order_type: AutoOrderType,
+    execution_parameters: PersistedExecutionParameters,
+    timestamp: u64,
+    decision_id: String,
+    lifecycle_identity: CanonicalLifecycleIdentity,
+    learning_context: String,
+    exploration_risk_adjustment: PersistedExplorationRiskAdjustment,
+    horizon_take_profit_percent: Option<f64>,
+    stage_timings_ms: BTreeMap<String, f64>,
+    deep_book: Option<PersistedDeepBookAssessment>,
+    estimated_ioc_all_in_bps: Option<f64>,
+    submitted_limit_price: Option<f64>,
+    limit_to_mid_bps: Option<f64>,
+    limit_to_crossing_quote_bps: Option<f64>,
+    expires_at: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PersistedExecutionParameters {
+    post_only_timeout_minutes: u64,
+    vwap_duration_minutes: u64,
+    vwap_participation_rate: f64,
+    limit_offset_bps: f64,
+    trigger_offset_bps: f64,
+    trailing_distance_percent: f64,
+}
+
+#[derive(Deserialize)]
+struct PersistedExplorationRiskAdjustment {
+    scale: f64,
+    sample_count: usize,
+    weighted_net_return_percent: Option<f64>,
+    weighted_net_return_lcb_percent: Option<f64>,
+    regime_scoped: bool,
+}
+
+#[derive(Deserialize)]
+struct PersistedDeepBookAssessment {
+    available_within_band: f64,
+    notional_cap: f64,
+    impact_bps: f64,
+    bid_depth_10bps: f64,
+    ask_depth_10bps: f64,
+    depth_imbalance_10bps: f64,
+}
+
+fn recovery_execution_from_order(
+    state: &AutoTraderState,
+    order: &TraderOrder,
+) -> Result<SelectedOrderExecution, String> {
+    let (request, value) = persisted_recovery_parts(order.revalidation_snapshot.as_ref())?;
+    let request = request.clone();
+    let context: PersistedEntryRecoveryContext = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid stored response-application context: {error}"))?;
+    if context.schema_version != 1
+        || context.timestamp != order.timestamp
+        || Some(context.decision_id.as_str()) != order.decision_id.as_deref()
+        || context.signal.symbol != order.symbol
+        || context.side != order.side
+        || (context.quantity - order.quantity).abs() > 1e-12
+        || !persisted_request_matches_context(&request, &context)
+    {
+        return Err("stored submission request does not match its durable reservation".to_owned());
+    }
+    let params = context.execution_parameters;
+    let risk = context.exploration_risk_adjustment;
+    let deep_book = context.deep_book.map(|book| DeepBookAssessment {
+        available_within_band: book.available_within_band,
+        notional_cap: book.notional_cap,
+        impact_bps: book.impact_bps,
+        bid_depth_10bps: book.bid_depth_10bps,
+        ask_depth_10bps: book.ask_depth_10bps,
+        depth_imbalance_10bps: book.depth_imbalance_10bps,
+    });
+    Ok(SelectedOrderExecution {
+        state: state.clone(),
+        signal: context.signal,
+        exploratory: context.exploratory,
+        counterfactual_stop_loss_percent: context.counterfactual_stop_loss_percent,
+        counterfactual_take_profit_percent: context.counterfactual_take_profit_percent,
+        effective_stop_loss_percent: context.effective_stop_loss_percent,
+        effective_take_profit_percent: context.effective_take_profit_percent,
+        side: context.side,
+        quantity: context.quantity,
+        notional: context.notional,
+        bid: context.bid,
+        ask: context.ask,
+        mid: context.mid,
+        order_type: context.order_type,
+        execution_params: ExecutionParameters {
+            post_only_timeout_minutes: params.post_only_timeout_minutes,
+            vwap_duration_minutes: params.vwap_duration_minutes,
+            vwap_participation_rate: params.vwap_participation_rate,
+            limit_offset_bps: params.limit_offset_bps,
+            trigger_offset_bps: params.trigger_offset_bps,
+            trailing_distance_percent: params.trailing_distance_percent,
+        },
+        timestamp: context.timestamp,
+        decision_id: context.decision_id,
+        lifecycle_identity: context.lifecycle_identity,
+        learning_context: context.learning_context,
+        exploration_risk_adjustment: ExplorationRiskAdjustment {
+            scale: risk.scale,
+            sample_count: risk.sample_count,
+            weighted_net_return_percent: risk.weighted_net_return_percent,
+            weighted_net_return_lcb_percent: risk.weighted_net_return_lcb_percent,
+            regime_scoped: risk.regime_scoped,
+        },
+        horizon_take_profit_percent: context.horizon_take_profit_percent,
+        stage_timings_ms: context.stage_timings_ms,
+        deep_book,
+        estimated_ioc_all_in_bps: context.estimated_ioc_all_in_bps,
+        submitted_limit_price: context.submitted_limit_price,
+        limit_to_mid_bps: context.limit_to_mid_bps,
+        limit_to_crossing_quote_bps: context.limit_to_crossing_quote_bps,
+        expires_at: context.expires_at,
+        persisted_request: request,
+        is_recovery: true,
+    })
+}
+
+fn persisted_request_matches_context(
+    request: &PersistedEntryRequest,
+    context: &PersistedEntryRecoveryContext,
+) -> bool {
+    let lifecycle = &request.body["lifecycle"];
+    let expected_path = if matches!(context.order_type, AutoOrderType::Vwap | AutoOrderType::Twap) {
+        "/positions/vwap"
+    } else {
+        "/positions/orders"
+    };
+    request.path == expected_path
+        && request.body.get("symbol").and_then(serde_json::Value::as_str)
+            == Some(context.signal.symbol.as_str())
+        && request.body.get("side").and_then(serde_json::Value::as_str)
+            == Some(context.side.as_str())
+        && request
+            .body
+            .get("quantity")
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|quantity| (quantity - context.quantity).abs() <= 1e-12)
+        && request.body.get("client_order_id").and_then(serde_json::Value::as_str)
+            == Some(context.lifecycle_identity.opportunity_id.as_str())
+        && lifecycle.get("opportunity_id").and_then(serde_json::Value::as_str)
+            == Some(context.lifecycle_identity.opportunity_id.as_str())
+        && lifecycle.get("episode_id").and_then(serde_json::Value::as_str)
+            == Some(context.lifecycle_identity.episode_id.as_str())
+        && lifecycle.get("trade_id").and_then(serde_json::Value::as_str)
+            == Some(context.lifecycle_identity.trade_id.as_str())
+}
+
+fn persisted_recovery_parts<'a>(
+    snapshot: Option<&'a RestingOrderRevalidationSnapshot>,
+) -> Result<(&'a PersistedEntryRequest, &'a serde_json::Value), String> {
+    let snapshot = snapshot
+        .ok_or_else(|| "legacy submitting order has no request snapshot".to_owned())?;
+    let request = snapshot
+        .submission_request
+        .as_ref()
+        .ok_or_else(|| "legacy submitting order has no exact Position Management request".to_owned())?;
+    let context = snapshot
+        .submission_recovery_context
+        .as_ref()
+        .ok_or_else(|| "submitting order has no response-application context".to_owned())?;
+    if !persisted_entry_request_is_replayable(request) {
+        return Err("stored request is unsupported or fails its idempotency contract".to_owned());
+    }
+    Ok((request, context))
+}
+
+async fn recover_submitting_entry_orders(state: &AutoTraderState) {
+    let orders = {
+        let settings = state.settings.lock().await;
+        settings
+            .orders
+            .iter()
+            .filter(|order| order.purpose == "signal" && order.status == "submitting")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for order in orders {
+        if !state.enabled.load(Ordering::Relaxed) {
+            let mut settings = state.settings.lock().await;
+            if let Some(current) = settings.orders.iter_mut().find(|candidate| {
+                candidate.timestamp == order.timestamp && candidate.status == "submitting"
+            }) {
+                current.failure_reason = Some(
+                    "recovery_deferred: Auto Trader is disabled; prior dispatch state is ambiguous"
+                        .to_owned(),
+                );
+                let _ = request_settings_persist(state);
+            }
+            drop(settings);
+            let _ = persist_settings_snapshot_durable(state).await;
+            continue;
+        }
+        let execution = match recovery_execution_from_order(state, &order) {
+            Ok(execution) => execution,
+            Err(reason) => {
+                mark_submission_unknown(state, order.timestamp, &reason).await;
+                continue;
+            }
+        };
+        if let Err((status, error)) = submit_and_record_selected_order(execution).await {
+            crate::service_log!(
+                "WARN",
+                "Durable entry replay remains pending for {} ({status}): {error}",
+                order.symbol
+            );
+        }
+    }
+}
+
+async fn mark_submission_unknown(state: &AutoTraderState, timestamp: u64, reason: &str) {
+    let mut settings = state.settings.lock().await;
+    if let Some(current) = settings.orders.iter_mut().find(|candidate| {
+        candidate.timestamp == timestamp && candidate.status == "submitting"
+    }) {
+        current.status = "unknown_submission".to_owned();
+        current.failure_reason = Some(format!("recovery_not_replayed: {reason}"));
+        let _ = request_settings_persist(state);
+    }
+    drop(settings);
+    let _ = persist_settings_snapshot_durable(state).await;
 }
 
 const RESTING_SIGNAL_REVALIDATION_MAX_AGE_MS: u64 = 10_000;
@@ -139,8 +381,7 @@ fn resting_order_invalidation_reason(
         && report.event_identity_version == strategy::LIVE_STRATEGY_EVENT_ID_VERSION
         && !report.event_id.trim().is_empty()
         && !report.episode_id.trim().is_empty()
-        && snapshot.event_id.as_deref() != Some(report.event_id.as_str())
-        && snapshot.episode_id.as_deref() != Some(report.episode_id.as_str());
+        && snapshot.event_id.as_deref() != Some(report.event_id.as_str());
     if report.symbol != order.symbol
         || report.strategy.as_str() != strategy.as_str()
         || snapshot.profile_id.as_deref() != Some(report.profile_id.as_str())
@@ -156,6 +397,9 @@ fn resting_order_invalidation_reason(
         || !worker_identity_is_fresh
     {
         return None;
+    }
+    if snapshot.episode_id.as_deref() != Some(report.episode_id.as_str()) {
+        return Some("fresh worker report belongs to a new trading thesis episode".to_owned());
     }
     if report.signal.direction != snapshot.direction {
         return Some(format!(
@@ -270,7 +514,7 @@ async fn sync_auto_positions(state: &AutoTraderState) -> Result<(), (StatusCode,
     let pending_signal_symbols = settings
         .orders
         .iter()
-        .filter(|order| order.status == "submitting")
+        .filter(|order| matches!(order.status.as_str(), "submitting" | "unknown_submission"))
         .map(|order| order.symbol.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let mut changed = false;
@@ -679,7 +923,7 @@ mod inactive_execution_order_tests {
     ) -> strategy::LiveStrategyDecisionReport {
         serde_json::from_value(json!({
             "contract_version": 1, "event_id": "event-2", "event_identity_version": 1,
-            "episode_id": "episode-2", "strategy": "live-momentum",
+            "episode_id": "episode-1", "strategy": "live-momentum",
             "symbol": "BTC-USDT", "profile_id": "profile-a", "profile_version": 3,
             "parameter_hash": "profile-a", "event_time_ms": event_time,
             "decision": decision, "reason": "fresh evaluator rejection", "walk_forward_evidence": null,
@@ -733,6 +977,12 @@ mod inactive_execution_order_tests {
         let mut legacy_identity = report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400);
         legacy_identity.event_identity_version = 0;
         assert!(resting_order_invalidation_reason(&candidate, &legacy_identity, now).is_none());
+        let mut reset_report = report(strategy::LiveStrategyDecision::Enter, 4_500, 4_400);
+        reset_report.episode_id = "episode-2".to_owned();
+        assert_eq!(
+            resting_order_invalidation_reason(&candidate, &reset_report, now).as_deref(),
+            Some("fresh worker report belongs to a new trading thesis episode")
+        );
         assert!(
             resting_order_invalidation_reason(
                 &candidate,
@@ -799,5 +1049,79 @@ mod inactive_execution_order_tests {
         assert!(is_post_only_entry_order("PostOnlyLimit · P0"));
         assert!(!is_post_only_entry_order("Gtd · P0"));
         assert!(!is_post_only_entry_order("Ioc · P0"));
+    }
+}
+
+#[cfg(test)]
+mod submitting_entry_recovery_contract_tests {
+    use super::{PersistedEntryRequest, persisted_recovery_parts};
+    use serde_json::json;
+
+    fn request(path: &str) -> PersistedEntryRequest {
+        PersistedEntryRequest {
+            schema_version: 1,
+            method: "POST".to_owned(),
+            path: path.to_owned(),
+            body: json!({
+                "source": "auto",
+                "client_order_id": "autotrader:v1:opportunity:epoch:1",
+                "lifecycle": {"schema_version": 1}
+            }),
+        }
+    }
+
+    #[test]
+    fn exact_supported_pm_request_and_context_survive_settings_round_trip() {
+        let original = json!({
+            "symbol": "BTC-USDT", "strategy": "live-momentum", "direction": "bullish",
+            "signal_timestamp_ms": 1200, "profile_id": "profile-a", "profile_version": 1,
+            "parameter_hash": "profile-a", "event_identity_version": 1,
+            "event_id": "event-a", "episode_id": "episode-a",
+            "submission_request": request("/positions/orders"),
+            "submission_recovery_context": {"schema_version": 1, "decision_id": "decision-a"}
+        });
+        let snapshot: super::RestingOrderRevalidationSnapshot =
+            serde_json::from_value(original.clone()).unwrap();
+        let serialized = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(serialized["submission_request"], original["submission_request"]);
+        assert_eq!(
+            serialized["submission_recovery_context"],
+            original["submission_recovery_context"]
+        );
+        let snapshot: super::RestingOrderRevalidationSnapshot =
+            serde_json::from_value(serialized).unwrap();
+        let (stored_request, context) = persisted_recovery_parts(Some(&snapshot)).unwrap();
+        assert_eq!(stored_request.path, "/positions/orders");
+        assert_eq!(stored_request.body["client_order_id"], "autotrader:v1:opportunity:epoch:1");
+        assert_eq!(context["decision_id"], "decision-a");
+    }
+
+    #[test]
+    fn legacy_or_unsupported_requests_are_never_replayed() {
+        let legacy: super::RestingOrderRevalidationSnapshot = serde_json::from_value(json!({
+            "symbol": "BTC-USDT", "strategy": "live-momentum", "direction": "bullish",
+            "signal_timestamp_ms": 1200
+        })).unwrap();
+        assert!(persisted_recovery_parts(Some(&legacy)).is_err());
+        assert!(persisted_recovery_parts(None).is_err());
+
+        let unsupported: super::RestingOrderRevalidationSnapshot = serde_json::from_value(json!({
+            "symbol": "BTC-USDT", "strategy": "live-momentum", "direction": "bullish",
+            "signal_timestamp_ms": 1200,
+            "submission_request": {"schema_version": 1, "method": "POST", "path": "/positions/unknown", "body": {}},
+            "submission_recovery_context": {"schema_version": 1}
+        })).unwrap();
+        assert!(persisted_recovery_parts(Some(&unsupported)).is_err());
+    }
+
+    #[test]
+    fn both_supported_entry_endpoints_carry_a_stable_idempotency_key() {
+        for path in ["/positions/orders", "/positions/vwap"] {
+            let request = request(path);
+            assert!(super::persisted_entry_request_is_replayable(&request));
+        }
+        let mut missing_key = request("/positions/orders");
+        missing_key.body.as_object_mut().unwrap().remove("client_order_id");
+        assert!(!super::persisted_entry_request_is_replayable(&missing_key));
     }
 }

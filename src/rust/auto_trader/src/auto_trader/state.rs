@@ -13,6 +13,13 @@ struct AutoTraderState {
     activity_snapshot: Arc<Mutex<Option<axum::body::Bytes>>>,
     settings_persist_notify: Arc<Notify>,
     settings_persist_write_lock: Arc<Mutex<()>>,
+    /// Mutation generation acknowledged by a serialized SQLite snapshot.
+    settings_persist_revision: Arc<AtomicU64>,
+    settings_persist_durable_revision: Arc<AtomicU64>,
+    settings_persist_durable_waiters: Arc<AtomicU64>,
+    settings_persist_batch_notify: Arc<Notify>,
+    durable_entry_reservation_batch: Arc<Mutex<Vec<PendingDurableEntryReservation>>>,
+    durable_entry_reservation_batch_scheduled: Arc<AtomicBool>,
     /// IDs whose current outbox payloads have been durably committed before
     /// attempting delivery during this process lifetime.
     durable_feedback_event_ids: Arc<Mutex<BTreeSet<String>>>,
@@ -374,9 +381,10 @@ struct TraderOrder {
     strategy: Option<String>,
     #[serde(default)]
     decision_id: Option<String>,
-    /// Compact point-in-time entry input used to correlate later worker
-    /// decisions with this exact strategy/profile opportunity. Legacy orders
-    /// intentionally have no snapshot and retain timeout-only behavior.
+    /// Point-in-time entry input used to correlate later worker decisions
+    /// with this exact strategy/profile opportunity. New submissions also
+    /// persist their exact PM request and response-application context here;
+    /// legacy orders intentionally lack those records and are not replayed.
     #[serde(default)]
     revalidation_snapshot: Option<RestingOrderRevalidationSnapshot>,
     #[serde(default)]
@@ -440,6 +448,14 @@ struct TraderOrder {
     strategy_realized_pnl_day: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PersistedEntryRequest {
+    schema_version: u16,
+    method: String,
+    path: String,
+    body: serde_json::Value,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct RestingOrderRevalidationSnapshot {
     symbol: String,
@@ -455,6 +471,14 @@ struct RestingOrderRevalidationSnapshot {
     event_id: Option<String>,
     #[serde(default)]
     episode_id: Option<String>,
+    /// Exact Position Management request prepared before the durable entry
+    /// reservation. Missing legacy payloads are not guessed or replayed.
+    #[serde(default)]
+    submission_request: Option<PersistedEntryRequest>,
+    /// Context needed to apply a recovered PM response through the original
+    /// fill/outcome path after a process restart.
+    #[serde(default)]
+    submission_recovery_context: Option<serde_json::Value>,
 }
 
 /// Versioned identities created atomically with an accepted AutoTrader
@@ -489,6 +513,14 @@ struct TraderPosition {
     total_fees_paid: f64,
     #[serde(default)]
     total_entry_fees_paid: f64,
+    /// Canonical PM fill identities retained with the open position so a
+    /// later outcome can link its entry side without reconstructing history.
+    #[serde(default)]
+    entry_fill_ids: Vec<String>,
+    #[serde(default)]
+    entry_fee_currencies: Vec<String>,
+    #[serde(default)]
+    entry_fill_costs_complete: bool,
     #[serde(default)]
     entries: u32,
     #[serde(default)]
@@ -505,6 +537,8 @@ struct TraderPosition {
     // It is initialized from the first entry decision and survives add-on fills.
     #[serde(default)]
     trade_id: Option<String>,
+    #[serde(default)]
+    lifecycle_identity: Option<CanonicalLifecycleIdentity>,
     #[serde(default)]
     #[serde(alias = "research_strategy")]
     strategy: Option<String>,
@@ -533,6 +567,14 @@ struct TraderPosition {
     #[serde(default)]
     price_path: Vec<TradePriceSample>,
     #[serde(default)]
+    price_path_total_samples: u64,
+    #[serde(default)]
+    price_path_truncated: bool,
+    /// A persisted open position crossed a process restart, so observations
+    /// from before and after the interruption cannot be treated as continuous.
+    #[serde(default)]
+    price_path_restart_interrupted: bool,
+    #[serde(default)]
     entry_timestamp_ms: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -540,6 +582,14 @@ struct TradePriceSample {
     timestamp: u64,
     bid: f64,
     ask: f64,
+    #[serde(default)]
+    source_updated_at_ms: Option<u64>,
+    #[serde(default)]
+    freshness_contract_version: Option<u16>,
+    #[serde(default)]
+    freshness_max_age_ms: Option<u64>,
+    #[serde(default)]
+    source_fresh: Option<bool>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ProtectiveStop {

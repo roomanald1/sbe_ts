@@ -251,10 +251,75 @@ fn has_seen_feedback_id(
 
 fn validate_trade_replay_context(event: &FeedbackEvent) -> Result<(), (StatusCode, String)> {
     let FeedbackEvent::TradeOutcome {
-        replay_context: Some(context),
+        replay_context,
+        scout,
+        schema_version,
+        event_id,
+        episode_id,
+        opportunity_id,
+        trade_id,
+        profile_hash,
+        profile_version,
+        execution_mode,
+        entry_policy,
+        source,
         ..
     } = event
     else {
+        return Ok(());
+    };
+    // WP14 outcomes are identified by their entry policy. Some historical
+    // producers set `scout=false` for exploratory trades, so the scout flag
+    // alone is not an authoritative lineage gate.
+    if (*scout || entry_policy.as_deref() == Some("exploratory"))
+        && schema_version.is_some_and(|version| version >= 1)
+    {
+        let lineage = replay_context
+            .as_ref()
+            .and_then(|context| context.lineage.as_ref());
+        let complete = lineage.is_some_and(|lineage| {
+            let nonempty = |value: &Option<String>| {
+                value.as_deref().is_some_and(|text| !text.trim().is_empty())
+            };
+            lineage.outcome_event_id == *event_id
+                && nonempty(&lineage.source_event_id)
+                && lineage.source_event_id != lineage.episode_id
+                && nonempty(&lineage.episode_id)
+                && lineage.episode_id.as_deref() != Some(lineage.outcome_event_id.as_str())
+                && lineage.episode_id == *episode_id
+                && nonempty(&lineage.opportunity_id)
+                && lineage.opportunity_id == *opportunity_id
+                && nonempty(&lineage.trade_id)
+                && lineage.trade_id == *trade_id
+                && nonempty(&lineage.profile_hash)
+                && lineage.profile_hash == *profile_hash
+                && lineage.profile_version.is_some()
+                && lineage.profile_version == *profile_version
+                && nonempty(&lineage.execution_mode)
+                && lineage.execution_mode == *execution_mode
+                && nonempty(&lineage.entry_policy)
+                && lineage.entry_policy == *entry_policy
+                && nonempty(&lineage.source)
+                && lineage.source == *source
+                && !lineage.entry_fill_ids.is_empty()
+                && !lineage.exit_fill_ids.is_empty()
+                && lineage
+                    .entry_fill_ids
+                    .iter()
+                    .chain(&lineage.exit_fill_ids)
+                    .all(|id| !id.trim().is_empty())
+                && lineage
+                    .entry_fill_ids
+                    .iter()
+                    .all(|id| !lineage.exit_fill_ids.contains(id))
+                && nonempty(&lineage.fee_currency)
+                && lineage.fees_complete
+        });
+        if !complete {
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, "exploratory trade outcome lacks authoritative event, episode, reservation, fill, profile, or fee lineage".into()));
+        }
+    }
+    let Some(context) = replay_context else {
         return Ok(());
     };
     if context.market_symbol.trim().is_empty()
@@ -823,6 +888,13 @@ fn learning_outcome(event: &FeedbackEvent) -> LearningOutcome {
                 ..
             }
         ),
+        lineage: match event {
+            FeedbackEvent::TradeOutcome { replay_context, .. } => replay_context
+                .as_ref()
+                .and_then(|context| context.lineage.clone()),
+            FeedbackEvent::ScoutOutcome { .. }
+            | FeedbackEvent::MissedOpportunityCandidate { .. } => None,
+        },
     }
 }
 
@@ -1466,6 +1538,152 @@ mod tests {
         }
     }
 
+    fn versioned_exploratory_trade(
+        event_id: &str,
+        source_event_id: &str,
+        complete: bool,
+    ) -> FeedbackEvent {
+        let lineage = complete.then(|| strategy::TradeOutcomeLineage {
+            outcome_event_id: event_id.into(),
+            source_event_id: Some(source_event_id.into()),
+            episode_id: Some("episode:thesis-7".into()),
+            opportunity_id: Some("opportunity:8".into()),
+            trade_id: Some("trade:9".into()),
+            profile_hash: Some("sha256:entry-profile".into()),
+            profile_version: Some(4),
+            execution_mode: Some("paper".into()),
+            entry_policy: Some("exploratory".into()),
+            source: Some("auto_trader_entry_reservation".into()),
+            entry_fill_ids: vec!["pm-fill:entry-1".into()],
+            exit_fill_ids: vec!["pm-fill:exit-1".into()],
+            fee_currency: Some("USDT".into()),
+            fees_complete: true,
+            evidence_gain_correlation: Some("gain-group-11".into()),
+        });
+        FeedbackEvent::TradeOutcome {
+            event_id: event_id.into(),
+            schema_version: Some(1),
+            trade_id: Some("trade:9".into()),
+            opportunity_id: Some("opportunity:8".into()),
+            episode_id: Some("episode:thesis-7".into()),
+            profile_hash: Some("sha256:entry-profile".into()),
+            profile_version: Some(4),
+            execution_mode: Some("paper".into()),
+            entry_policy: Some("exploratory".into()),
+            source: Some("auto_trader_entry_reservation".into()),
+            observed_at_ms: 10,
+            learning_context: None,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            profile_id: "profile".into(),
+            entry_profile_id: Some("entry-profile".into()),
+            parameters: BTreeMap::new(),
+            specs: vec![],
+            scout: true,
+            realized_pnl_usd: 0.01,
+            net_return_percent: 0.1,
+            threshold_observations: vec![],
+            replay_context: Some(TradeReplayContext {
+                market_symbol: "BTC-USDT".into(),
+                entry_timestamp_ms: 1,
+                exit_timestamp_ms: 2,
+                side: "long".into(),
+                entry_price: 10.0,
+                exit_price: 11.0,
+                quantity: 1.0,
+                entry_fees: 0.01,
+                exit_fees: 0.01,
+                entry_walk_forward_evidence: None,
+                execution_costs_complete: true,
+                lineage,
+            }),
+        }
+    }
+
+    #[test]
+    fn exploratory_lineage_keeps_source_events_distinct_from_the_same_thesis_episode() {
+        let first = versioned_exploratory_trade("trade:9", "market-event:1", true);
+        let second = versioned_exploratory_trade("trade:10", "market-event:2", true);
+        assert!(validate_trade_replay_context(&first).is_ok());
+        assert!(validate_trade_replay_context(&second).is_ok());
+        let (
+            FeedbackEvent::TradeOutcome {
+                event_id: first_id,
+                replay_context: Some(first_context),
+                ..
+            },
+            FeedbackEvent::TradeOutcome {
+                event_id: second_id,
+                replay_context: Some(second_context),
+                ..
+            },
+        ) = (first, second)
+        else {
+            panic!("trade events expected")
+        };
+        let first_lineage = first_context.lineage.unwrap();
+        let second_lineage = second_context.lineage.unwrap();
+        assert_ne!(first_id, second_id);
+        assert_ne!(
+            first_lineage.source_event_id,
+            second_lineage.source_event_id
+        );
+        assert_eq!(first_lineage.episode_id, second_lineage.episode_id);
+    }
+
+    #[test]
+    fn versioned_exploratory_feedback_quarantines_missing_identity_fills_or_fee_provenance() {
+        let missing = versioned_exploratory_trade("trade:9", "market-event:1", false);
+        let error = validate_trade_replay_context(&missing).unwrap_err();
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(error.1.contains("authoritative"));
+
+        let mut non_scout_exploration = missing.clone();
+        if let FeedbackEvent::TradeOutcome { scout, .. } = &mut non_scout_exploration {
+            *scout = false;
+        }
+        assert_eq!(
+            validate_trade_replay_context(&non_scout_exploration)
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "exploratory policy must require lineage even when scout=false"
+        );
+
+        let mut incomplete_cost = versioned_exploratory_trade("trade:9", "market-event:1", true);
+        if let FeedbackEvent::TradeOutcome {
+            replay_context: Some(context),
+            ..
+        } = &mut incomplete_cost
+        {
+            let lineage = context.lineage.as_mut().unwrap();
+            lineage.fee_currency = None;
+            lineage.fees_complete = false;
+        }
+        assert_eq!(
+            validate_trade_replay_context(&incomplete_cost)
+                .unwrap_err()
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn legacy_trade_feedback_without_exploratory_lineage_remains_decodable() {
+        let legacy = serde_json::json!({
+            "kind":"trade_outcome", "event_id":"trade:legacy", "observed_at_ms":1,
+            "symbol":"BTC-USDT", "strategy":"live-momentum", "profile_id":"legacy-profile",
+            "parameters":{}, "specs":[], "scout":false, "realized_pnl_usd":0.0,
+            "replay_context": {
+                "market_symbol":"BTC-USDT", "entry_timestamp_ms":1, "exit_timestamp_ms":2,
+                "side":"long", "entry_price":10.0, "exit_price":11.0, "quantity":1.0,
+                "entry_fees":0.0, "exit_fees":0.0, "execution_costs_complete":false
+            }
+        });
+        let event: FeedbackEvent = serde_json::from_value(legacy).unwrap();
+        assert!(validate_trade_replay_context(&event).is_ok());
+    }
+
     #[tokio::test]
     async fn missed_opportunity_feedback_is_attributed_deduplicated_and_durable() {
         let path = std::env::temp_dir().join(format!(
@@ -1738,6 +1956,23 @@ mod tests {
                 exit_fees: 0.01,
                 execution_costs_complete: false,
                 entry_walk_forward_evidence: None,
+                lineage: Some(strategy::TradeOutcomeLineage {
+                    outcome_event_id: "trade:replay".into(),
+                    source_event_id: Some("market-event:41".into()),
+                    episode_id: Some("episode-1".into()),
+                    opportunity_id: Some("opportunity-1".into()),
+                    trade_id: Some("trade-1".into()),
+                    profile_hash: Some("sha256:profile".into()),
+                    profile_version: Some(17),
+                    execution_mode: Some("paper".into()),
+                    entry_policy: Some("post_only".into()),
+                    source: Some("auto_trader".into()),
+                    entry_fill_ids: vec!["pm-fill:entry".into()],
+                    exit_fill_ids: vec!["pm-fill:exit".into()],
+                    fee_currency: Some("USDT".into()),
+                    fees_complete: true,
+                    evidence_gain_correlation: Some("gain:41".into()),
+                }),
             }),
         };
         let mut state = LearningState::default();
@@ -1768,6 +2003,19 @@ mod tests {
         assert_eq!(loaded_job.execution_mode.as_deref(), Some("paper"));
         assert_eq!(loaded_job.entry_policy.as_deref(), Some("post_only"));
         assert_eq!(loaded_job.source.as_deref(), Some("auto_trader"));
+        let lineage = loaded_job
+            .context
+            .as_ref()
+            .unwrap()
+            .lineage
+            .as_ref()
+            .unwrap();
+        assert_eq!(lineage.outcome_event_id, "trade:replay");
+        assert_eq!(lineage.source_event_id.as_deref(), Some("market-event:41"));
+        assert_eq!(lineage.episode_id.as_deref(), Some("episode-1"));
+        assert_eq!(lineage.entry_fill_ids, vec!["pm-fill:entry"]);
+        assert_eq!(lineage.exit_fill_ids, vec!["pm-fill:exit"]);
+        assert_eq!(lineage.fee_currency.as_deref(), Some("USDT"));
         assert_eq!(loaded_job.history_cursor.as_deref(), Some("1500:42"));
         assert!(loaded_job.counterfactual_position_open);
         assert!(loaded_job.counterfactual_entry_found);
@@ -1839,6 +2087,7 @@ mod tests {
                 exit_fees: 0.01,
                 execution_costs_complete: false,
                 entry_walk_forward_evidence: None,
+                lineage: None,
             }),
         };
 
@@ -2050,6 +2299,7 @@ mod tests {
                 paired_comparison: true,
                 tested_parameter_keys: vec!["threshold".into()],
                 baseline_parameters: baseline,
+                lineage: None,
             };
         let profile = |parameters: BTreeMap<String, f64>, outcomes| RegisteredProfile {
             profile: StrategyProfile {
@@ -2158,6 +2408,7 @@ mod tests {
                 paired_comparison: true,
                 tested_parameter_keys: specs.iter().map(|spec| spec.key.clone()).collect(),
                 baseline_parameters: baseline.clone(),
+                lineage: None,
             })
             .collect();
         let registered = RegisteredProfile {

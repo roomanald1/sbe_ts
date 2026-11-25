@@ -216,4 +216,43 @@ pub struct TradeReplayContext {
     /// Whether both sides have measured execution costs, rather than estimates.
     #[serde(default)]
     pub execution_costs_complete: bool,
+    /// Immutable reservation and ledger attribution copied into Learning's
+    /// durable outcome history. Empty or absent legacy values are never
+    /// reconstructed from market timestamps or payload contents.
+    #[serde(default)]
+    pub lineage: Option<TradeOutcomeLineage>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TradeOutcomeLineage {
+    #[serde(default)]
+    pub outcome_event_id: String,
+    #[serde(default)]
+    pub source_event_id: Option<String>,
+    #[serde(default)]
+    pub episode_id: Option<String>,
+    #[serde(default)]
+    pub opportunity_id: Option<String>,
+    #[serde(default)]
+    pub trade_id: Option<String>,
+    #[serde(default)]
+    pub profile_hash: Option<String>,
+    #[serde(default)]
+    pub profile_version: Option<u64>,
+    #[serde(default)]
+    pub execution_mode: Option<String>,
+    #[serde(default)]
+    pub entry_policy: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub entry_fill_ids: Vec<String>,
+    #[serde(default)]
+    pub exit_fill_ids: Vec<String>,
+    #[serde(default)]
+    pub fee_currency: Option<String>,
+    #[serde(default)]
+    pub fees_complete: bool,
+    #[serde(default)]
+    pub evidence_gain_correlation: Option<String>,
 }

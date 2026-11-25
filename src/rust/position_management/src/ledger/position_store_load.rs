@@ -180,8 +180,16 @@ impl PositionStore {
             let writer_timings = Arc::clone(&store.persistence_timings_ms);
             let writer_path = store.path.clone();
             tokio::spawn(async move {
+                let mut heartbeat = tokio::time::interval_at(
+                    Instant::now() + Duration::from_secs(30),
+                    Duration::from_secs(30),
+                );
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
-                    writer_notify.notified().await;
+                    tokio::select! {
+                        _ = writer_notify.notified() => {},
+                        _ = heartbeat.tick() => {},
+                    }
                     // Let a burst of fills and book updates collapse into one current snapshot.
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     // Serialize before snapshotting: a queued background write must
@@ -303,7 +311,11 @@ impl PositionStore {
         record_position_persistence_sample(&self.persistence_timings_ms, "snapshot_copy", copy_ms);
         let path = self.path.clone();
         let write_started = Instant::now();
-        tokio::task::spawn_blocking(move || save_sqlite_ledger(&path, &snapshot)).await??;
+        let observed_at_ms = now_ms()?;
+        tokio::task::spawn_blocking(move || {
+            save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, false)
+        })
+        .await??;
         record_position_persistence_sample(
             &self.persistence_timings_ms,
             "snapshot_write",
@@ -317,6 +329,28 @@ impl PositionStore {
         }
         let _ = self.state_updates.send(());
         Ok(())
+    }
+
+    async fn persist_portfolio_evidence_baseline(&self) -> anyhow::Result<serde_json::Value> {
+        let _write_guard = self.persistence_write_lock.lock().await;
+        let (snapshot, _, _, _) = snapshot_position_ledger(&self.ledger).await;
+        let path = self.path.clone();
+        let observed_at_ms = now_ms()?;
+        tokio::task::spawn_blocking(move || {
+            save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, true)
+        })
+        .await??;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+            let db = rusqlite::Connection::open(path)?;
+            let payload = db.query_row(
+                "SELECT payload FROM portfolio_evidence_intervals ORDER BY observed_at_ms DESC, rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok(serde_json::from_str(&payload)?)
+        })
+        .await?
     }
 }
 
@@ -389,6 +423,81 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
 }
 
 fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result<()> {
+    let observed_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    save_sqlite_ledger_at(path, ledger, observed_at_ms, false)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PortfolioEvidenceIntervalV1 {
+    schema_version: u32,
+    evidence_id: String,
+    portfolio_id: String,
+    execution_mode: String,
+    /// UTC half-open interval start: `[interval_start_utc_ms, interval_end_utc_ms)`.
+    interval_start_utc_ms: Option<u64>,
+    interval_end_utc_ms: u64,
+    ledger_epoch: Option<String>,
+    fill_cursor_start: Option<u64>,
+    fill_cursor_end: u64,
+    #[serde(default)]
+    trade_row_cursor_end: usize,
+    topup_cursor_start: Option<usize>,
+    topup_cursor_end: usize,
+    baseline_source: Option<String>,
+    #[serde(default)]
+    baseline_evidence_id: Option<String>,
+    #[serde(default)]
+    is_baseline: bool,
+    #[serde(default)]
+    opening_cash_amount: Option<f64>,
+    #[serde(default)]
+    opening_cash_currency: Option<String>,
+    known_symbols: Vec<String>,
+    positions: Vec<serde_json::Value>,
+    explicit_flat_symbols: Vec<String>,
+    all_symbols_covered: bool,
+    /// Coverage is scoped to symbols represented by the PM ledger, not the
+    /// market's tradable-symbol universe.
+    #[serde(default)]
+    symbol_coverage_scope: String,
+    cashflow_since_origin_by_currency: BTreeMap<String, f64>,
+    #[serde(default)]
+    cash_balances_by_currency: BTreeMap<String, f64>,
+    cash_movements_by_currency: BTreeMap<String, f64>,
+    #[serde(default)]
+    unknown_cashflow_fills: usize,
+    known_fee_fills: usize,
+    unknown_fee_fills: usize,
+    #[serde(default)]
+    legacy_fill_rows_without_allocator_identity: usize,
+    provenance: Vec<String>,
+    heartbeat_at_utc_ms: u64,
+    heartbeat_source: String,
+    heartbeat_gap: bool,
+    #[serde(default)]
+    gap_before_baseline: bool,
+    #[serde(default)]
+    ledger_epoch_changed: bool,
+    valuation_status: String,
+    market_mark_at_utc_ms: Option<u64>,
+    coverage_gap: bool,
+    truncated: bool,
+    complete: bool,
+    #[serde(default)]
+    completeness_scope: String,
+    #[serde(default)]
+    independent_execution_ledger_reconciled: bool,
+    #[serde(default)]
+    quantitative_eligibility: String,
+    completeness_reasons: Vec<String>,
+}
+
+fn save_sqlite_ledger_at(
+    path: &std::path::Path,
+    ledger: &Ledger,
+    observed_at_ms: u64,
+    explicit_baseline_request: bool,
+) -> anyhow::Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -396,7 +505,7 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
         std::fs::create_dir_all(parent)?;
     }
     let mut db = rusqlite::Connection::open(path)?;
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ledger_meta(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS trades(id TEXT PRIMARY KEY, symbol TEXT NOT NULL, timestamp INTEGER NOT NULL, side TEXT NOT NULL, quantity REAL NOT NULL, execution_price REAL NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trades_symbol_time ON trades(symbol,timestamp); CREATE TABLE IF NOT EXISTS dated_carry_positions(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS resting_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS barrier_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS scheduled_runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ledger_meta(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS trades(id TEXT PRIMARY KEY, symbol TEXT NOT NULL, timestamp INTEGER NOT NULL, side TEXT NOT NULL, quantity REAL NOT NULL, execution_price REAL NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS trades_symbol_time ON trades(symbol,timestamp); CREATE TABLE IF NOT EXISTS dated_carry_positions(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS topups(id INTEGER PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS resting_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS barrier_orders(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS scheduled_runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS portfolio_evidence_intervals(evidence_id TEXT PRIMARY KEY, observed_at_ms INTEGER NOT NULL, fill_cursor_end INTEGER NOT NULL, payload TEXT NOT NULL); CREATE INDEX IF NOT EXISTS portfolio_evidence_observed ON portfolio_evidence_intervals(observed_at_ms);")?;
     let tx = db.transaction()?;
     tx.execute(
         "INSERT OR REPLACE INTO ledger_meta(id,payload) VALUES(1,?1)",
@@ -463,13 +572,709 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
     write_rows!("resting_orders", &ledger.orders);
     write_rows!("barrier_orders", &ledger.barrier_orders);
     write_rows!("scheduled_runs", &ledger.scheduled_runs);
+    let previous_payload = rusqlite::OptionalExtension::optional(tx.query_row(
+            "SELECT payload FROM portfolio_evidence_intervals ORDER BY observed_at_ms DESC, rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ))?;
+    let previous = previous_payload
+        .map(|payload| serde_json::from_str::<PortfolioEvidenceIntervalV1>(&payload))
+        .transpose()?;
+    let fill_cursor_end = ledger.fill_id_sequence;
+    let evidence_id = format!(
+        "pm-portfolio-evidence:v1:{}:{}:{}:{}:{}:{}",
+        ledger.fill_id_epoch.as_deref().unwrap_or("unknown"),
+        observed_at_ms,
+        fill_cursor_end,
+        ledger.trades.len(),
+        ledger.topups.len(),
+        ledger.dated_carry_positions.len()
+    );
+    let summary = summarize_positions(&ledger.trades);
+    let known_symbols =
+        summary
+            .positions
+            .iter()
+            .map(|position| position.symbol.clone())
+            .chain(ledger.dated_carry_positions.iter().flat_map(|position| {
+                [position.spot_symbol.clone(), position.future_symbol.clone()]
+            }))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+    let explicit_flat_symbols = summary
+        .positions
+        .iter()
+        .filter(|position| position.quantity.abs() <= EPSILON)
+        .map(|position| position.symbol.clone())
+        .chain(ledger.dated_carry_positions.iter().filter_map(|position| {
+            (position.status.starts_with("closed") && position.closed_at_ms.is_some())
+                .then(|| format!("carry:{}", position.future_symbol))
+        }))
+        .collect::<Vec<_>>();
+    let mut cashflow_since_origin_by_currency = BTreeMap::new();
+    let mut cash_balances_by_currency = BTreeMap::new();
+    let mut cash_movements_by_currency = BTreeMap::new();
+    *cash_balances_by_currency
+        .entry("USD".to_owned())
+        .or_insert(0.0) += ledger.initial_cash;
+    let movement_start_cursor = previous
+        .as_ref()
+        .filter(|prior| prior.ledger_epoch == ledger.fill_id_epoch)
+        .and_then(|prior| prior.fill_cursor_end.checked_add(1))
+        .unwrap_or(1);
+    let prior_fill_cursor = previous
+        .as_ref()
+        .filter(|prior| prior.ledger_epoch == ledger.fill_id_epoch)
+        .map(|prior| prior.fill_cursor_end);
+    let prior_topup_cursor = previous
+        .as_ref()
+        .filter(|prior| prior.ledger_epoch == ledger.fill_id_epoch)
+        .map(|prior| prior.topup_cursor_end);
+    let topup_cursor_start = prior_topup_cursor.unwrap_or(0).min(ledger.topups.len());
+    let known_fee_fills = ledger.trades.iter().filter(|trade| trade.fee_known).count();
+    let unknown_fee_fills = ledger
+        .trades
+        .iter()
+        .filter(|trade| !trade.fee_known)
+        .count();
+    let legacy_fill_rows_without_allocator_identity = ledger
+        .trades
+        .iter()
+        .filter(|trade| trade.fill_id.as_deref().is_none_or(str::is_empty))
+        .count();
+    let fee_currency_missing_fills = ledger
+        .trades
+        .iter()
+        .filter(|trade| trade.fee_known && trade.fee_currency.trim().is_empty())
+        .count();
+    let unknown_cashflow_fills = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            !trade.fee_known
+                || trade.fee_currency.trim().is_empty()
+                || trade
+                    .symbol
+                    .split_once('-')
+                    .is_none_or(|(_, quote)| quote.is_empty())
+        })
+        .count();
+    let invalid_fill_amounts = ledger.trades.iter().any(|trade| {
+        !trade.quantity.is_finite()
+            || trade.quantity <= 0.0
+            || !trade.execution_price.is_finite()
+            || trade.execution_price <= 0.0
+            || (trade.fee_known && !trade.fee.is_finite())
+            || trade
+                .symbol
+                .split_once('-')
+                .is_none_or(|(base, quote)| base.is_empty() || quote.is_empty())
+    });
+    for trade in &ledger.trades {
+        let quote = trade
+            .symbol
+            .split_once('-')
+            .map(|(_, quote)| quote)
+            .unwrap_or("");
+        if quote.is_empty() {
+            continue;
+        }
+        let notional = trade.quantity * trade.execution_price;
+        let cash = if matches!(trade.side, TradeSide::Buy) {
+            -notional
+        } else {
+            notional
+        };
+        let fee = if trade.fee_known {
+            -trade.fee.abs()
+        } else {
+            0.0
+        };
+        *cashflow_since_origin_by_currency
+            .entry(quote.to_owned())
+            .or_insert(0.0) += cash;
+        *cash_balances_by_currency
+            .entry(quote.to_owned())
+            .or_insert(0.0) += cash;
+        let fill_sequence = trade.fill_id.as_deref().and_then(|id| {
+            ledger
+                .fill_id_epoch
+                .as_deref()
+                .and_then(|epoch| canonical_fill_sequence(id, epoch))
+        });
+        if fill_sequence.is_some_and(|sequence| sequence >= movement_start_cursor) {
+            *cash_movements_by_currency
+                .entry(quote.to_owned())
+                .or_insert(0.0) += cash;
+        }
+        if trade.fee_known && !trade.fee_currency.trim().is_empty() {
+            *cashflow_since_origin_by_currency
+                .entry(trade.fee_currency.clone())
+                .or_insert(0.0) += fee;
+            *cash_balances_by_currency
+                .entry(trade.fee_currency.clone())
+                .or_insert(0.0) += fee;
+            if fill_sequence.is_some_and(|sequence| sequence >= movement_start_cursor) {
+                *cash_movements_by_currency
+                    .entry(trade.fee_currency.clone())
+                    .or_insert(0.0) += fee;
+            }
+        }
+    }
+    for topup in &ledger.topups {
+        *cashflow_since_origin_by_currency
+            .entry("USD".to_owned())
+            .or_insert(0.0) += topup.amount;
+        *cash_balances_by_currency
+            .entry("USD".to_owned())
+            .or_insert(0.0) += topup.amount;
+    }
+    for topup in &ledger.topups[topup_cursor_start..] {
+        *cash_movements_by_currency
+            .entry("USD".to_owned())
+            .or_insert(0.0) += topup.amount;
+    }
+    let heartbeat_gap = previous
+        .as_ref()
+        .is_some_and(|prior| observed_at_ms.saturating_sub(prior.heartbeat_at_utc_ms) > 60_000);
+    let mut completeness_reasons = Vec::new();
+    if ledger.fill_id_epoch.is_none() {
+        completeness_reasons.push("fill_allocator_epoch_missing".to_owned());
+    }
+    if unknown_fee_fills > 0 {
+        completeness_reasons.push("one_or_more_fill_fees_unknown".to_owned());
+    }
+    if fee_currency_missing_fills > 0 {
+        completeness_reasons.push("one_or_more_fee_currencies_missing".to_owned());
+    }
+    if invalid_fill_amounts {
+        completeness_reasons.push("one_or_more_fill_amounts_or_symbols_invalid".to_owned());
+    }
+    if !ledger.initial_cash.is_finite() || ledger.initial_cash <= 0.0 {
+        completeness_reasons.push("authoritative_usd_initial_cash_unavailable".to_owned());
+    }
+    if ledger
+        .topups
+        .iter()
+        .any(|topup| !topup.amount.is_finite() || topup.amount <= 0.0)
+    {
+        completeness_reasons.push("invalid_or_unknown_topup_cash_movement".to_owned());
+    }
+    let current_epoch_sequences = ledger.fill_id_epoch.as_deref().map(|epoch| {
+        ledger
+            .trades
+            .iter()
+            .filter_map(|trade| {
+                trade
+                    .fill_id
+                    .as_deref()
+                    .map(|id| canonical_fill_sequence(id, epoch))
+            })
+            .collect::<Vec<_>>()
+    });
+    let allocator_cursor_complete = current_epoch_sequences.as_ref().is_some_and(|sequences| {
+        sequences.len() == usize::try_from(fill_cursor_end).unwrap_or(usize::MAX)
+            && sequences
+                .iter()
+                .enumerate()
+                .all(|(index, sequence)| *sequence == Some(index as u64 + 1))
+    }) && ledger.trades.iter().all(|trade| {
+        trade
+            .fill_id
+            .as_deref()
+            .is_none_or(|id| id.starts_with("pm-fill:v1:"))
+    });
+    if !allocator_cursor_complete {
+        completeness_reasons.push("fill_identity_or_cursor_coverage_incomplete".to_owned());
+    }
+    let dated_carry_complete = ledger.dated_carry_positions.iter().all(|position| {
+        position.status.starts_with("closed")
+            && position.closed_at_ms.is_some()
+            && position.entry_fees.is_finite()
+            && position.entry_fees >= 0.0
+            && ["spot-entry", "future-entry", "spot-exit", "future-exit"]
+                .iter()
+                .all(|leg| {
+                    ledger.trades.iter().any(|trade| {
+                        trade.id
+                            == format!(
+                                "dated-carry:{}:{}:{leg}",
+                                position.future_symbol, position.entry_ms
+                            )
+                    })
+                })
+    });
+    if !dated_carry_complete {
+        completeness_reasons.push("dated_carry_position_state_not_fully_reconciled".to_owned());
+    }
+    let all_flat = summary
+        .positions
+        .iter()
+        .all(|position| position.quantity.abs() <= EPSILON)
+        && ledger.dated_carry_positions.iter().all(|position| {
+            position.status.starts_with("closed") && position.closed_at_ms.is_some()
+        });
+    if !all_flat {
+        completeness_reasons.push("nonflat_positions_need_point_in_time_valuation".to_owned());
+    }
+    // Every covered symbol is a symbol represented by this PM-owned paper
+    // ledger. This field does not certify coverage of an exchange universe.
+    let sequences_complete = allocator_cursor_complete && dated_carry_complete && all_flat;
+    if ledger.dated_carry_positions.iter().any(|position| {
+        position.status == "open" && (!position.entry_fees.is_finite() || position.entry_fees < 0.0)
+    }) {
+        completeness_reasons.push("dated_carry_fee_coverage_incomplete".to_owned());
+    }
+    let epoch_changed = previous.as_ref().is_some_and(|prior| {
+        prior.ledger_epoch != ledger.fill_id_epoch
+            || (explicit_baseline_request && prior.ledger_epoch_changed)
+    });
+    if heartbeat_gap && !explicit_baseline_request {
+        completeness_reasons.push("persistence_checkpoint_gap_exceeds_60_seconds".to_owned());
+    }
+    if epoch_changed && !explicit_baseline_request {
+        completeness_reasons.push("fill_allocator_epoch_changed".to_owned());
+    }
+    let source_quality = completeness_reasons.is_empty();
+    let baseline_source = if explicit_baseline_request && source_quality {
+        Some("position_manager_account_fill_topup_ledger_v1".to_owned())
+    } else if !explicit_baseline_request {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.baseline_source.clone())
+    } else {
+        None
+    };
+    let is_baseline = explicit_baseline_request && source_quality;
+    if is_baseline {
+        // A baseline anchors current balances; it is not itself a period of
+        // cash movement from the unknown prior state.
+        cash_movements_by_currency.clear();
+    }
+    let baseline_evidence_id = if is_baseline {
+        Some(evidence_id.clone())
+    } else {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.baseline_evidence_id.clone())
+    };
+    if explicit_baseline_request && !source_quality {
+        completeness_reasons
+            .push("explicit_baseline_rejected_source_coverage_incomplete".to_owned());
+    }
+    let checkpoint_contiguous = previous.as_ref().is_some_and(|prior| {
+        prior.complete
+            && prior.ledger_epoch == ledger.fill_id_epoch
+            && fill_cursor_end >= prior.fill_cursor_end
+            && prior.trade_row_cursor_end <= ledger.trades.len()
+            && ledger.topups.len() >= prior.topup_cursor_end
+            && !heartbeat_gap
+            && ledger.trades[prior.trade_row_cursor_end..]
+                .iter()
+                .enumerate()
+                .all(|(offset, trade)| {
+                    trade.fill_id.as_deref().and_then(|id| {
+                        ledger
+                            .fill_id_epoch
+                            .as_deref()
+                            .and_then(|epoch| canonical_fill_sequence(id, epoch))
+                    }) == Some(prior.fill_cursor_end + offset as u64 + 1)
+                })
+            && ledger
+                .trades
+                .len()
+                .saturating_sub(prior.trade_row_cursor_end)
+                == usize::try_from(fill_cursor_end.saturating_sub(prior.fill_cursor_end))
+                    .unwrap_or(usize::MAX)
+    });
+    let complete = source_quality && (is_baseline || checkpoint_contiguous);
+    if !is_baseline && !checkpoint_contiguous {
+        completeness_reasons.push("no_contiguous_complete_baseline_interval".to_owned());
+    }
+    let checkpoint = PortfolioEvidenceIntervalV1 {
+        schema_version: 1,
+        evidence_id: evidence_id.clone(),
+        portfolio_id: "paper-default".to_owned(),
+        execution_mode: "paper".to_owned(),
+        interval_start_utc_ms: if is_baseline {
+            Some(observed_at_ms)
+        } else {
+            previous.as_ref().map(|prior| prior.interval_end_utc_ms)
+        },
+        interval_end_utc_ms: observed_at_ms,
+        ledger_epoch: ledger.fill_id_epoch.clone(),
+        fill_cursor_start: if is_baseline {
+            Some(fill_cursor_end)
+        } else {
+            prior_fill_cursor
+        },
+        fill_cursor_end,
+        trade_row_cursor_end: ledger.trades.len(),
+        topup_cursor_start: if is_baseline {
+            Some(ledger.topups.len())
+        } else {
+            prior_topup_cursor
+        },
+        topup_cursor_end: ledger.topups.len(),
+        baseline_source,
+        baseline_evidence_id,
+        is_baseline,
+        opening_cash_amount: if is_baseline {
+            Some(ledger.initial_cash)
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.opening_cash_amount)
+        },
+        opening_cash_currency: if is_baseline {
+            Some("USD".to_owned())
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.opening_cash_currency.clone())
+        },
+        known_symbols,
+        positions: summary
+            .positions
+            .into_iter()
+            .map(serde_json::to_value)
+            .chain(
+                ledger
+                    .dated_carry_positions
+                    .iter()
+                    .map(serde_json::to_value),
+            )
+            .collect::<Result<_, _>>()?,
+        explicit_flat_symbols,
+        all_symbols_covered: sequences_complete,
+        symbol_coverage_scope: "all_position_symbols_in_position_manager_ledger".to_owned(),
+        cashflow_since_origin_by_currency,
+        cash_balances_by_currency,
+        cash_movements_by_currency,
+        unknown_cashflow_fills,
+        known_fee_fills,
+        unknown_fee_fills,
+        legacy_fill_rows_without_allocator_identity,
+        provenance: vec![
+            "position_manager_sqlite_fill_ledger".to_owned(),
+            "position_manager_account_api_usd_cash_baseline".to_owned(),
+            "position_manager_sqlite_usd_topup_ledger".to_owned(),
+            "position_manager_dated_carry_ledger".to_owned(),
+        ],
+        heartbeat_at_utc_ms: observed_at_ms,
+        heartbeat_source: "position_manager_ledger_persistence_only".to_owned(),
+        heartbeat_gap: heartbeat_gap && !is_baseline,
+        gap_before_baseline: is_baseline
+            && (heartbeat_gap
+                || epoch_changed
+                || previous.as_ref().is_some_and(|prior| !prior.complete)),
+        ledger_epoch_changed: epoch_changed,
+        valuation_status: if all_flat {
+            "flat_cash_only"
+        } else {
+            "unavailable_for_open_positions"
+        }
+        .to_owned(),
+        market_mark_at_utc_ms: None,
+        coverage_gap: !complete,
+        truncated: false,
+        complete,
+        completeness_scope: "position_manager_internal_source".to_owned(),
+        independent_execution_ledger_reconciled: false,
+        quantitative_eligibility: "blocked_pending_independent_reconciliation".to_owned(),
+        completeness_reasons,
+    };
+    tx.execute(
+        "INSERT OR IGNORE INTO portfolio_evidence_intervals(evidence_id,observed_at_ms,fill_cursor_end,payload) VALUES(?1,?2,?3,?4)",
+        rusqlite::params![evidence_id, i64::try_from(observed_at_ms)?, i64::try_from(fill_cursor_end)?, serde_json::to_string(&checkpoint)?],
+    )?;
     tx.commit()?;
     Ok(())
+}
+
+fn canonical_fill_sequence(fill_id: &str, epoch: &str) -> Option<u64> {
+    let identity = fill_id.strip_prefix("pm-fill:v1:")?;
+    let (fill_epoch, sequence) = identity.rsplit_once(':')?;
+    (fill_epoch == epoch)
+        .then(|| sequence.parse::<u64>().ok())
+        .flatten()
 }
 
 #[cfg(test)]
 mod ledger_snapshot_tests {
     use super::*;
+
+    fn fill(id: &str, side: &str, sequence: u64, timestamp: u64) -> PositionTrade {
+        let mut trade: PositionTrade = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "symbol": "BTC-USDT",
+            "side": side,
+            "quantity": 1.0,
+            "execution_price": 100.0,
+            "timestamp": timestamp,
+            "parent_order_id": format!("order-{id}"),
+            "fee": 0.1,
+            "fee_known": true,
+            "fee_currency": "USDT"
+        }))
+        .unwrap();
+        trade.fill_id = Some(format!("pm-fill:v1:test-epoch:{sequence}"));
+        trade
+    }
+
+    #[test]
+    fn portfolio_intervals_persist_unknown_baseline_flat_period_and_cursor_across_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-portfolio-evidence-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let ledger = Ledger {
+            fill_id_epoch: Some("test-epoch".to_owned()),
+            fill_id_sequence: 1,
+            trades: vec![fill("open", "buy", 1, 900)],
+            topups: vec![AccountTopup {
+                amount: 50.0,
+                timestamp: 800,
+            }],
+            ..Ledger::default()
+        };
+
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+        let restarted = load_sqlite_ledger(&path).unwrap();
+        assert_eq!(restarted.fill_id_epoch.as_deref(), Some("test-epoch"));
+        assert_eq!(restarted.fill_id_sequence, 1);
+        let mut ledger = restarted;
+        ledger.trades.push(fill("close", "sell", 2, 1_500));
+        ledger.fill_id_sequence = 2;
+        save_sqlite_ledger_at(&path, &ledger, 2_000, false).unwrap();
+        ledger.topups.push(AccountTopup {
+            amount: 25.0,
+            timestamp: 2_500,
+        });
+        save_sqlite_ledger_at(&path, &ledger, 3_000, false).unwrap();
+        ledger.topups.push(AccountTopup {
+            amount: 10.0,
+            timestamp: 70_000,
+        });
+        save_sqlite_ledger_at(&path, &ledger, 70_001, false).unwrap();
+
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let rows = {
+            let mut statement = db.prepare(
+                "SELECT payload FROM portfolio_evidence_intervals ORDER BY observed_at_ms, rowid",
+            ).unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| {
+                    serde_json::from_str::<PortfolioEvidenceIntervalV1>(&row.unwrap()).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows.len(), 4, "same checkpoint retry must be idempotent");
+        assert_eq!(rows[0].ledger_epoch.as_deref(), Some("test-epoch"));
+        assert_eq!(rows[0].fill_cursor_end, 1);
+        assert_eq!(rows[0].baseline_source, None);
+        assert!(!rows[0].complete, "unknown initial state must fail closed");
+        assert_eq!(rows[1].fill_cursor_start, Some(1));
+        assert_eq!(rows[1].fill_cursor_end, 2);
+        assert!(
+            rows[1]
+                .explicit_flat_symbols
+                .iter()
+                .any(|symbol| symbol == "BTC-USDT")
+        );
+        assert!(rows[1].cash_movements_by_currency.get("USDT").is_some());
+        assert!(rows[0].cash_movements_by_currency.get("USD").is_some());
+        assert_eq!(rows[2].interval_start_utc_ms, Some(2_000));
+        assert!(
+            rows[2]
+                .explicit_flat_symbols
+                .iter()
+                .any(|symbol| symbol == "BTC-USDT")
+        );
+        assert!(rows[3].heartbeat_gap);
+        assert!(rows[3].coverage_gap);
+        assert!(rows.iter().all(|row| !row.complete));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn explicit_flat_baseline_heartbeat_topup_and_fill_coverage_survive_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-portfolio-baseline-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut ledger = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("test-epoch".to_owned()),
+            fill_id_sequence: 2,
+            trades: vec![fill("open", "buy", 1, 900), fill("close", "sell", 2, 950)],
+            topups: vec![AccountTopup {
+                amount: 50.0,
+                timestamp: 800,
+            }],
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+        let restarted = load_sqlite_ledger(&path).unwrap();
+        let baseline = latest_portfolio_evidence(&path).unwrap();
+        assert!(baseline.is_baseline && baseline.complete, "{baseline:?}");
+        assert_eq!(
+            baseline.baseline_source.as_deref(),
+            Some("position_manager_account_fill_topup_ledger_v1")
+        );
+        assert_eq!(baseline.opening_cash_amount, Some(ledger.initial_cash));
+        assert_eq!(baseline.opening_cash_currency.as_deref(), Some("USD"));
+        assert_eq!(baseline.ledger_epoch.as_deref(), Some("test-epoch"));
+        assert_eq!(baseline.fill_cursor_end, 2);
+        assert_eq!(baseline.topup_cursor_end, 1);
+        assert_eq!(baseline.unknown_cashflow_fills, 0);
+        assert!(
+            baseline
+                .provenance
+                .iter()
+                .any(|source| source == "position_manager_account_api_usd_cash_baseline")
+        );
+        assert!(
+            baseline
+                .explicit_flat_symbols
+                .iter()
+                .any(|symbol| symbol == "BTC-USDT")
+        );
+        assert_eq!(
+            baseline.cash_balances_by_currency.get("USD"),
+            Some(&10_050.0)
+        );
+
+        save_sqlite_ledger_at(&path, &restarted, 30_000, false).unwrap();
+        let heartbeat = latest_portfolio_evidence(&path).unwrap();
+        assert!(heartbeat.complete && !heartbeat.heartbeat_gap);
+        assert_eq!(heartbeat.interval_start_utc_ms, Some(1_000));
+        assert_eq!(
+            heartbeat.baseline_evidence_id.as_deref(),
+            Some(baseline.evidence_id.as_str())
+        );
+
+        ledger.topups.push(AccountTopup {
+            amount: 25.0,
+            timestamp: 31_000,
+        });
+        save_sqlite_ledger_at(&path, &ledger, 32_000, false).unwrap();
+        let after_topup = latest_portfolio_evidence(&path).unwrap();
+        assert!(after_topup.complete);
+        assert_eq!(after_topup.topup_cursor_start, Some(1));
+        assert_eq!(after_topup.topup_cursor_end, 2);
+        assert_eq!(
+            after_topup.cash_movements_by_currency.get("USD"),
+            Some(&25.0)
+        );
+        assert_eq!(
+            after_topup.cash_balances_by_currency.get("USD"),
+            Some(&10_075.0)
+        );
+
+        ledger.trades.push(fill("reopen", "buy", 3, 33_000));
+        ledger.fill_id_sequence = 3;
+        save_sqlite_ledger_at(&path, &ledger, 34_000, false).unwrap();
+        let after_fill = latest_portfolio_evidence(&path).unwrap();
+        assert!(!after_fill.complete);
+        assert_eq!(after_fill.fill_cursor_end, 3);
+        assert!(after_fill.cash_movements_by_currency.contains_key("USDT"));
+
+        save_sqlite_ledger_at(&path, &ledger, 94_001, false).unwrap();
+        let after_gap = latest_portfolio_evidence(&path).unwrap();
+        assert!(after_gap.heartbeat_gap && after_gap.coverage_gap);
+        assert!(!after_gap.complete);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn unknown_baseline_and_allocator_epoch_change_fail_closed_until_reanchored() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-portfolio-epoch-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        save_sqlite_ledger_at(&path, &Ledger::default(), 1_000, true).unwrap();
+        let unknown = latest_portfolio_evidence(&path).unwrap();
+        assert!(!unknown.complete && unknown.baseline_source.is_none());
+        assert!(unknown.coverage_gap);
+
+        let mut ledger = Ledger {
+            fill_id_epoch: Some("epoch-a".to_owned()),
+            initial_cash: 10_000.0,
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &ledger, 2_000, true).unwrap();
+        assert!(latest_portfolio_evidence(&path).unwrap().complete);
+        ledger.fill_id_epoch = Some("epoch-b".to_owned());
+        save_sqlite_ledger_at(&path, &ledger, 3_000, false).unwrap();
+        let changed = latest_portfolio_evidence(&path).unwrap();
+        assert!(!changed.complete && changed.coverage_gap);
+        assert!(
+            changed
+                .completeness_reasons
+                .iter()
+                .any(|reason| reason == "fill_allocator_epoch_changed")
+        );
+        save_sqlite_ledger_at(&path, &ledger, 4_000, true).unwrap();
+        let reanchored = latest_portfolio_evidence(&path).unwrap();
+        assert!(reanchored.is_baseline && reanchored.complete);
+        assert_eq!(reanchored.ledger_epoch.as_deref(), Some("epoch-b"));
+        assert!(reanchored.gap_before_baseline && reanchored.ledger_epoch_changed);
+
+        let mut unknown_fee = fill("unknown-fee", "buy", 1, 5_000);
+        unknown_fee.fill_id = Some("pm-fill:v1:epoch-b:1".to_owned());
+        unknown_fee.fee_known = false;
+        unknown_fee.fee_currency.clear();
+        ledger.trades.push(unknown_fee);
+        ledger.fill_id_sequence = 1;
+        save_sqlite_ledger_at(&path, &ledger, 5_000, false).unwrap();
+        let incomplete_fee = latest_portfolio_evidence(&path).unwrap();
+        assert!(!incomplete_fee.complete);
+        assert_eq!(incomplete_fee.unknown_cashflow_fills, 1);
+        assert!(
+            incomplete_fee
+                .completeness_reasons
+                .iter()
+                .any(|reason| reason == "one_or_more_fill_fees_unknown")
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    fn latest_portfolio_evidence(
+        path: &std::path::Path,
+    ) -> anyhow::Result<PortfolioEvidenceIntervalV1> {
+        let db = rusqlite::Connection::open(path)?;
+        let payload = db.query_row(
+            "SELECT payload FROM portfolio_evidence_intervals ORDER BY observed_at_ms DESC, rowid DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(serde_json::from_str(&payload)?)
+    }
 
     #[tokio::test]
     async fn batched_snapshot_keeps_cutoff_consistent_during_append() {
@@ -544,6 +1349,7 @@ mod ledger_snapshot_tests {
         ));
         let mut ledger = Ledger::default();
         let first_fill_id = allocate_fill_id(&mut ledger, 100);
+        let evidence_epoch = ledger_evidence_epoch_id(ledger.fill_id_epoch.as_deref());
         let mut first_fill: PositionTrade = serde_json::from_value(serde_json::json!({
             "id": "row-1", "symbol": "BTC-USDT", "side": "buy", "quantity": 0.25,
             "execution_price": 40000.0, "timestamp": 100, "parent_order_id": "parent-1"
@@ -555,6 +1361,10 @@ mod ledger_snapshot_tests {
         save_sqlite_ledger(&path, &ledger).unwrap();
         let mut restarted = load_sqlite_ledger(&path).unwrap();
         assert_eq!(restarted.fill_id_epoch, ledger.fill_id_epoch);
+        assert_eq!(
+            ledger_evidence_epoch_id(restarted.fill_id_epoch.as_deref()),
+            evidence_epoch
+        );
         assert_eq!(restarted.fill_id_sequence, 1);
         assert_eq!(
             restarted.trades[0].fill_id.as_deref(),
@@ -574,6 +1384,10 @@ mod ledger_snapshot_tests {
         save_sqlite_ledger(&path, &restarted).unwrap();
         let restored = load_sqlite_ledger(&path).unwrap();
         assert_eq!(restored.fill_id_epoch, ledger.fill_id_epoch);
+        assert_eq!(
+            ledger_evidence_epoch_id(restored.fill_id_epoch.as_deref()),
+            evidence_epoch
+        );
         assert_eq!(restored.fill_id_sequence, 2);
         assert_eq!(restored.trades.len(), 2);
         assert_eq!(

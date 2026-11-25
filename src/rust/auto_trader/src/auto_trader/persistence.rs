@@ -199,11 +199,122 @@ fn persist_dated_carry_book(path: &PathBuf, book: &DatedCarryBook) -> Result<(),
     transaction.commit().map_err(|e| e.to_string())
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct DurableEntryReservation {
+    schema_version: u16,
+    decision_id: String,
+    order: TraderOrder,
+    lifecycle_identity: CanonicalLifecycleIdentity,
+    canonical_lifecycle_epoch: String,
+    canonical_lifecycle_sequence: u64,
+    exploratory_event_key: Option<String>,
+    reserved_at_ms: u64,
+}
+
+fn merge_durable_entry_reservations(
+    connection: &rusqlite::Connection,
+    settings: &mut Settings,
+) -> rusqlite::Result<()> {
+    let has_intents: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_entry_reservations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_intents {
+        return Ok(());
+    }
+    let mut statement =
+        connection.prepare("SELECT payload FROM durable_entry_reservations ORDER BY rowid")?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for payload in rows {
+        let reservation =
+            serde_json::from_str::<DurableEntryReservation>(&payload).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+        let has_order = settings
+            .orders
+            .iter()
+            .any(|order| order.decision_id.as_deref() == Some(&reservation.decision_id));
+        if !has_order {
+            settings.orders.push(reservation.order);
+        }
+        settings
+            .canonical_lifecycle_links
+            .entry(reservation.decision_id)
+            .or_insert(reservation.lifecycle_identity);
+        if settings.canonical_lifecycle_epoch.is_empty()
+            || (settings.canonical_lifecycle_sequence == 0
+                && settings.canonical_lifecycle_links.is_empty())
+        {
+            settings.canonical_lifecycle_epoch = reservation.canonical_lifecycle_epoch;
+        }
+        settings.canonical_lifecycle_sequence = settings
+            .canonical_lifecycle_sequence
+            .max(reservation.canonical_lifecycle_sequence);
+        if let Some(event_key) = reservation.exploratory_event_key {
+            settings
+                .exploratory_event_reservations
+                .entry(event_key)
+                .or_insert(reservation.reserved_at_ms);
+        }
+    }
+    settings.used_notional_today = allocated_notional(settings);
+    Ok(())
+}
+
+fn mark_restored_price_paths_interrupted(settings: &mut Settings) {
+    for position in settings.positions.values_mut() {
+        if position.quantity.abs() > 1e-12 {
+            position.price_path_restart_interrupted = true;
+        }
+    }
+    for lots in settings.strategy_positions.values_mut() {
+        for position in lots.values_mut() {
+            if position.quantity.abs() > 1e-12 {
+                position.price_path_restart_interrupted = true;
+            }
+        }
+    }
+}
+
 fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> {
     if !path.exists() {
         return Ok(None);
     }
     let connection = rusqlite::Connection::open(path)?;
+    let has_durable_snapshot: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_trader_durable_snapshot')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_durable_snapshot {
+        let payload = connection
+            .query_row(
+                "SELECT payload FROM auto_trader_durable_snapshot WHERE id=1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(payload) = payload {
+            let mut settings = serde_json::from_str(&payload).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            merge_durable_entry_reservations(&connection, &mut settings)?;
+            mark_restored_price_paths_interrupted(&mut settings);
+            return Ok(Some(settings));
+        }
+    }
     let has_old_table: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='auto_trader_state')",
         [], |row| row.get(0),
@@ -250,15 +361,17 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
     let has_normalized = !fields.is_empty();
     transaction.commit()?;
     if has_normalized {
-        return serde_json::from_value(serde_json::Value::Object(fields))
-            .map(Some)
-            .map_err(|error| {
+        let mut settings =
+            serde_json::from_value(serde_json::Value::Object(fields)).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     0,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
-            });
+            })?;
+        merge_durable_entry_reservations(&connection, &mut settings)?;
+        mark_restored_price_paths_interrupted(&mut settings);
+        return Ok(Some(settings));
     }
     if let Some(payload) = old_payload {
         let settings: Settings = rmp_serde::from_slice(&payload).map_err(|error| {
@@ -271,6 +384,19 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
         persist_settings_snapshot(path, &settings).map_err(|(_, error)| {
             rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
         })?;
+        let mut settings = settings;
+        merge_durable_entry_reservations(&connection, &mut settings)?;
+        mark_restored_price_paths_interrupted(&mut settings);
+        return Ok(Some(settings));
+    }
+    let has_pending_intents: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_entry_reservations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_pending_intents {
+        let mut settings = Settings::default();
+        merge_durable_entry_reservations(&connection, &mut settings)?;
         return Ok(Some(settings));
     }
     Ok(None)
@@ -326,12 +452,269 @@ fn persist_settings_snapshot(
             .execute_batch("DROP TABLE IF EXISTS auto_trader_state;")
             .map_err(settings_persistence_error)?;
     }
+    prune_durable_entry_reservations(&transaction, settings).map_err(settings_persistence_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_trader_durable_snapshot (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);",
+        )
+        .map_err(settings_persistence_error)?;
+    transaction
+        .execute(
+            "INSERT INTO auto_trader_durable_snapshot(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+            [serde_json::to_string(settings).map_err(settings_persistence_error)?],
+        )
+        .map_err(settings_persistence_error)?;
     transaction.commit().map_err(settings_persistence_error)?;
     committed_settings_snapshots()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(path.clone(), object.clone());
     Ok(())
+}
+
+fn prune_durable_entry_reservations(
+    transaction: &rusqlite::Transaction<'_>,
+    settings: &Settings,
+) -> rusqlite::Result<()> {
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS durable_entry_reservations (decision_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
+    )?;
+    let retained_intent_ids = settings
+        .orders
+        .iter()
+        .filter(|order| matches!(order.status.as_str(), "submitting" | "unknown_submission"))
+        .filter(|order| {
+            order
+                .revalidation_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.submission_request.as_ref())
+                .is_some_and(persisted_entry_request_is_replayable)
+        })
+        .filter_map(|order| order.decision_id.clone())
+        .collect::<BTreeSet<_>>();
+    let existing_intent_ids = {
+        let mut statement =
+            transaction.prepare("SELECT decision_id FROM durable_entry_reservations")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for decision_id in existing_intent_ids {
+        if !retained_intent_ids.contains(&decision_id) {
+            transaction.execute(
+                "DELETE FROM durable_entry_reservations WHERE decision_id=?1",
+                [decision_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn persist_durable_settings_snapshot(
+    path: &PathBuf,
+    settings: &Settings,
+) -> Result<(), (StatusCode, String)> {
+    let _sqlite_write_guard = sqlite_write_guard();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(settings_persistence_error)?;
+    }
+    let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(settings_persistence_error)?;
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS auto_trader_durable_snapshot (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);",
+        )
+        .map_err(settings_persistence_error)?;
+    let payload = serde_json::to_string(settings).map_err(settings_persistence_error)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(settings_persistence_error)?;
+    transaction
+        .execute(
+            "INSERT INTO auto_trader_durable_snapshot(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+            [payload],
+        )
+        .map_err(settings_persistence_error)?;
+    prune_durable_entry_reservations(&transaction, settings).map_err(settings_persistence_error)?;
+    transaction.commit().map_err(settings_persistence_error)
+}
+
+fn persist_durable_entry_reservation_record(
+    path: &PathBuf,
+    reservations: &[DurableEntryReservation],
+) -> Result<(), (StatusCode, String)> {
+    // One bounded group commit amortizes SQLite transaction/fsync overhead.
+    // Callers are acknowledged only after this transaction commits.
+    let database_existed = path.exists();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(settings_persistence_error)?;
+    }
+    let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(settings_persistence_error)?;
+    if !database_existed {
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(settings_persistence_error)?;
+    }
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS durable_entry_reservations (decision_id TEXT PRIMARY KEY, payload TEXT NOT NULL);",
+        )
+        .map_err(settings_persistence_error)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(settings_persistence_error)?;
+    for reservation in reservations {
+        let payload = serde_json::to_string(reservation).map_err(settings_persistence_error)?;
+        transaction
+            .execute(
+                "INSERT INTO durable_entry_reservations(decision_id,payload) VALUES(?1,?2) ON CONFLICT(decision_id) DO UPDATE SET payload=excluded.payload",
+                rusqlite::params![reservation.decision_id, payload],
+            )
+            .map_err(settings_persistence_error)?;
+    }
+    transaction.commit().map_err(settings_persistence_error)
+}
+
+struct PendingDurableEntryReservation {
+    reservation: DurableEntryReservation,
+    completion: tokio::sync::oneshot::Sender<Result<(), (StatusCode, String)>>,
+}
+
+fn schedule_durable_entry_reservation_batch(state: &AutoTraderState) {
+    if state
+        .durable_entry_reservation_batch_scheduled
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(SETTINGS_PERSIST_DURABLE_BATCH_WINDOW).await;
+        let pending = {
+            let mut queue = state.durable_entry_reservation_batch.lock().await;
+            let pending = std::mem::take(&mut *queue);
+            // Reset while holding the queue lock so a concurrent enqueue is
+            // either included above or schedules the next transaction.
+            state
+                .durable_entry_reservation_batch_scheduled
+                .store(false, Ordering::Release);
+            pending
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let reservations = pending
+            .iter()
+            .map(|item| item.reservation.clone())
+            .collect::<Vec<_>>();
+        let write_lock_started = Instant::now();
+        let _write_guard = state.settings_persist_write_lock.clone().lock_owned().await;
+        record_settings_persist_sample(
+            &state.settings_persist_timings_ms,
+            "entry_intent_writer_lock_wait",
+            write_lock_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+        let path = state.settings_path.clone();
+        let write_started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || {
+            persist_durable_entry_reservation_record(&path, &reservations)
+        })
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+        .and_then(|result| result);
+        record_settings_persist_sample(
+            &state.settings_persist_timings_ms,
+            "entry_intent_write",
+            write_started.elapsed().as_secs_f64() * 1_000.0,
+        );
+        for item in pending {
+            let _ = item.completion.send(result.clone());
+        }
+    });
+}
+
+async fn persist_entry_reservation_durable(
+    state: &AutoTraderState,
+    decision_id: &str,
+    exploratory_event_key: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    let settings_guard = Arc::clone(&state.settings).lock_owned().await;
+    let Some(order) = settings_guard
+        .orders
+        .iter()
+        .find(|order| order.decision_id.as_deref() == Some(decision_id))
+        .cloned()
+    else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Durable entry reservation is missing from shared settings".to_owned(),
+        ));
+    };
+    let Some(identity) = settings_guard
+        .canonical_lifecycle_links
+        .get(decision_id)
+        .cloned()
+    else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Durable entry reservation has no canonical lifecycle identity".to_owned(),
+        ));
+    };
+    let replayable = order
+        .revalidation_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.submission_request.as_ref())
+        .is_some_and(persisted_entry_request_is_replayable);
+    if !replayable {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Durable entry reservation has no replayable Position Management request".to_owned(),
+        ));
+    }
+    let reserved_at_ms = exploratory_event_key
+        .and_then(|key| {
+            settings_guard
+                .exploratory_event_reservations
+                .get(key)
+                .copied()
+        })
+        .unwrap_or_else(current_time_ms);
+    let reservation = DurableEntryReservation {
+        schema_version: 1,
+        decision_id: decision_id.to_owned(),
+        order,
+        lifecycle_identity: identity,
+        canonical_lifecycle_epoch: settings_guard.canonical_lifecycle_epoch.clone(),
+        canonical_lifecycle_sequence: settings_guard.canonical_lifecycle_sequence,
+        exploratory_event_key: exploratory_event_key.map(str::to_owned),
+        reserved_at_ms,
+    };
+    drop(settings_guard);
+    let (completion, result) = tokio::sync::oneshot::channel();
+    state
+        .durable_entry_reservation_batch
+        .lock()
+        .await
+        .push(PendingDurableEntryReservation {
+            reservation,
+            completion,
+        });
+    schedule_durable_entry_reservation_batch(state);
+    result
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
 }
 
 fn settings_persistence_error(error: impl std::fmt::Display) -> (StatusCode, String) {
@@ -426,6 +809,60 @@ mod sqlite_state_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
+    #[test]
+    fn restored_open_price_path_keeps_samples_and_is_marked_interrupted_across_checkpoints() {
+        let path = temporary_database_path();
+        let mut settings = Settings::default();
+        let position = TraderPosition {
+            quantity: 2.0,
+            average_entry_price: 100.0,
+            trade_id: Some("trade-path-restart".into()),
+            entry_timestamp_ms: 1_000,
+            price_path: vec![TradePriceSample {
+                timestamp: 1_000,
+                bid: 99.5,
+                ask: 100.5,
+                source_updated_at_ms: Some(990),
+                freshness_contract_version: Some(1),
+                freshness_max_age_ms: Some(5_000),
+                source_fresh: Some(true),
+            }],
+            price_path_total_samples: 1,
+            price_path_truncated: false,
+            ..TraderPosition::default()
+        };
+        settings
+            .strategy_positions
+            .entry("BTC-USDT".into())
+            .or_default()
+            .insert("momentum".into(), position.clone());
+        persist_durable_settings_snapshot(&path, &settings).unwrap();
+
+        let mut restored = read_settings_database(&path).unwrap().unwrap();
+        let restored_position = &restored.strategy_positions["BTC-USDT"]["momentum"];
+        assert_eq!(restored_position.price_path, position.price_path);
+        assert_eq!(restored_position.price_path_total_samples, 1);
+        assert!(!restored_position.price_path_truncated);
+        assert!(restored_position.price_path_restart_interrupted);
+        let evidence = price_path_excursion_evidence(restored_position, 2_000);
+        assert_eq!(evidence["complete"], false);
+        assert!(evidence["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "price_path_restart_interrupted"));
+
+        persist_durable_settings_snapshot(&path, &restored).unwrap();
+        restored = read_settings_database(&path).unwrap().unwrap();
+        let restored_position = &restored.strategy_positions["BTC-USDT"]["momentum"];
+        assert_eq!(restored_position.price_path, position.price_path);
+        assert!(restored_position.price_path_restart_interrupted);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
     #[tokio::test]
     async fn durable_reservation_and_learning_event_reuse_ids_after_sqlite_restart() {
         let path = temporary_database_path();
@@ -440,6 +877,7 @@ mod sqlite_state_tests {
                 None,
                 None,
                 false,
+                None,
                 None,
             )
             .unwrap();
@@ -457,6 +895,7 @@ mod sqlite_state_tests {
             );
             first
         };
+        request_settings_persist(&state).unwrap();
         persist_settings_snapshot_durable(&state).await.unwrap();
 
         let mut restarted = read_settings_database(&path).unwrap().unwrap();
@@ -467,6 +906,7 @@ mod sqlite_state_tests {
             None,
             None,
             false,
+            None,
             None,
         )
         .unwrap();
@@ -501,10 +941,66 @@ mod sqlite_state_tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
+    #[tokio::test]
+    async fn concurrent_durable_waiters_share_the_newest_snapshot_commit() {
+        let path = temporary_database_path();
+        let mut state = benchmark_snapshot_state(Settings::default());
+        state.settings_path = path.clone();
+        {
+            let mut settings = state.settings.lock().await;
+            settings.last_decision = "reservation batch is durable".to_owned();
+            request_settings_persist(&state).unwrap();
+            request_settings_persist(&state).unwrap();
+        }
+
+        let (first, second) = tokio::join!(
+            persist_settings_snapshot_durable(&state),
+            persist_settings_snapshot_durable(&state),
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            state
+                .settings_persist_durable_revision
+                .load(Ordering::Acquire),
+            2
+        );
+        let timings = state.settings_persist_timings_ms.lock().unwrap();
+        assert_eq!(
+            timings
+                .get("durable_snapshot_write")
+                .map(Vec::len)
+                .unwrap_or_default(),
+            1,
+            "one committed snapshot should satisfy concurrent callers whose mutations it contains"
+        );
+        drop(timings);
+        let restored = read_settings_database(&path).unwrap().unwrap();
+        assert_eq!(restored.last_decision, "reservation batch is durable");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
     #[test]
     fn migrates_legacy_settings_blob_on_read() {
         let path = temporary_database_path();
-        let settings = Settings::default();
+        let mut settings = Settings::default();
+        settings.positions.insert(
+            "BTC-USDT".into(),
+            TraderPosition {
+                quantity: 1.0,
+                price_path: vec![TradePriceSample {
+                    timestamp: 1_000,
+                    bid: 99.0,
+                    ask: 101.0,
+                    ..TradePriceSample::default()
+                }],
+                price_path_total_samples: 1,
+                ..TraderPosition::default()
+            },
+        );
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(
@@ -520,9 +1016,11 @@ mod sqlite_state_tests {
         drop(connection);
 
         let loaded = read_settings_database(&path).unwrap().unwrap();
+        let mut expected = settings.clone();
+        mark_restored_price_paths_interrupted(&mut expected);
         assert_eq!(
             serde_json::to_value(loaded).unwrap(),
-            serde_json::to_value(settings).unwrap()
+            serde_json::to_value(expected).unwrap()
         );
         let connection = rusqlite::Connection::open(&path).unwrap();
         let old_table: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='auto_trader_state'", [], |row| row.get(0)).unwrap();
@@ -619,9 +1117,22 @@ fn record_settings_persist_sample(
 }
 
 fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
+    state
+        .settings_persist_revision
+        .fetch_add(1, Ordering::AcqRel);
     state.settings_persist_notify.notify_one();
     let _ = state.state_updates.send(());
     Ok(())
+}
+
+const SETTINGS_PERSIST_DURABLE_BATCH_WINDOW: Duration = Duration::from_micros(250);
+
+struct DurableSnapshotWaiter(Arc<AtomicU64>);
+
+impl Drop for DurableSnapshotWaiter {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Persist a settings snapshot under the same serialized writer lock used by
@@ -631,21 +1142,71 @@ fn request_settings_persist(state: &AutoTraderState) -> Result<(), (StatusCode, 
 async fn persist_settings_snapshot_durable(
     state: &AutoTraderState,
 ) -> Result<(), (StatusCode, String)> {
+    // Let a small cohort of concurrent reservation/fill callers join one
+    // snapshot transaction. The committed Settings snapshot carries all
+    // revisions visible under the Settings mutex, so each waiter whose
+    // mutation is included can return after the same durable commit.
+    let notified = state.settings_persist_batch_notify.notified();
+    let waiter_counter = Arc::clone(&state.settings_persist_durable_waiters);
+    let previous_waiters = waiter_counter.fetch_add(1, Ordering::AcqRel);
+    let _waiter = DurableSnapshotWaiter(waiter_counter);
+    if previous_waiters == 0 {
+        let _ = tokio::time::timeout(SETTINGS_PERSIST_DURABLE_BATCH_WINDOW, notified).await;
+    } else {
+        state.settings_persist_batch_notify.notify_one();
+    }
+    let write_lock_wait_started = Instant::now();
     let _write_guard = Arc::clone(&state.settings_persist_write_lock)
         .lock_owned()
         .await;
+    record_settings_persist_sample(
+        &state.settings_persist_timings_ms,
+        "durable_writer_lock_wait",
+        write_lock_wait_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    let snapshot_started = Instant::now();
     let settings_guard = Arc::clone(&state.settings).lock_owned().await;
+    let target_revision = state.settings_persist_revision.load(Ordering::Acquire);
+    if target_revision
+        <= state
+            .settings_persist_durable_revision
+            .load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
     let snapshot = tokio::task::spawn_blocking(move || settings_guard.clone())
         .await
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    record_settings_persist_sample(
+        &state.settings_persist_timings_ms,
+        "durable_snapshot_copy",
+        snapshot_started.elapsed().as_secs_f64() * 1_000.0,
+    );
     let path = state.settings_path.clone();
-    tokio::task::spawn_blocking(move || persist_settings_snapshot(&path, &snapshot))
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    let write_started = Instant::now();
+    let result =
+        tokio::task::spawn_blocking(move || persist_durable_settings_snapshot(&path, &snapshot))
+            .await
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    record_settings_persist_sample(
+        &state.settings_persist_timings_ms,
+        "durable_snapshot_write",
+        write_started.elapsed().as_secs_f64() * 1_000.0,
+    );
+    if result.is_ok() {
+        state
+            .settings_persist_durable_revision
+            .store(target_revision, Ordering::Release);
+    }
+    result
 }
 
-const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+// Match the 5-second executable-mark sampling cadence. This is a request to
+// the existing coalescing settings writer, not a synchronous write in the
+// protective-exit loop; exit submission remains independent of telemetry IO.
+const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const SETTINGS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_millis(250);
+const SETTINGS_NORMALIZED_PROJECTION_INTERVAL: Duration = Duration::from_secs(60);
 
 fn request_price_path_persist_if_due(state: &AutoTraderState) -> Result<(), (StatusCode, String)> {
     let now = Instant::now();
@@ -665,14 +1226,25 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
     let path = state.settings_path.clone();
     let notify = Arc::clone(&state.settings_persist_notify);
     let write_lock = Arc::clone(&state.settings_persist_write_lock);
+    let persist_revision = Arc::clone(&state.settings_persist_revision);
+    let durable_revision = Arc::clone(&state.settings_persist_durable_revision);
+    let durable_waiters = Arc::clone(&state.settings_persist_durable_waiters);
     let timings = Arc::clone(&state.settings_persist_timings_ms);
     tokio::spawn(async move {
+        let mut normalized_revision = 0_u64;
+        let mut last_normalized_projection = Instant::now();
         loop {
             notify.notified().await;
             tokio::time::sleep(SETTINGS_PERSIST_COALESCE_WINDOW).await;
             let write_guard = Arc::clone(&write_lock).lock_owned().await;
             let lock_wait_started = Instant::now();
             let settings_guard = Arc::clone(&settings).lock_owned().await;
+            let target_revision = persist_revision.load(Ordering::Acquire);
+            if target_revision <= durable_revision.load(Ordering::Acquire) {
+                drop(settings_guard);
+                drop(write_guard);
+                continue;
+            }
             record_settings_persist_sample(
                 &timings,
                 "snapshot_lock_wait",
@@ -698,18 +1270,81 @@ fn start_settings_persistence_worker(state: &AutoTraderState) {
                 "snapshot_copy",
                 copy_started.elapsed().as_secs_f64() * 1_000.0,
             );
-            let path = path.clone();
+            let snapshot_path = path.clone();
             let write_started = Instant::now();
             match tokio::task::spawn_blocking(move || {
-                persist_settings_snapshot(&path, &settings_snapshot)
+                persist_durable_settings_snapshot(&snapshot_path, &settings_snapshot)
             })
             .await
             {
-                Ok(Ok(())) => record_settings_persist_sample(
-                    &timings,
-                    "snapshot_write",
-                    write_started.elapsed().as_secs_f64() * 1_000.0,
-                ),
+                Ok(Ok(())) => {
+                    durable_revision.store(target_revision, Ordering::Release);
+                    record_settings_persist_sample(
+                        &timings,
+                        "snapshot_write",
+                        write_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                    drop(write_guard);
+                    // Normalized setting_* rows remain useful to diagnostic
+                    // queries, while recovery reads the atomic durable JSON
+                    // snapshot above. Refresh the slower projection during
+                    // idle periods so it cannot hold up new durable intents.
+                    if target_revision > normalized_revision
+                        && last_normalized_projection.elapsed()
+                            >= SETTINGS_NORMALIZED_PROJECTION_INTERVAL
+                    {
+                        if let Ok(projection_guard) = Arc::clone(&write_lock).try_lock_owned() {
+                            tokio::task::yield_now().await;
+                            if durable_waiters.load(Ordering::Acquire) == 0
+                                && persist_revision.load(Ordering::Acquire)
+                                    == durable_revision.load(Ordering::Acquire)
+                            {
+                                let settings_guard = Arc::clone(&settings).lock_owned().await;
+                                let projection = match tokio::task::spawn_blocking(move || {
+                                    settings_guard.clone()
+                                })
+                                .await
+                                {
+                                    Ok(projection) => projection,
+                                    Err(error) => {
+                                        drop(projection_guard);
+                                        crate::service_log!(
+                                            "ERROR",
+                                            "Auto Trader normalized settings projection snapshot failed: {error}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let path = path.clone();
+                                let projection_started = Instant::now();
+                                match tokio::task::spawn_blocking(move || {
+                                    persist_settings_snapshot(&path, &projection)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(())) => {
+                                        normalized_revision = target_revision;
+                                        last_normalized_projection = Instant::now();
+                                        record_settings_persist_sample(
+                                            &timings,
+                                            "normalized_projection_write",
+                                            projection_started.elapsed().as_secs_f64() * 1_000.0,
+                                        );
+                                    }
+                                    Ok(Err((_, error))) => crate::service_log!(
+                                        "ERROR",
+                                        "Auto Trader normalized settings projection failed: {error}"
+                                    ),
+                                    Err(error) => crate::service_log!(
+                                        "ERROR",
+                                        "Auto Trader normalized settings projection task failed: {error}"
+                                    ),
+                                }
+                            }
+                            drop(projection_guard);
+                        }
+                    }
+                }
                 Ok(Err((_, error))) => {
                     drop(write_guard);
                     crate::service_log!(

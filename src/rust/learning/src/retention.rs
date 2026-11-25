@@ -303,6 +303,7 @@ mod tests {
                     paired_comparison: false,
                     tested_parameter_keys: Vec::new(),
                     baseline_parameters: Default::default(),
+                    lineage: None,
                 })
                 .collect(),
         };
@@ -542,6 +543,7 @@ mod tests {
             paired_comparison: false,
             tested_parameter_keys: Vec::new(),
             baseline_parameters: Default::default(),
+            lineage: None,
         }
     }
 }

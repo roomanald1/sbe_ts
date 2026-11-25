@@ -27,15 +27,15 @@ async fn submit_position_exit_order(
     exit_decision_context: serde_json::Value,
 ) -> Result<Option<CycleResult>, (StatusCode, String)> {
     let is_long = position.quantity > 0.0;
-    let passive_profit_exit = position.exploratory
-        && matches!(reason, "take-profit" | "profit-protection");
+    let passive_profit_exit =
+        position.exploratory && matches!(reason, "take-profit" | "profit-protection");
     let entry_notional = position.quantity.abs() * position.average_entry_price;
     let entry_decision_id = position.entry_decision_id.clone();
     let lifecycle_identity = {
         let settings = state.settings.lock().await;
-        entry_decision_id.as_deref().and_then(|decision_id| {
-            settings.canonical_lifecycle_links.get(decision_id).cloned()
-        })
+        entry_decision_id
+            .as_deref()
+            .and_then(|decision_id| settings.canonical_lifecycle_links.get(decision_id).cloned())
     };
     let protected_quantity = position
         .protective_stops
@@ -48,21 +48,31 @@ async fn submit_position_exit_order(
     }
     let stops_cancelled = if passive_profit_exit {
         true
-    } else { match cancel_protective_stops(state, &symbol, Some(&strategy_key)).await {
-        Ok(cancelled) => cancelled,
-        Err(error) => {
-            let mut settings = state.settings.lock().await;
-            if let Some(order) = settings.orders.iter_mut().find(|order| order.timestamp == timestamp) {
-                order.status = "failed".into();
+    } else {
+        match cancel_protective_stops(state, &symbol, Some(&strategy_key)).await {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                let mut settings = state.settings.lock().await;
+                if let Some(order) = settings
+                    .orders
+                    .iter_mut()
+                    .find(|order| order.timestamp == timestamp)
+                {
+                    order.status = "failed".into();
+                }
+                request_settings_persist(state)?;
+                return Err(error);
             }
-            request_settings_persist(state)?;
-            return Err(error);
         }
-    }};
+    };
     if !stops_cancelled {
         // A stop is already triggering or could not be cancelled. Let its server-side execution settle.
         let mut settings = state.settings.lock().await;
-        if let Some(order) = settings.orders.iter_mut().find(|order| order.timestamp == timestamp) {
+        if let Some(order) = settings
+            .orders
+            .iter_mut()
+            .find(|order| order.timestamp == timestamp)
+        {
             order.status = "cancelled".into();
         }
         request_settings_persist(state)?;
@@ -79,7 +89,11 @@ async fn submit_position_exit_order(
         notional,
         bid,
         ask,
-        if passive_profit_exit { AutoOrderType::PostOnlyLimit } else { AutoOrderType::Ioc },
+        if passive_profit_exit {
+            AutoOrderType::PostOnlyLimit
+        } else {
+            AutoOrderType::Ioc
+        },
         ExecutionParameters::default(),
         timestamp.to_string(),
         true,
@@ -116,7 +130,11 @@ async fn submit_position_exit_order(
                     filled,
                     price,
                     fee,
-                    if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
+                    if passive_profit_exit {
+                        "PostOnlyLimit"
+                    } else {
+                        "Ioc"
+                    },
                     reason,
                     false,
                     None,
@@ -131,7 +149,11 @@ async fn submit_position_exit_order(
     let mut post_stop_cooldown_started = false;
     if filled > 0.0 {
         if let Some(price) = average_price {
-            let Settings { strategy_positions, positions, .. } = &mut *settings;
+            let Settings {
+                strategy_positions,
+                positions,
+                ..
+            } = &mut *settings;
             (strategy_realized_pnl, _) = apply_strategy_position_fill(
                 strategy_positions,
                 positions,
@@ -141,7 +163,11 @@ async fn submit_position_exit_order(
                 filled,
                 price,
                 fee,
-                if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
+                if passive_profit_exit {
+                    "PostOnlyLimit"
+                } else {
+                    "Ioc"
+                },
                 reason,
                 false,
                 None,
@@ -161,12 +187,7 @@ async fn submit_position_exit_order(
             .get(&symbol)
             .and_then(|lots| lots.get(&strategy_key))
             .is_none_or(|position| position.quantity.abs() <= 1e-12);
-        if completed_stop_position_fill(
-            reason,
-            filled,
-            quantity,
-            strategy_position_closed,
-        ) {
+        if completed_stop_position_fill(reason, filled, quantity, strategy_position_closed) {
             post_stop_cooldown_started = record_post_stop_reentry_cooldown(
                 &mut settings,
                 &symbol,
@@ -175,7 +196,12 @@ async fn submit_position_exit_order(
                 current_time_ms(),
             );
         }
-        if !position.scout_entry && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
+        if !position.scout_entry
+            && settings
+                .positions
+                .get(&symbol)
+                .is_none_or(|position| position.quantity.abs() <= 1e-12)
+        {
             mark_symbol_entry_floor_lift(
                 &mut settings,
                 &symbol,
@@ -197,6 +223,35 @@ async fn submit_position_exit_order(
             };
             let fees_usd = realized_usd(&settings, &symbol, total_fees);
             let strategy_realized_usd = realized_usd(&settings, &symbol, total_trade_pnl);
+            let replay_context = average_price.and_then(|exit_price| {
+                let trade_key = position.trade_id.as_deref()?;
+                let context = build_trade_replay_context(
+                    &symbol,
+                    position.entry_timestamp_ms,
+                    current_time_ms(),
+                    if position.quantity > 0.0 {
+                        "long"
+                    } else {
+                        "short"
+                    },
+                    position.average_entry_price,
+                    exit_price,
+                    position.quantity.abs(),
+                    position.total_entry_fees_paid.max(position.entry_fees),
+                    fee,
+                    entry_walk_forward_evidence(position.strategy_decision.as_ref()),
+                )?;
+                Some(attach_authoritative_outcome_lineage(
+                    context,
+                    &position,
+                    &response,
+                    position
+                        .lifecycle_identity
+                        .as_ref()
+                        .or(lifecycle_identity.as_ref()),
+                    trade_key,
+                ))
+            });
             record_closed_trade_outcome(
                 &mut settings,
                 total_trade_pnl / entry_notional * 100.0,
@@ -214,18 +269,7 @@ async fn submit_position_exit_order(
                 Some(total_trade_pnl / entry_notional * 100.0),
                 position.strategy_decision.as_ref(),
                 position.trade_id.as_deref(),
-                average_price.and_then(|exit_price| build_trade_replay_context(
-                    &symbol,
-                    position.entry_timestamp_ms,
-                    current_time_ms(),
-                    if position.quantity > 0.0 { "long" } else { "short" },
-                    position.average_entry_price,
-                    exit_price,
-                    position.quantity.abs(),
-                    position.total_entry_fees_paid.max(position.entry_fees),
-                    fee,
-                    entry_walk_forward_evidence(position.strategy_decision.as_ref()),
-                )),
+                replay_context,
             );
             adapt_exit_policy(&mut settings);
         }
@@ -253,7 +297,11 @@ async fn submit_position_exit_order(
         order.status = if filled + 1e-12 >= quantity {
             "filled"
         } else if filled > 0.0 {
-            if passive_profit_exit { "partially_filled" } else { "partially_filled_closed" }
+            if passive_profit_exit {
+                "partially_filled"
+            } else {
+                "partially_filled_closed"
+            }
         } else if passive_profit_exit && response["order"].is_object() {
             "resting"
         } else {
@@ -263,9 +311,16 @@ async fn submit_position_exit_order(
     }
     request_settings_persist(state)?;
     drop(settings);
+    if post_stop_cooldown_started {
+        notify_live_profile_updates(state);
+    }
     if trade_feedback_enqueued || post_stop_cooldown_started {
         if let Err(error) = persist_settings_snapshot_durable(state).await {
-            crate::service_log!("ERROR", "Could not durably persist closed-trade or post-stop state: {}", error.1);
+            crate::service_log!(
+                "ERROR",
+                "Could not durably persist closed-trade or post-stop state: {}",
+                error.1
+            );
         }
     }
     if let Some(decision_id) = entry_decision_id {
@@ -280,11 +335,24 @@ async fn submit_position_exit_order(
             &symbol,
             reason,
             side,
-            if passive_profit_exit { "PostOnlyLimit" } else { "Ioc" },
+            if passive_profit_exit {
+                "PostOnlyLimit"
+            } else {
+                "Ioc"
+            },
             &response,
             &position,
-            quantity, filled, average_price, fee, strategy_realized_pnl, entry_notional,
-            return_fraction, bid, ask, submit_response_ms, stop_loss_percent,
+            quantity,
+            filled,
+            average_price,
+            fee,
+            strategy_realized_pnl,
+            entry_notional,
+            return_fraction,
+            bid,
+            ask,
+            submit_response_ms,
+            stop_loss_percent,
             take_profit_percent,
             &exit_decision_context,
         );
@@ -296,7 +364,11 @@ async fn submit_position_exit_order(
         queue_auto_trader_audit(state, payload);
     }
     Ok(Some(CycleResult {
-        status: if passive_profit_exit && filled + 1e-12 < quantity { "order_resting" } else { "order_submitted" },
+        status: if passive_profit_exit && filled + 1e-12 < quantity {
+            "order_resting"
+        } else {
+            "order_submitted"
+        },
         reason: Some(format!(
             "Auto-trader {reason} at {:.4}%",
             return_fraction * 100.0
@@ -304,13 +376,19 @@ async fn submit_position_exit_order(
         symbol: Some(symbol),
         side: Some(side.into()),
         quantity: Some(quantity),
-        order_type: Some(if passive_profit_exit { "Post-only exit" } else { "Ioc exit" }.into()),
+        order_type: Some(
+            if passive_profit_exit {
+                "Post-only exit"
+            } else {
+                "Ioc exit"
+            }
+            .into(),
+        ),
         order_response: Some(response),
         filled_quantity: Some(filled),
         entry_diagnostic: None,
     }))
 }
-
 
 #[cfg(test)]
 mod position_exit_order_tests {
@@ -325,7 +403,13 @@ mod position_exit_order_tests {
         };
 
         let order = new_position_exit_order(
-            42, "BTC-USD", "sell", "take-profit", &position, 1.25, 50_000.0,
+            42,
+            "BTC-USD",
+            "sell",
+            "take-profit",
+            &position,
+            1.25,
+            50_000.0,
         );
 
         assert_eq!(order.timestamp, 42);
@@ -346,9 +430,8 @@ mod position_exit_order_tests {
     fn position_exit_order_uses_live_insights_fallback() {
         let position = TraderPosition::default();
 
-        let order = new_position_exit_order(
-            7, "ETH-USD", "buy", "stop-loss", &position, 2.0, 6_000.0,
-        );
+        let order =
+            new_position_exit_order(7, "ETH-USD", "buy", "stop-loss", &position, 2.0, 6_000.0);
 
         assert_eq!(order.strategy.as_deref(), Some("unattributed"));
         assert_eq!(order.decision_id, None);

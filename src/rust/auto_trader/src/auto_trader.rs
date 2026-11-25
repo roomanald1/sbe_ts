@@ -2,37 +2,37 @@
 //! These include fragments share this module so private state and helpers keep
 //! their existing visibility and behavior.
 
-use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
+use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
+pub use strategy::benchmark_strategy_evaluation;
+pub(crate) use strategy::daily::{parse_scout_combination, StrategyDiagnostic};
+#[cfg(test)]
+pub(crate) use strategy::scout_parameter_specs;
 use strategy::StrategyDecision;
 #[cfg(test)]
 pub(crate) use strategy::StrategyParameterScoutVariant;
-pub use strategy::benchmark_strategy_evaluation;
-pub(crate) use strategy::daily::{StrategyDiagnostic, parse_scout_combination};
-#[cfg(test)]
-pub(crate) use strategy::scout_parameter_specs;
+pub(crate) use strategy::{
+    confident_win_rate_edge, effective_parameter_values, legacy_strategy_parameter_name,
+    signal_strategy_parameters, strategy_parameter_key, strategy_parameter_value,
+    strategy_profile_value, validate_strategy_parameter_overrides, DatedCarryCandidate,
+    DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
+    StrategyParameterProfile, StrategyParameterValue, StrategySignal,
+};
 #[cfg(test)]
 use strategy::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
-pub(crate) use strategy::{
-    DatedCarryCandidate, DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
-    StrategyParameterProfile, StrategyParameterValue, StrategySignal, confident_win_rate_edge,
-    effective_parameter_values, legacy_strategy_parameter_name, signal_strategy_parameters,
-    strategy_parameter_key, strategy_parameter_value, strategy_profile_value,
-    validate_strategy_parameter_overrides,
-};
 use tokio::{
-    sync::{Mutex, Notify, broadcast},
+    sync::{broadcast, Mutex, Notify},
     task::JoinSet,
-    time::{Duration, interval},
+    time::{interval, Duration},
 };
 
 include!("auto_trader/constants.rs");
@@ -129,6 +129,12 @@ mod strategy_cleanup_integration_tests {
             activity_snapshot: Arc::new(Mutex::new(None)),
             settings_persist_notify: Arc::new(Notify::new()),
             settings_persist_write_lock: Arc::new(Mutex::new(())),
+            settings_persist_revision: Arc::new(AtomicU64::new(0)),
+            settings_persist_durable_revision: Arc::new(AtomicU64::new(0)),
+            settings_persist_durable_waiters: Arc::new(AtomicU64::new(0)),
+            settings_persist_batch_notify: Arc::new(Notify::new()),
+            durable_entry_reservation_batch: Arc::new(Mutex::new(Vec::new())),
+            durable_entry_reservation_batch_scheduled: Arc::new(AtomicBool::new(false)),
             durable_feedback_event_ids: Arc::new(Mutex::new(BTreeSet::new())),
             price_path_last_checkpoint_requested_at: Arc::new(std::sync::Mutex::new(None)),
             state_updates,
@@ -257,20 +263,16 @@ mod strategy_cleanup_integration_tests {
         .apply_learning_snapshot(snapshot)
         .await;
         let Json(daily_scan) = get_daily_strategy_parameters(State(state.clone())).await;
-        assert!(
-            daily_scan
-                .strategy_profiles
-                .iter()
-                .all(|profile| profile.strategy != strategy.as_str())
-        );
-        assert!(
-            state
-                .settings
-                .lock()
-                .await
-                .learned_walk_forward_evidence
-                .contains_key(&exact_regime_key)
-        );
+        assert!(daily_scan
+            .strategy_profiles
+            .iter()
+            .all(|profile| profile.strategy != strategy.as_str()));
+        assert!(state
+            .settings
+            .lock()
+            .await
+            .learned_walk_forward_evidence
+            .contains_key(&exact_regime_key));
         let Json(response) = get_decision_parameters(State(state.clone())).await;
         let profile = response
             .strategy_profiles
@@ -494,18 +496,14 @@ mod strategy_cleanup_integration_tests {
             .expect("AutoTrader publishes a set for each live worker");
         assert!(profile_set.enabled);
         assert_eq!(profile_set.profiles.len(), 2);
-        assert!(
-            profile_set
-                .profiles
-                .iter()
-                .any(|configured| configured.profile_id == profile.profile_id)
-        );
-        assert!(
-            profile_set
-                .profiles
-                .iter()
-                .any(|configured| configured.profile_id == second_profile.profile_id)
-        );
+        assert!(profile_set
+            .profiles
+            .iter()
+            .any(|configured| configured.profile_id == profile.profile_id));
+        assert!(profile_set
+            .profiles
+            .iter()
+            .any(|configured| configured.profile_id == second_profile.profile_id));
 
         let timestamp = current_time_ms();
         let mut signal = strategy::StrategyMarketSignal::default();

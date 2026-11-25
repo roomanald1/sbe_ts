@@ -20,8 +20,15 @@ fn external_close_audit_payload(
         "effective_stop_loss_percent": position.stop_loss_percent,
         "effective_take_profit_percent": position.take_profit_percent.or(position.horizon_take_profit_percent),
         "price_path": position.price_path.iter().map(|sample| serde_json::json!({
-            "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask
+            "timestamp": sample.timestamp,
+            "bid": sample.bid,
+            "ask": sample.ask,
+            "source_updated_at_ms": sample.source_updated_at_ms,
+            "freshness_contract_version": sample.freshness_contract_version,
+            "freshness_max_age_ms": sample.freshness_max_age_ms,
+            "source_fresh": sample.source_fresh,
         })).collect::<Vec<_>>(),
+        "price_path_evidence": price_path_excursion_evidence(position, current_time_ms()),
         "entry_quantity": prior_quantity.abs(),
         "close_quantity": closed_quantity,
         "entry_position_side": if prior_quantity > 0.0 { "long" } else { "short" },
@@ -34,6 +41,10 @@ fn external_close_audit_payload(
             "total_fees_paid": position.total_fees_paid,
             "timestamp_ms": position.entry_timestamp_ms,
             "quantity": prior_quantity.abs(),
+            "entry_fill_ids": position.entry_fill_ids,
+            "entry_fee_currencies": position.entry_fee_currencies,
+            "entry_fill_costs_complete": position.entry_fill_costs_complete,
+            "lifecycle_identity": position.lifecycle_identity,
         },
     })
 }
@@ -64,9 +75,14 @@ fn external_close_fills(
     through_ms: u64,
     known_exit_ids: &KnownExitIds<'_>,
 ) -> Vec<serde_json::Value> {
-    let mut candidates = trades.iter()
+    let mut candidates = trades
+        .iter()
         .filter(|trade| trade["side"].as_str() == Some(close_side))
-        .filter(|trade| trade["timestamp"].as_u64().is_some_and(|timestamp| timestamp <= through_ms))
+        .filter(|trade| {
+            trade["timestamp"]
+                .as_u64()
+                .is_some_and(|timestamp| timestamp <= through_ms)
+        })
         .filter_map(|trade| {
             let quantity = trade["quantity"].as_f64()?;
             let price = trade["execution_price"].as_f64()?;
@@ -74,19 +90,36 @@ fn external_close_fills(
                 return None;
             }
             let parent_order_id = trade["parent_order_id"].as_str().map(str::to_owned);
-            if parent_order_id.as_ref().is_some_and(|id| known_exit_ids.contains(id)) {
+            if parent_order_id
+                .as_ref()
+                .is_some_and(|id| known_exit_ids.contains(id))
+            {
                 return None;
             }
-            Some((trade["timestamp"].as_u64().unwrap_or_default(), quantity, price,
+            Some((
+                trade["timestamp"].as_u64().unwrap_or_default(),
+                quantity,
+                price,
                 trade["fee"].as_f64().unwrap_or_default().abs(),
-                parent_order_id.map(serde_json::Value::String).unwrap_or(serde_json::Value::Null)))
-        }).collect::<Vec<_>>();
+                parent_order_id
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+                trade["fill_id"].clone(),
+                trade["fee_currency"].clone(),
+                trade["fee_known"].clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
     candidates.sort_by_key(|fill| fill.0);
 
     let mut remaining = target_quantity.max(0.0);
     let mut selected = Vec::new();
-    for (timestamp, quantity, price, fee, parent_order_id) in candidates.into_iter().rev() {
-        if remaining <= 1e-12 { break; }
+    for (timestamp, quantity, price, fee, parent_order_id, fill_id, fee_currency, fee_known) in
+        candidates.into_iter().rev()
+    {
+        if remaining <= 1e-12 {
+            break;
+        }
         let allocated = quantity.min(remaining);
         selected.push(serde_json::json!({
             "timestamp": timestamp,
@@ -94,10 +127,15 @@ fn external_close_fills(
             "price": price,
             "fee": fee * allocated / quantity,
             "parent_order_id": parent_order_id,
+            "fill_id": fill_id,
+            "fee_currency": fee_currency,
+            "fee_known": fee_known,
         }));
         remaining -= allocated;
     }
-    if remaining > 1e-8 { return Vec::new(); }
+    if remaining > 1e-8 {
+        return Vec::new();
+    }
     selected.reverse();
     selected
 }
@@ -111,8 +149,16 @@ fn external_strategy_close_audits(
     observed_at: u64,
     known_exit_ids: &KnownExitIds<'_>,
 ) -> Vec<serde_json::Value> {
-    let close_fills = external_close_fills(target_quantity, close_side, trades, observed_at, known_exit_ids);
-    if close_fills.is_empty() { return Vec::new(); }
+    let close_fills = external_close_fills(
+        target_quantity,
+        close_side,
+        trades,
+        observed_at,
+        known_exit_ids,
+    );
+    if close_fills.is_empty() {
+        return Vec::new();
+    }
 
     let mut lots = strategy_lots.to_vec();
     lots.sort_by_key(|(_, lot)| lot.entry_timestamp_ms);
@@ -123,12 +169,16 @@ fn external_strategy_close_audits(
     let position_sign = if close_side == "sell" { 1.0 } else { -1.0 };
 
     for fill in &close_fills {
-        let Some(mut fill_remaining) = fill["quantity"].as_f64() else { continue; };
+        let Some(mut fill_remaining) = fill["quantity"].as_f64() else {
+            continue;
+        };
         let fill_quantity = fill_remaining;
         let price = fill["price"].as_f64().unwrap_or_default();
         let total_fee = fill["fee"].as_f64().unwrap_or_default().abs();
         for index in 0..lots.len() {
-            if fill_remaining <= 1e-12 { break; }
+            if fill_remaining <= 1e-12 {
+                break;
+            }
             let (strategy, position) = &mut lots[index];
             if position.quantity.abs() <= 1e-12 || position.quantity.signum() != position_sign {
                 continue;
@@ -158,6 +208,9 @@ fn external_strategy_close_audits(
                 "price": price,
                 "fee": fee,
                 "parent_order_id": fill["parent_order_id"],
+                "fill_id": fill["fill_id"],
+                "fee_currency": fill["fee_currency"],
+                "fee_known": fill["fee_known"],
             }));
             fill_remaining -= allocated;
         }
@@ -223,6 +276,10 @@ fn external_strategy_close_audits(
                 "total_fees_paid": position.total_fees_paid + exit_fees,
                 "timestamp_ms": position.entry_timestamp_ms,
                 "quantity": entry_quantity,
+                "entry_fill_ids": position.entry_fill_ids,
+                "entry_fee_currencies": position.entry_fee_currencies,
+                "entry_fill_costs_complete": position.entry_fill_costs_complete,
+                "lifecycle_identity": position.lifecycle_identity,
             },
             "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
             "pnl_attribution_method": "fifo_strategy_position_lots",
@@ -238,7 +295,11 @@ fn external_close_order(payload: &serde_json::Value) -> Option<TraderOrder> {
     let decision_id = payload["decision_id"].as_str().map(str::to_owned);
     let execution_order_id = payload["exit_fills"]
         .as_array()
-        .and_then(|fills| fills.iter().find_map(|fill| fill["parent_order_id"].as_str()))
+        .and_then(|fills| {
+            fills
+                .iter()
+                .find_map(|fill| fill["parent_order_id"].as_str())
+        })
         .map(str::to_owned);
     let timestamp = payload["timestamp"].as_u64()?;
     Some(TraderOrder {
@@ -300,7 +361,12 @@ mod external_close_audit_tests {
             stop_loss_percent: Some(4.0),
             take_profit_percent: None,
             horizon_take_profit_percent: Some(8.0),
-            price_path: vec![TradePriceSample { timestamp: 1_500, bid: 10.0, ask: 11.0 }],
+            price_path: vec![TradePriceSample {
+                timestamp: 1_500,
+                bid: 10.0,
+                ask: 11.0,
+                ..TradePriceSample::default()
+            }],
             ..TraderPosition::default()
         };
         let payload = external_close_audit_payload("ETH-USDT", -3.0, 1.25, 12.0, &position);
@@ -359,9 +425,21 @@ mod external_close_audit_tests {
 
         let mut positions = BTreeMap::new();
         positions.insert("test-strategy".to_owned(), lot.clone());
-        let (pnl, _) = apply_auto_fill(&mut positions, "test-strategy", "sell", 0.5, 110.0, 0.0,
-            "ExternalLedgerClose", "external-or-manual-close", false, None);
-        lot = positions.remove("test-strategy").expect("remaining strategy lot");
+        let (pnl, _) = apply_auto_fill(
+            &mut positions,
+            "test-strategy",
+            "sell",
+            0.5,
+            110.0,
+            0.0,
+            "ExternalLedgerClose",
+            "external-or-manual-close",
+            false,
+            None,
+        );
+        lot = positions
+            .remove("test-strategy")
+            .expect("remaining strategy lot");
         assert_eq!(pnl, order.realized_pnl);
         assert!((lot.quantity - 1.5).abs() < 1e-12);
     }
@@ -384,7 +462,8 @@ mod external_close_audit_tests {
             "exit_filled_quantity": 0.5,
             "exit_average_price": 110.0,
             "realized_pnl": 5.0,
-        })).expect("legacy manual close order");
+        }))
+        .expect("legacy manual close order");
         assert_eq!(order.strategy.as_deref(), Some("manual"));
         assert_eq!(order.decision_id, None);
         assert_eq!(order.strategy_realized_pnl, Some(5.0));

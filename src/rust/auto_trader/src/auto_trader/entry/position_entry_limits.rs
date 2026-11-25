@@ -12,6 +12,43 @@ fn post_stop_reentry_key(symbol: &str, strategy: &str) -> String {
     format!("{symbol}|{strategy}")
 }
 
+fn strategy_episode_reset_key(symbol: &str, strategy: &str, profile_id: &str) -> String {
+    format!("{symbol}|{strategy}|{profile_id}")
+}
+
+fn advance_strategy_episode_reset_generation(
+    settings: &mut Settings,
+    symbol: &str,
+    strategy: &str,
+    profile_id: &str,
+    stopped_episode_id: &str,
+) -> Option<u64> {
+    if symbol.trim().is_empty()
+        || strategy.trim().is_empty()
+        || profile_id.trim().is_empty()
+        || stopped_episode_id.trim().is_empty()
+    {
+        return None;
+    }
+    let key = strategy_episode_reset_key(symbol, strategy, profile_id);
+    let reset = settings
+        .strategy_episode_reset_generations
+        .entry(key)
+        .or_insert_with(|| StrategyEpisodeResetState {
+            symbol: symbol.to_owned(),
+            strategy: strategy.to_owned(),
+            profile_id: profile_id.to_owned(),
+            generation: 0,
+            last_reset_episode_id: None,
+        });
+    if reset.last_reset_episode_id.as_deref() == Some(stopped_episode_id) {
+        return Some(reset.generation);
+    }
+    reset.generation = reset.generation.checked_add(1)?;
+    reset.last_reset_episode_id = Some(stopped_episode_id.to_owned());
+    Some(reset.generation)
+}
+
 fn signal_timestamp_ms(signal: &Signal) -> u64 {
     if signal.timestamp < 1_000_000_000_000 {
         signal.timestamp.saturating_mul(1_000)
@@ -88,6 +125,23 @@ fn record_post_stop_reentry_cooldown(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
+    let episode_reset_generation = if event_identity_version == strategy::LIVE_STRATEGY_EVENT_ID_VERSION {
+        if let (Some(profile_id), Some(episode_id)) =
+            (profile_id.as_deref(), stopped_episode_id.as_deref())
+        {
+            advance_strategy_episode_reset_generation(
+                settings,
+                symbol,
+                strategy_name,
+                profile_id,
+                episode_id,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let key = post_stop_reentry_key(symbol, strategy_name);
     settings.post_stop_reentry_cooldowns.insert(
         key,
@@ -98,6 +152,9 @@ fn record_post_stop_reentry_cooldown(
             event_identity_version,
             stopped_event_id,
             stopped_episode_id,
+            episode_reset_generation,
+            episode_reset_required: event_identity_version
+                == strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
         },
     );
     while settings.post_stop_reentry_cooldowns.len() > MAX_POST_STOP_REENTRY_COOLDOWNS {
@@ -144,13 +201,33 @@ fn post_stop_reentry_block_reason(
         .and_then(|value| value.get("live_worker_episode_id"))
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty());
+    let observed_reset_generation = decision
+        .and_then(|value| value.get("live_worker_episode_reset_generation"))
+        .and_then(serde_json::Value::as_u64);
+    let episode_reset_applied = if cooldown.episode_reset_required {
+        cooldown.episode_reset_generation.is_some_and(|expected| {
+            observed_reset_generation == Some(expected)
+                && episode_id.is_some_and(|episode_id| {
+                    cooldown.stopped_episode_id.as_deref() != Some(episode_id)
+                })
+        })
+    } else {
+        true
+    };
+    if !episode_reset_applied {
+        return Some(format!(
+            "Post-stop thesis reset is not yet acknowledged by the strategy worker for {} / {} / {}",
+            signal.symbol,
+            strategy_name,
+            cooldown.profile_id.as_deref().unwrap_or("unknown profile")
+        ));
+    }
     let fresh_event = identity_version == Some(strategy::LIVE_STRATEGY_EVENT_ID_VERSION)
         && (cooldown.event_identity_version == 0
             || identity_version == Some(cooldown.event_identity_version))
         && signal_timestamp_ms(signal) > cooldown.stopped_at_ms
         && event_id.is_some_and(|event_id| cooldown.stopped_event_id.as_deref() != Some(event_id))
-        && episode_id
-            .is_some_and(|episode_id| cooldown.stopped_episode_id.as_deref() != Some(episode_id));
+        && episode_id.is_some_and(|episode_id| !episode_id.trim().is_empty());
     (!fresh_event).then(|| {
         format!(
             "Post-stop cooldown elapsed; a fresh versioned worker event is required for {} / {} / {}",
@@ -283,6 +360,8 @@ mod post_stop_reentry_cooldown_tests {
                 event_identity_version: strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
                 stopped_event_id: Some("stop-event".into()),
                 stopped_episode_id: Some("stop-episode".into()),
+                episode_reset_generation: None,
+                episode_reset_required: false,
             },
         );
     }
@@ -292,6 +371,11 @@ mod post_stop_reentry_cooldown_tests {
         decision["live_worker_event_id"] = serde_json::json!(event_id);
         decision["live_worker_episode_id"] = serde_json::json!(episode_id);
         decision["live_worker_event_identity_version"] = serde_json::json!(version);
+    }
+
+    fn set_episode_reset_generation(signal: &mut Signal, generation: u64) {
+        let decision = signal.strategy_decision.get_or_insert_with(|| serde_json::json!({}));
+        decision["live_worker_episode_reset_generation"] = serde_json::json!(generation);
     }
 
     #[test]
@@ -317,7 +401,7 @@ mod post_stop_reentry_cooldown_tests {
     }
 
     #[test]
-    fn post_stop_cooldown_requires_timer_expiry_and_a_new_versioned_event_and_episode() {
+    fn legacy_cooldown_without_reset_token_allows_fresh_event_in_same_episode_after_expiry() {
         let mut settings = Settings::default();
         insert_cooldown(&mut settings);
         let mut signal = cooldown_signal();
@@ -336,23 +420,106 @@ mod post_stop_reentry_cooldown_tests {
             "stop-episode",
             strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
         );
-        assert!(post_stop_reentry_block_reason(&settings, &signal, 1_000_000_002_000).is_some());
-        set_signal_identity(
-            &mut signal,
-            "stop-event",
-            "fresh-episode",
-            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
-        );
-        assert!(post_stop_reentry_block_reason(&settings, &signal, 1_000_000_002_000).is_some());
-        set_signal_identity(
-            &mut signal,
-            "fresh-event",
-            "fresh-episode",
-            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
-        );
         assert_eq!(post_stop_reentry_block_reason(&settings, &signal, 1_000_000_002_000), None);
         consume_post_stop_reentry_cooldown(&mut settings, &signal, 1_000_000_002_000);
         assert!(settings.post_stop_reentry_cooldowns.is_empty());
+    }
+
+    #[test]
+    fn completed_stop_persists_reset_generation_once_and_changes_it_for_next_episode() {
+        let mut settings = Settings::default();
+        let stopped_position = |event_id: &str, episode_id: &str| TraderPosition {
+            entry_decision_id: Some(format!("decision-{event_id}")),
+            strategy_decision: Some(serde_json::json!({
+                "learning_profile_id": "profile-a",
+                "strategy_parameters": { "post_stop_cooldown_minutes": 2.0 },
+                "live_worker_event_identity_version": strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+                "live_worker_event_id": event_id,
+                "live_worker_episode_id": episode_id,
+            })),
+            ..TraderPosition::default()
+        };
+        assert!(!completed_stop_position_fill("stop-loss", 0.5, 1.0, false));
+        assert!(settings.strategy_episode_reset_generations.is_empty());
+
+        let first = stopped_position("stop-event-1", "episode-1");
+        assert!(record_post_stop_reentry_cooldown(
+            &mut settings,
+            "BTC-USDT",
+            "live-momentum",
+            &first,
+            1_000_000_000_000,
+        ));
+        let key = strategy_episode_reset_key("BTC-USDT", "live-momentum", "profile-a");
+        assert_eq!(settings.strategy_episode_reset_generations[&key].generation, 1);
+        assert_eq!(
+            settings.post_stop_reentry_cooldowns[&post_stop_reentry_key(
+                "BTC-USDT",
+                "live-momentum"
+            )]
+                .episode_reset_generation,
+            Some(1)
+        );
+
+        // Duplicate closure reporting for the same stopped episode is
+        // idempotent and cannot manufacture another new thesis.
+        record_post_stop_reentry_cooldown(
+            &mut settings,
+            "BTC-USDT",
+            "live-momentum",
+            &first,
+            1_000_000_000_001,
+        );
+        assert_eq!(settings.strategy_episode_reset_generations[&key].generation, 1);
+
+        let second = stopped_position("stop-event-2", "episode-2");
+        record_post_stop_reentry_cooldown(
+            &mut settings,
+            "BTC-USDT",
+            "live-momentum",
+            &second,
+            1_000_000_000_002,
+        );
+        assert_eq!(settings.strategy_episode_reset_generations[&key].generation, 2);
+
+        let recovered: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(recovered.strategy_episode_reset_generations[&key].generation, 2);
+    }
+
+    #[test]
+    fn post_stop_reentry_waits_for_worker_to_acknowledge_reset_and_fresh_event() {
+        let mut settings = Settings::default();
+        insert_cooldown(&mut settings);
+        settings
+            .post_stop_reentry_cooldowns
+            .get_mut(&post_stop_reentry_key("BTC-USDT", "live-momentum"))
+            .unwrap()
+            .episode_reset_generation = Some(1);
+        settings
+            .post_stop_reentry_cooldowns
+            .get_mut(&post_stop_reentry_key("BTC-USDT", "live-momentum"))
+            .unwrap()
+            .episode_reset_required = true;
+        let mut signal = cooldown_signal();
+        signal.timestamp = 1_000_000_003_000;
+        set_signal_identity(
+            &mut signal,
+            "fresh-event-before-reset-push",
+            "stop-episode",
+            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+        );
+        set_episode_reset_generation(&mut signal, 0);
+        assert!(post_stop_reentry_block_reason(&settings, &signal, 1_000_000_003_000)
+            .is_some_and(|reason| reason.contains("reset is not yet acknowledged")));
+
+        set_signal_identity(
+            &mut signal,
+            "fresh-event-after-reset-push",
+            "reset-episode",
+            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+        );
+        set_episode_reset_generation(&mut signal, 1);
+        assert_eq!(post_stop_reentry_block_reason(&settings, &signal, 1_000_000_003_000), None);
     }
 
     #[test]

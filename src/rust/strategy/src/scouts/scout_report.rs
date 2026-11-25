@@ -157,6 +157,12 @@ fn scout_horizon_markouts(audit: &Value, direction: &str) -> Value {
             let fee_rate = number(exit, "taker_fee_rate")?;
             Some(gross - 2.0 * fee_rate * 100.0)
         });
+        let path_evidence = observation.get("scout_path_evidence").cloned().unwrap_or_else(|| json!({"schema_version":1,"status":"unknown","reason":"legacy_markout_missing_path_evidence","maximum_favorable_excursion_percent":null,"maximum_adverse_excursion_percent":null}));
+        let executable_path_complete = path_evidence["schema_version"] == 1
+            && path_evidence["status"] == "complete"
+            && path_evidence["complete"] == true;
+        let executable_mfe = executable_path_complete.then(|| number(&path_evidence, "maximum_favorable_excursion_percent")).flatten();
+        let executable_mae = executable_path_complete.then(|| number(&path_evidence, "maximum_adverse_excursion_percent")).flatten();
         markouts.insert(
             horizon.to_string(),
             json!({
@@ -166,6 +172,10 @@ fn scout_horizon_markouts(audit: &Value, direction: &str) -> Value {
                 "executionCostPercent": gross.map(|gross| gross - net),
                 "bestFavorablePercent": favorable.filter(|value| value.is_finite()),
                 "worstAdversePercent": adverse.filter(|value| value.is_finite()),
+                "scoutPathEvidence": path_evidence,
+                "executablePathComparisonEligible": executable_path_complete,
+                "executableMaximumFavorableExcursionPercent": executable_mfe,
+                "executableMaximumAdverseExcursionPercent": executable_mae,
                 "timeToPositiveNetSeconds": time_to_positive,
                 "postExitNetReturnPercent": post_exit_net.filter(|value| value.is_finite()),
                 "observedAt": observation["evaluated_timestamp_ms"],
@@ -847,6 +857,10 @@ fn scout_replay_cost_breakdown(
         ),
         _ => return None,
     };
+    let scout_path_evidence = observation.get("scout_path_evidence").cloned().unwrap_or_else(|| json!({"schema_version":1,"status":"unknown","reason":"legacy_markout_missing_path_evidence","maximum_favorable_excursion_percent":null,"maximum_adverse_excursion_percent":null}));
+    let executable_path_complete = scout_path_evidence["schema_version"] == 1
+        && scout_path_evidence["status"] == "complete"
+        && scout_path_evidence["complete"] == true;
     Some(json!({
         "coverageStatus": "partial",
         "includesAllExecutionCosts": false,
@@ -862,6 +876,10 @@ fn scout_replay_cost_breakdown(
         "entryAsk": observation["entry_ask"],
         "exitBid": observation["exit_bid"],
         "exitAsk": observation["exit_ask"],
+        "scoutPathEvidence": scout_path_evidence,
+        "executablePathComparisonEligible": executable_path_complete,
+        "executableMaximumFavorableExcursionPercent": if executable_path_complete { scout_path_evidence["maximum_favorable_excursion_percent"].as_f64() } else { None },
+        "executableMaximumAdverseExcursionPercent": if executable_path_complete { scout_path_evidence["maximum_adverse_excursion_percent"].as_f64() } else { None },
     }))
 }
 
@@ -1162,7 +1180,9 @@ mod scout_report_tests {
             "exit_ask": 100.2,
             "long_time_to_positive_net_seconds": 25,
             "short_time_to_positive_net_seconds": null,
-            "taker_fee_rate": 0.001
+            "taker_fee_rate": 0.001,
+            "scout_path_evidence":{"schema_version":1,"status":"complete","complete":true,
+                "maximum_favorable_excursion_percent":0.45,"maximum_adverse_excursion_percent":-0.22}
         },{
             "kind": "strategy_exit",
             "evaluated_timestamp_ms": 30_000,
@@ -1176,6 +1196,9 @@ mod scout_report_tests {
         assert!((markout["bestFavorablePercent"].as_f64().unwrap() - 2.0).abs() < 1e-9);
         assert!((markout["worstAdversePercent"].as_f64().unwrap() + 1.0).abs() < 1e-9);
         assert_eq!(markout["timeToPositiveNetSeconds"], 25);
+        assert_eq!(markout["executablePathComparisonEligible"], true);
+        assert_eq!(markout["executableMaximumFavorableExcursionPercent"], 0.45);
+        assert_eq!(markout["executableMaximumAdverseExcursionPercent"], -0.22);
         assert!(
             (markout["postExitNetReturnPercent"].as_f64().unwrap() + 0.3996007984).abs() < 1e-8
         );
@@ -1186,6 +1209,31 @@ mod scout_report_tests {
         assert_eq!(short_markout["netReturnPercent"], -0.15);
         assert!((short_markout["bestFavorablePercent"].as_f64().unwrap() - 1.0).abs() < 1e-9);
         assert!((short_markout["worstAdversePercent"].as_f64().unwrap() + 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn incomplete_and_legacy_path_excursions_are_not_wp15_comparable() {
+        for path_evidence in [
+            json!({"schema_version":1,"status":"incomplete","complete":false,
+                "maximum_favorable_excursion_percent":1.2,"maximum_adverse_excursion_percent":-0.8}),
+            serde_json::Value::Null,
+        ] {
+            let mut audit = audit();
+            let mut observation = json!({"kind":"horizon","horizon_seconds":60,
+                "evaluated_timestamp_ms":61_000,"long_net_percent":0.1,"short_net_percent":-0.1});
+            let legacy_unknown = path_evidence.is_null();
+            if !legacy_unknown {
+                observation["scout_path_evidence"] = path_evidence;
+            }
+            audit["scout_markout_observations"] = json!([observation]);
+            let markout = instance_row(&audit, 70_000).unwrap()["horizonMarkouts"]["60"].clone();
+            assert_eq!(markout["executablePathComparisonEligible"], false);
+            assert_eq!(markout["executableMaximumFavorableExcursionPercent"], Value::Null);
+            assert_eq!(markout["executableMaximumAdverseExcursionPercent"], Value::Null);
+            if legacy_unknown {
+                assert_eq!(markout["scoutPathEvidence"]["status"], "unknown");
+            }
+        }
     }
 
     #[test]

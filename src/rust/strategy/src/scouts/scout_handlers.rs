@@ -80,6 +80,7 @@ fn scout_markout_observation(
         _ => return None,
     };
     direction_net_return?;
+    let scout_path_evidence = persisted_scout_path_evidence(markout.scout_path_evidence.as_ref());
     Some(serde_json::json!({
         "kind": if markout.observation_only { "horizon" } else { "strategy_exit" },
         "horizon_seconds": markout.horizon_seconds,
@@ -99,7 +100,25 @@ fn scout_markout_observation(
         "path_low": markout.path_low,
         "long_time_to_positive_net_seconds": markout.long_time_to_positive_net_seconds,
         "short_time_to_positive_net_seconds": markout.short_time_to_positive_net_seconds,
+        "scout_path_evidence": scout_path_evidence,
     }))
+}
+
+fn persisted_scout_path_evidence(value: Option<&serde_json::Value>) -> serde_json::Value {
+    let Some(value) = value else {
+        return serde_json::json!({"schema_version":1,"status":"unknown","reason":"legacy_markout_missing_path_evidence","maximum_favorable_excursion_percent":null,"maximum_adverse_excursion_percent":null});
+    };
+    let status = value.get("status").and_then(serde_json::Value::as_str);
+    let complete = value.get("complete").and_then(serde_json::Value::as_bool);
+    let valid_v1 = value.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1)
+        && matches!((status, complete), (Some("complete"), Some(true)) | (Some("incomplete"), Some(false)))
+        || value.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1)
+            && status == Some("unavailable");
+    if valid_v1 {
+        value.clone()
+    } else {
+        serde_json::json!({"schema_version":1,"status":"unknown","reason":"unsupported_or_malformed_path_evidence","source_value":value,"maximum_favorable_excursion_percent":null,"maximum_adverse_excursion_percent":null})
+    }
 }
 
 async fn record_scout_markout_observation(
@@ -3824,7 +3843,7 @@ mod scout_markout_instance_tests {
         record_scout_markout_observation(
             &service,
             "decision-restart",
-            serde_json::json!({"kind":"horizon","horizon_seconds":60}),
+            serde_json::json!({"kind":"horizon","horizon_seconds":60,"scout_path_evidence":{"schema_version":1,"status":"complete","complete":true,"maximum_favorable_excursion_percent":0.4,"maximum_adverse_excursion_percent":-0.2,"observation_only":true}}),
         )
         .await
         .unwrap();
@@ -3832,6 +3851,8 @@ mod scout_markout_instance_tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated["scout_markout_observations"][0]["kind"], "horizon");
+        assert_eq!(updated["scout_markout_observations"][0]["scout_path_evidence"]["schema_version"], 1);
+        assert_eq!(updated["scout_markout_observations"][0]["scout_path_evidence"]["maximum_favorable_excursion_percent"], 0.4);
         let _ = std::fs::remove_file(path);
     }
 
@@ -3964,6 +3985,29 @@ mod scout_markout_instance_tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn versioned_path_markout_preserves_coverage_and_legacy_unknown() {
+        let request: ScoutMarkoutRequest = serde_json::from_value(serde_json::json!({
+            "decision_id":"path-v1","symbol":"BTC-USDT","signal_timestamp_ms":1_000,
+            "evaluated_timestamp_ms":61_000,"taker_fee_rate":0.001,"observation_only":true,
+            "horizon_seconds":60,"long_net_percent":0.2,"short_net_percent":-0.3,
+            "scout_path_evidence":{"schema_version":1,"status":"incomplete","complete":false,
+                "source":"per_symbol_book_event","observation_only":true,"direction":"bullish",
+                "executable_side":"sell_bid_for_long","sample_count":4,"maximum_gap_ms":8_000,
+                "source_timestamps_monotonic":true,"maximum_favorable_excursion_percent":0.4,
+                "maximum_adverse_excursion_percent":-0.2,"completeness_reason":"maximum_gap_exceeded"}
+        })).unwrap();
+        let stored = persisted_scout_path_evidence(request.scout_path_evidence.as_ref());
+        assert_eq!(stored["status"], "incomplete");
+        assert_eq!(stored["maximum_gap_ms"], 8_000);
+        let instance = serde_json::json!({"decision_id":"path-v1","symbol":"BTC-USDT","direction":"bullish","signal_timestamp":1_000});
+        let observation = scout_markout_observation(&instance, &request).unwrap();
+        assert_eq!(observation["scout_path_evidence"]["maximum_gap_ms"], 8_000);
+        let unknown = persisted_scout_path_evidence(None);
+        assert_eq!(unknown["status"], "unknown");
+        assert_eq!(unknown["maximum_favorable_excursion_percent"], serde_json::Value::Null);
     }
 
     #[test]

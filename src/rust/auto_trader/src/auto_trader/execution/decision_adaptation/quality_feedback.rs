@@ -118,9 +118,25 @@ fn score_execution_order_type(
     book: Option<DeepBookAssessment>,
     schedule_depth_threshold: f64,
 ) -> AutoOrderType {
-    let side_depth = book.map(|assessment| {
-        if signal.direction == "bullish" { assessment.ask_depth_10bps } else { assessment.bid_depth_10bps }
-    }).unwrap_or(0.0);
+    // The heuristic compares order types using book impact. Missing, negative,
+    // or non-finite impact is not evidence of zero cost; keep the configured
+    // baseline until a usable assessment is available. Downstream affordability
+    // and risk checks remain responsible for rejecting unsafe orders.
+    let Some(assessment) = book else {
+        return baseline;
+    };
+    let side_depth = if signal.direction == "bullish" {
+        assessment.ask_depth_10bps
+    } else {
+        assessment.bid_depth_10bps
+    };
+    if !assessment.impact_bps.is_finite()
+        || assessment.impact_bps < 0.0
+        || !side_depth.is_finite()
+        || side_depth < 0.0
+    {
+        return baseline;
+    }
     let depth_ratio = if side_depth > 0.0 { notional / side_depth } else { 0.0 };
     // Large parent orders use the scheduler to work child slices against volume.
     let large_order = depth_ratio >= schedule_depth_threshold;
@@ -141,7 +157,7 @@ fn score_execution_order_type(
     let ranging = signal.ranging_probability.unwrap_or(0.0).clamp(0.0, 1.0);
     let trend = (signal.components.trend_5m_volatility_units.unwrap_or(0.0).abs() / 3.0).clamp(0.0, 1.0);
     let fee_bps = configured_taker_fee_rate() * 10_000.0;
-    let impact_bps = book.map(|assessment| assessment.impact_bps).filter(|value| value.is_finite()).unwrap_or(0.0);
+    let impact_bps = assessment.impact_bps;
     let scaled_impact_bps = if side_depth > 0.0 {
         impact_bps * (notional / (side_depth * DEEP_BOOK_MAX_PARTICIPATION).max(1.0)).clamp(0.25, 4.0)
     } else { impact_bps };

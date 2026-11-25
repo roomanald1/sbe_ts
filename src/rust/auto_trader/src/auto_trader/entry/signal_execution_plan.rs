@@ -296,6 +296,67 @@ fn allow_bounded_strategy_exploration(signal: &Signal, strategy: Strategy) -> Re
     Ok(())
 }
 
+fn strategy_entry_walk_forward_gate(
+    settings: &Settings,
+    signal: &Signal,
+    strategy: Option<Strategy>,
+    is_portfolio_rebalance: bool,
+    paper_learning_exploration: bool,
+    exploratory: bool,
+    now_ms: u64,
+) -> Result<(), String> {
+    if !exploratory {
+        if let Some(reason) = learned_pause_block_reason(
+            settings,
+            strategy,
+            signal,
+            is_portfolio_rebalance,
+            &signal.direction,
+            now_ms,
+        ) {
+            return Err(format!("Strategy entry paused: {reason}"));
+        }
+    }
+    if let Some(kind) = strategy.filter(|kind| !kind.is_dated_carry()) {
+        if !(is_portfolio_rebalance && signal.direction == "bearish") {
+            if paper_learning_exploration {
+                // Reset Learning starts a temporary paper-only sampling window.
+            } else if exploratory {
+                allow_bounded_strategy_exploration(signal, kind)?;
+            } else {
+                validated_strategy_entry_edge(signal, kind)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn exploratory_notional_cap(settings: &Settings, risk_size_scale: f64) -> f64 {
+    settings.max_order_notional * (settings.exploration_percent / 100.0) * risk_size_scale
+}
+
+fn risk_fraction(settings: &Settings) -> f64 {
+    if settings.risk_limited_sizing {
+        0.25
+    } else {
+        1.0
+    }
+}
+
+fn risk_bounded_order_cap(settings: &Settings, initial_cap: f64) -> f64 {
+    initial_cap
+        .min(settings.max_order_notional)
+        .min(settings.max_order_notional * risk_fraction(settings))
+}
+
+fn minimum_book_order_for_entry(exploratory: bool, notional: f64) -> f64 {
+    if exploratory {
+        notional.min(MIN_DEEP_BOOK_ORDER_NOTIONAL)
+    } else {
+        MIN_DEEP_BOOK_ORDER_NOTIONAL
+    }
+}
+
 fn strategy_scout_entry_limits(
     parameters: &BTreeMap<String, f64>,
     strategy: Strategy,
@@ -373,10 +434,11 @@ fn signal_weighted_strategy_budget(
         };
     }
 
-    // Half the pool is an equal opportunity floor. The rest follows current
-    // signal confidence, expected opportunity frequency, and learned net results.
+    // Recycle the equal opportunity floor of strategies without a fresh
+    // directional candidate. Active candidates split that floor; only positive
+    // confidence/learning weights participate in the variable share.
     const GUARANTEED_SHARE: f64 = 0.5;
-    let floor = pool * GUARANTEED_SHARE / enabled.len() as f64;
+    let mut active = BTreeMap::<String, ()>::new();
     let mut weights = BTreeMap::<String, f64>::new();
     for signal in dashboard.best.iter().filter(|signal| {
         signal.strategy_candidate
@@ -392,6 +454,7 @@ fn signal_weighted_strategy_budget(
         else {
             continue;
         };
+        active.insert(kind.as_str().to_owned(), ());
         let learning = match category {
             StrategyCategory::Daily => settings
                 .learned_strategy_size_multipliers
@@ -405,7 +468,10 @@ fn signal_weighted_strategy_budget(
         } else {
             0.0
         };
-        *weights.entry(kind.as_str().to_owned()).or_default() += confidence * learning;
+        let weight = confidence * learning;
+        if weight.is_finite() && weight > 0.0 {
+            *weights.entry(kind.as_str().to_owned()).or_default() += weight;
+        }
     }
     // sqrt(count) in the aggregate gives genuinely frequent strategies more
     // room while keeping a broad signal universe from overwhelming the floor.
@@ -428,15 +494,24 @@ fn signal_weighted_strategy_budget(
             (kind, sum / count.sqrt())
         })
         .collect::<BTreeMap<_, _>>();
+    let active_count = active.len();
+    if active_count == 0 {
+        return 0.0;
+    }
+    let floor = pool * GUARANTEED_SHARE / active_count as f64;
     let total_weight = weights.values().sum::<f64>();
-    let variable = if total_weight > 0.0 {
-        (pool - floor * enabled.len() as f64)
+    let variable = if total_weight.is_finite() && total_weight > 0.0 {
+        (pool - floor * active_count as f64)
             * weights.get(strategy.as_str()).copied().unwrap_or(0.0)
             / total_weight
     } else {
         0.0
     };
-    (floor + variable).max(0.0)
+    if active.contains_key(strategy.as_str()) {
+        (floor + variable).max(0.0)
+    } else {
+        0.0
+    }
 }
 
 fn intraday_strategy_effective_budget(settings: &Settings, strategy: &str, now_ms: u64) -> f64 {
@@ -621,30 +696,15 @@ async fn prepare_signal_execution_plan(
     // notional cap and its own evidence/context checks below. Do not let a
     // learned-pause walk-forward freshness check veto that capped probe after
     // candidate selection has already authorized it.
-    if !exploratory {
-        if let Some(reason) = learned_pause_block_reason(
+    strategy_entry_walk_forward_gate(
         &settings,
-        strategy,
         signal,
+        strategy,
         is_portfolio_rebalance,
-        &signal.direction,
+        paper_learning_exploration,
+        exploratory,
         now_ms,
-        ) {
-            return Err(format!("Strategy entry paused: {reason}"));
-        }
-    }
-    if let Some(kind) = strategy.filter(|kind| !kind.is_dated_carry()) {
-        if !(is_portfolio_rebalance && signal.direction == "bearish") {
-            if paper_learning_exploration {
-                // Reset Learning starts a temporary paper-only sampling window.
-                // Market signal, book, order, position, and notional guards still apply.
-            } else if exploratory {
-                allow_bounded_strategy_exploration(signal, kind)?;
-            } else {
-                validated_strategy_entry_edge(signal, kind)?;
-            }
-        }
-    }
+    )?;
     let strategy_order_size_multiplier = if is_portfolio_rebalance {
         1.0
     } else {
@@ -708,11 +768,6 @@ async fn prepare_signal_execution_plan(
     } else {
         choose_order_type(&signal, settings.risk_appetite)
     };
-    let risk_fraction = if settings.risk_limited_sizing {
-        0.25
-    } else {
-        1.0
-    };
     let risk_size_scale = risk_size_scale(settings.risk_appetite);
     let strategy_size_learning = strategy.filter(|kind| kind.is_dated_carry()).map(|kind| {
         settings
@@ -746,7 +801,7 @@ async fn prepare_signal_execution_plan(
         settings.max_order_notional
     };
     let exploration_cap = if exploratory {
-        settings.max_order_notional * (settings.exploration_percent / 100.0) * risk_size_scale
+        exploratory_notional_cap(&settings, risk_size_scale)
     } else {
         normal_order_cap
     };
@@ -769,9 +824,7 @@ async fn prepare_signal_execution_plan(
         1.0
     };
     let entry_risk_scale = exploration_risk_adjustment.scale.min(loss_cluster_scale);
-    let risk_order_cap = (exploration_cap
-        .min(settings.max_order_notional)
-        .min(settings.max_order_notional * risk_fraction)
+    let risk_order_cap = (risk_bounded_order_cap(&settings, exploration_cap)
         * signal_confidence_size_multiplier(&signal)
         * learned_size_multiplier
         * entry_risk_scale
@@ -864,11 +917,7 @@ async fn prepare_signal_execution_plan(
     // Let their actual capped notional define the minimum; otherwise the
     // $10 deep-book floor rejects a $2.50–$5 exploratory order before the
     // slippage and cost gates can evaluate it.
-    let minimum_book_order = if exploratory {
-        notional.min(MIN_DEEP_BOOK_ORDER_NOTIONAL)
-    } else {
-        MIN_DEEP_BOOK_ORDER_NOTIONAL
-    };
+    let minimum_book_order = minimum_book_order_for_entry(exploratory, notional);
     let deep_book_started = Instant::now();
     let deep_book = assess_deep_book(
         market,
@@ -1066,6 +1115,95 @@ mod risk_adjusted_monthly_momentum_sizing_tests {
 mod signal_execution_budget_tests {
     use super::*;
 
+    fn exploration_signal(timestamp: u64, walk_forward: Option<serde_json::Value>) -> Signal {
+        let strategy = Strategy::Donchian20Btc200;
+        let parameters = strategy
+            .parameter_specs()
+            .into_iter()
+            .filter(|spec| {
+                matches!(
+                    spec.key,
+                    StrategyParameterKey::ScoutMinimumWalkForwardSamples
+                        | StrategyParameterKey::ScoutMaximumEvidenceAgeSeconds
+                )
+            })
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let mut signal = signal(strategy.as_str(), 1.0, timestamp);
+        let mut decision = serde_json::json!({"strategy_parameters": parameters});
+        if let Some(evidence) = walk_forward {
+            decision["strategy_walk_forward"] = evidence;
+        }
+        signal.strategy_decision = Some(decision);
+        signal
+    }
+
+    #[test]
+    fn selected_exploration_bypasses_absent_or_stale_evidence_but_strict_entry_does_not() {
+        let now_ms = current_time_ms();
+        let mut settings = Settings::default();
+        settings.learned_strategy_size_multipliers.insert(
+            Strategy::Donchian20Btc200.as_str().to_owned(),
+            0.0,
+        );
+        let stale_evidence = serde_json::json!({
+            "sampleCount": 100,
+            "lastSampleTimestampMs": 1,
+            "effectiveSampleSize": 100.0,
+            "expectancyCiLowPercent": -1.0,
+        });
+
+        for evidence in [None, Some(stale_evidence)] {
+            let signal = exploration_signal(now_ms, evidence);
+            assert_eq!(
+                strategy_entry_walk_forward_gate(
+                    &settings,
+                    &signal,
+                    Some(Strategy::Donchian20Btc200),
+                    false,
+                    false,
+                    true,
+                    now_ms,
+                ),
+                Ok(()),
+                "selected exploration remains available to collect fresh evidence"
+            );
+        }
+
+        let strict_signal = exploration_signal(now_ms, None);
+        let strict = strategy_entry_walk_forward_gate(
+            &settings,
+            &strict_signal,
+            Some(Strategy::Donchian20Btc200),
+            false,
+            false,
+            false,
+            now_ms,
+        );
+        assert!(strict.is_err());
+        assert!(strict.unwrap_err().contains("walk_forward_missing"));
+    }
+
+    #[test]
+    fn exploratory_notional_stays_risk_capped_and_deep_book_floor_tracks_small_probe() {
+        let mut settings = Settings::default();
+        settings.max_order_notional = 1_000.0;
+        settings.risk_limited_sizing = true;
+        settings.exploration_percent = 50.0;
+        let exploration_cap = exploratory_notional_cap(&settings, 1.0);
+        assert_eq!(exploration_cap, 500.0);
+        assert_eq!(risk_bounded_order_cap(&settings, exploration_cap), 250.0);
+
+        settings.exploration_percent = 0.5;
+        let small_probe = risk_bounded_order_cap(
+            &settings,
+            exploratory_notional_cap(&settings, 1.0),
+        );
+        assert_eq!(small_probe, 5.0);
+        assert_eq!(minimum_book_order_for_entry(true, small_probe), 5.0);
+        assert_eq!(minimum_book_order_for_entry(false, small_probe), 10.0);
+    }
+
     fn signal(strategy: &str, strength: f64, timestamp: u64) -> Signal {
         Signal {
             range_location: None,
@@ -1153,7 +1291,7 @@ mod signal_execution_budget_tests {
     }
 
     #[test]
-    fn signal_weighted_daily_budget_keeps_a_floor_and_rewards_eligible_signals() {
+    fn signal_weighted_daily_budget_recycles_inactive_strategy_floor() {
         let mut settings = Settings::default();
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
         settings.daily_notional_limit = 500.0;
@@ -1167,7 +1305,7 @@ mod signal_execution_budget_tests {
                 StrategyCategory::Daily,
                 100_000
             ),
-            125.0
+            0.0
         );
         let signals = dashboard(vec![
             signal("donchian-20-btc200", 1.0, 100_000),
@@ -1188,7 +1326,7 @@ mod signal_execution_budget_tests {
             100_000,
         );
         assert!(favored > other);
-        assert!(other >= 125.0);
+        assert_eq!(other, 0.0);
         assert!((favored + other - 500.0).abs() < 1e-9);
 
         let stale = dashboard(vec![signal("donchian-20-btc200", 1.0, 1)]);
@@ -1200,7 +1338,75 @@ mod signal_execution_budget_tests {
                 StrategyCategory::Daily,
                 100_000_000
             ),
-            125.0
+            0.0
+        );
+    }
+
+    #[test]
+    fn simultaneous_fresh_candidates_share_pool_and_zero_weight_gets_no_variable_share() {
+        let mut settings = Settings::default();
+        settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
+        settings.daily_notional_limit = 500.0;
+        settings.daily_strategy_notional_limit = 500.0;
+        let mut zero_weight = signal("donchian-55-btc200", 0.0, 100_000);
+        zero_weight.direction = "bearish".into();
+        let candidates = dashboard(vec![
+            signal("donchian-20-btc200", 1.0, 100_000),
+            zero_weight,
+        ]);
+        let positive = signal_weighted_strategy_budget(
+            &settings,
+            &candidates,
+            Strategy::Donchian20Btc200,
+            StrategyCategory::Daily,
+            100_000,
+        );
+        let zero = signal_weighted_strategy_budget(
+            &settings,
+            &candidates,
+            Strategy::Donchian55Btc200,
+            StrategyCategory::Daily,
+            100_000,
+        );
+        assert_eq!(zero, 125.0);
+        assert_eq!(positive, 375.0);
+        assert!((positive + zero - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stale_wrong_direction_and_non_candidate_signals_do_not_activate_shares() {
+        let mut settings = Settings::default();
+        settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
+        settings.daily_notional_limit = 500.0;
+        settings.daily_strategy_notional_limit = 500.0;
+        let mut wrong_direction = signal("donchian-55-btc200", 1.0, 100_000);
+        wrong_direction.direction = "flat".into();
+        let mut non_candidate = signal("donchian-55-btc200", 1.0, 100_000);
+        non_candidate.strategy_candidate = false;
+        let candidates = dashboard(vec![
+            signal("donchian-20-btc200", 1.0, 1),
+            wrong_direction,
+            non_candidate,
+        ]);
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &candidates,
+                Strategy::Donchian20Btc200,
+                StrategyCategory::Daily,
+                100_000_000,
+            ),
+            0.0
+        );
+        assert_eq!(
+            signal_weighted_strategy_budget(
+                &settings,
+                &candidates,
+                Strategy::Donchian55Btc200,
+                StrategyCategory::Daily,
+                100_000_000,
+            ),
+            0.0
         );
     }
 

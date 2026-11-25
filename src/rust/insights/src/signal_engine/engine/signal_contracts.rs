@@ -249,6 +249,36 @@ pub struct SignalEvaluation {
     pub long_time_to_positive_net_seconds: Option<u64>,
     #[serde(default)]
     pub short_time_to_positive_net_seconds: Option<u64>,
+    /// Streaming, executable-side Scout path summary. Missing on legacy rows.
+    #[serde(default)]
+    pub scout_path_evidence: Option<ScoutPathEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScoutPathEvidence {
+    pub schema_version: u16,
+    pub source: String,
+    /// Describes the sampling rule without implying a feed-side symbol SLA.
+    #[serde(default)]
+    pub completeness_basis: String,
+    /// False until FeedHandlers publishes an explicit per-symbol freshness contract.
+    #[serde(default)]
+    pub per_symbol_freshness_guaranteed: bool,
+    pub observation_only: bool,
+    pub direction: String,
+    pub executable_side: String,
+    pub entry_quote_timestamp: Option<u64>,
+    pub first_source_event_timestamp: Option<u64>,
+    pub last_source_event_timestamp: Option<u64>,
+    pub evaluated_timestamp: u64,
+    pub source_freshness_ms: Option<u64>,
+    pub sample_count: u64,
+    pub maximum_gap_ms: u64,
+    pub source_timestamps_monotonic: bool,
+    pub maximum_favorable_excursion_percent: Option<f64>,
+    pub maximum_adverse_excursion_percent: Option<f64>,
+    pub complete: bool,
+    pub completeness_reason: String,
 }
 
 // Retained only to decode historical kind-6 records. New evaluations never

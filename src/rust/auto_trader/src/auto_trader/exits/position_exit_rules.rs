@@ -147,6 +147,20 @@ fn position_exit_fee_rate(position: &TraderPosition, profit_exit: bool) -> f64 {
     }
 }
 
+fn net_exit_return_fraction(
+    position: &TraderPosition,
+    exit_price: f64,
+    exit_fee_rate: f64,
+) -> f64 {
+    let entry_notional = position.quantity.abs() * position.average_entry_price;
+    if !entry_notional.is_finite() || entry_notional <= 0.0 {
+        return 0.0;
+    }
+    let gross_open_pnl = (exit_price - position.average_entry_price) * position.quantity;
+    let exit_fees = position.quantity.abs() * exit_price * exit_fee_rate;
+    (gross_open_pnl - position.entry_fees - exit_fees) / entry_notional
+}
+
 fn profit_protection_state(
     position: &TraderPosition,
     current_return_percent: f64,
@@ -243,6 +257,27 @@ async fn evaluate_position_exit(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let source_updated_at_ms = market["updated_at_ms"].as_u64();
+    let freshness_contract_version = market["symbol_freshness"]["contract_version"]
+        .as_u64()
+        .and_then(|version| u16::try_from(version).ok());
+    let freshness_max_age_ms = market["symbol_freshness"]["max_age_ms"].as_u64();
+    let source_fresh = match (
+        freshness_contract_version,
+        market["symbol_freshness"]["state"].as_str(),
+        source_updated_at_ms,
+        freshness_max_age_ms,
+    ) {
+        (Some(1), Some("fresh"), Some(updated_at), Some(max_age)) => {
+            Some(
+                market["symbol"].as_str() == Some(symbol.as_str())
+                    && updated_at <= observed_at
+                    && observed_at - updated_at <= max_age,
+            )
+        }
+        (Some(1), _, _, _) => Some(false),
+        _ => None,
+    };
     {
         let mut settings = state.settings.lock().await;
         if let Some(current) = settings
@@ -259,9 +294,18 @@ async fn evaluate_position_exit(
                     timestamp: observed_at,
                     bid,
                     ask,
+                    source_updated_at_ms,
+                    freshness_contract_version,
+                    freshness_max_age_ms,
+                    source_fresh,
                 });
+                current.price_path_total_samples = current
+                    .price_path_total_samples
+                    .max(current.price_path.len() as u64)
+                    .saturating_add(1);
                 if current.price_path.len() > 4096 {
                     current.price_path.drain(..current.price_path.len() - 4096);
+                    current.price_path_truncated = true;
                 }
                 position.price_path = current.price_path.clone();
                 request_price_path_persist_if_due(state)?;
@@ -272,26 +316,12 @@ async fn evaluate_position_exit(
     }
     let is_long = position.quantity > 0.0;
     let exit_price = if is_long { bid } else { ask };
-    let entry_notional = position.quantity.abs() * position.average_entry_price;
-    let gross_open_pnl = (exit_price - position.average_entry_price) * position.quantity;
     let immediate_exit_fee_rate = position_exit_fee_rate(&position, false);
-    let immediate_exit_return_fraction = if entry_notional > 0.0 {
-        (gross_open_pnl
-            - position.entry_fees
-            - position.quantity.abs() * exit_price * immediate_exit_fee_rate)
-            / entry_notional
-    } else {
-        0.0
-    };
+    let immediate_exit_return_fraction =
+        net_exit_return_fraction(&position, exit_price, immediate_exit_fee_rate);
     let profit_exit_fee_rate = position_exit_fee_rate(&position, true);
-    let profit_exit_return_fraction = if entry_notional > 0.0 {
-        (gross_open_pnl
-            - position.entry_fees
-            - position.quantity.abs() * exit_price * profit_exit_fee_rate)
-            / entry_notional
-    } else {
-        0.0
-    };
+    let profit_exit_return_fraction =
+        net_exit_return_fraction(&position, exit_price, profit_exit_fee_rate);
     let (stop_loss_percent, configured_take_profit_percent, closed_trade_returns) = {
         let settings = state.settings.lock().await;
         (
@@ -702,6 +732,37 @@ mod position_exit_profit_protection_tests {
             position_exit_fee_rate(&strict, true),
             configured_taker_fee_rate()
         );
+    }
+
+    #[test]
+    fn profit_protection_activation_uses_net_return_after_entry_and_exit_fees() {
+        let parameters = ProfitProtectionParameters {
+            activation_percent: 0.15,
+            giveback_percent: 0.05,
+            minimum_lock_percent: 0.0,
+        };
+        let mut long = position(1.0, serde_json::json!({}), None);
+        long.entry_fees = 0.10;
+        let below_net_floor = net_exit_return_fraction(&long, 100.30, 0.001);
+        assert!((below_net_floor * 100.0 - 0.0997).abs() < 1e-9);
+        assert_eq!(
+            profit_protection_state(&long, below_net_floor * 100.0, parameters),
+            (None, false),
+            "gross return above 0.15% does not activate below 0.15% after both fees"
+        );
+        let above_net_floor = net_exit_return_fraction(&long, 100.351, 0.001);
+        assert!(above_net_floor * 100.0 > parameters.activation_percent);
+        assert!(profit_protection_state(&long, above_net_floor * 100.0, parameters)
+            .0
+            .is_some());
+
+        let mut short = position(-1.0, serde_json::json!({}), None);
+        short.entry_fees = 0.10;
+        let short_net = net_exit_return_fraction(&short, 99.649, 0.001);
+        assert!(short_net * 100.0 > parameters.activation_percent);
+        assert!(profit_protection_state(&short, short_net * 100.0, parameters)
+            .0
+            .is_some());
     }
 
     fn position(quantity: f64, decision: serde_json::Value, peak: Option<f64>) -> TraderPosition {

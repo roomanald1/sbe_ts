@@ -285,4 +285,62 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn threshold_windows_are_chronological_and_holdout_does_not_select_candidate() {
+        let spec = ParameterSpec {
+            key: "minimum_flow_imbalance".into(),
+            label: "Minimum flow".into(),
+            default: 0.02,
+            min: 0.02,
+            max: 0.8,
+            step: 0.01,
+            unit: "ratio".into(),
+            learning_direction: -1.0,
+        };
+        // Two correlated outcomes in each four-hour window must count as one
+        // unit of evidence. Sorting the supplied history must make the result
+        // independent of arrival order.
+        let mut samples = (0..100_u64)
+            .flat_map(|window| {
+                [(0.025, -0.2), (0.075, 1.0)].map(|(feature_value, net_return_percent)| {
+                    ThresholdTrainingSample {
+                        symbol: "BTC-USDT".into(),
+                        strategy: "live-trade-flow".into(),
+                        parameter_key: spec.key.clone(),
+                        observed_at_ms: window * FOUR_HOUR_WINDOW_MS
+                            + if feature_value < 0.05 { 1 } else { 2 },
+                        threshold: 0.02,
+                        feature_value,
+                        net_return_percent,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            threshold_return_stats(&[samples[..2].to_vec()], &spec.key, 0.03)
+                .expect("the first window has an eligible outcome")
+                .0,
+            1,
+            "multiple outcomes in one four-hour window count once"
+        );
+
+        let chronological = walk_forward_threshold(&spec, 0.02, "live-trade-flow", &samples);
+        assert_eq!(chronological, Some(0.03));
+
+        // The newest 20% are the final holdout. Changing their outcomes can
+        // affect confirmation, but cannot change the training-selected
+        // threshold. These values preserve validation while making accidental
+        // use of holdout data during candidate scoring obvious.
+        let holdout_start = 80 * 2;
+        for sample in &mut samples[holdout_start..] {
+            sample.net_return_percent += 100.0;
+        }
+        samples.reverse();
+        assert_eq!(
+            walk_forward_threshold(&spec, 0.02, "live-trade-flow", &samples),
+            chronological
+        );
+    }
 }

@@ -1493,6 +1493,7 @@ mod tests {
                     paired_comparison: false,
                     tested_parameter_keys: vec!["threshold".into()],
                     baseline_parameters: BTreeMap::from([("threshold".into(), 0.5)]),
+                    lineage: None,
                 })
                 .collect(),
         }

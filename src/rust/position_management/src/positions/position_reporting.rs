@@ -1,4 +1,3 @@
-
 #[derive(Serialize)]
 struct FeeSummaryRow {
     source: String,
@@ -21,9 +20,7 @@ struct FeeSummaryResponse {
     last_fill_ms: Option<u64>,
 }
 
-async fn get_fee_summary(
-    State(store): State<Arc<PositionStore>>,
-) -> Json<FeeSummaryResponse> {
+async fn get_fee_summary(State(store): State<Arc<PositionStore>>) -> Json<FeeSummaryResponse> {
     let ledger = store.ledger.lock().await;
     Json(fee_summary_for_ledger(&ledger))
 }
@@ -33,28 +30,45 @@ fn fee_summary_for_ledger(ledger: &Ledger) -> FeeSummaryResponse {
     let mut first_fill_ms: Option<u64> = None;
     let mut last_fill_ms: Option<u64> = None;
     for trade in &ledger.trades {
-        let source = if trade.source.is_empty() { "unknown" } else { &trade.source }.to_owned();
-        let liquidity = if trade.fee_liquidity.is_empty() { "unknown" } else { &trade.fee_liquidity }.to_owned();
+        let source = if trade.source.is_empty() {
+            "unknown"
+        } else {
+            &trade.source
+        }
+        .to_owned();
+        let liquidity = if trade.fee_liquidity.is_empty() {
+            "unknown"
+        } else {
+            &trade.fee_liquidity
+        }
+        .to_owned();
         let fee_currency = if !trade.fee_known {
             "unknown".to_owned()
         } else if trade.fee_currency.is_empty() {
-            trade.symbol.split_once('-').map(|(_, quote)| quote).unwrap_or("unknown").to_owned()
+            trade
+                .symbol
+                .split_once('-')
+                .map(|(_, quote)| quote)
+                .unwrap_or("unknown")
+                .to_owned()
         } else {
             trade.fee_currency.clone()
         };
-        let row = groups.entry((source.clone(), liquidity.clone(), fee_currency.clone())).or_insert(FeeSummaryRow {
-            source,
-            liquidity,
-            fee_currency,
-            fills: 0,
-            known_fee_fills: 0,
-            unknown_fee_fills: 0,
-            traded_notional: 0.0,
-            fees_paid: 0.0,
-            effective_fee_bps: None,
-            first_fill_ms: trade.timestamp,
-            last_fill_ms: trade.timestamp,
-        });
+        let row = groups
+            .entry((source.clone(), liquidity.clone(), fee_currency.clone()))
+            .or_insert(FeeSummaryRow {
+                source,
+                liquidity,
+                fee_currency,
+                fills: 0,
+                known_fee_fills: 0,
+                unknown_fee_fills: 0,
+                traded_notional: 0.0,
+                fees_paid: 0.0,
+                effective_fee_bps: None,
+                first_fill_ms: trade.timestamp,
+                last_fill_ms: trade.timestamp,
+            });
         row.fills += 1;
         row.traded_notional += trade.quantity.abs() * trade.execution_price.abs();
         if trade.fee_known {
@@ -65,8 +79,10 @@ fn fee_summary_for_ledger(ledger: &Ledger) -> FeeSummaryResponse {
         }
         row.first_fill_ms = row.first_fill_ms.min(trade.timestamp);
         row.last_fill_ms = row.last_fill_ms.max(trade.timestamp);
-        first_fill_ms = Some(first_fill_ms.map_or(trade.timestamp, |current| current.min(trade.timestamp)));
-        last_fill_ms = Some(last_fill_ms.map_or(trade.timestamp, |current| current.max(trade.timestamp)));
+        first_fill_ms =
+            Some(first_fill_ms.map_or(trade.timestamp, |current| current.min(trade.timestamp)));
+        last_fill_ms =
+            Some(last_fill_ms.map_or(trade.timestamp, |current| current.max(trade.timestamp)));
     }
     let mut rows = groups.into_values().collect::<Vec<_>>();
     for row in &mut rows {
@@ -74,7 +90,8 @@ fn fee_summary_for_ledger(ledger: &Ledger) -> FeeSummaryResponse {
             .then_some(row.fees_paid / row.traded_notional * 10_000.0);
     }
     rows.sort_by(|left, right| {
-        left.source.cmp(&right.source)
+        left.source
+            .cmp(&right.source)
             .then_with(|| left.liquidity.cmp(&right.liquidity))
             .then_with(|| left.fee_currency.cmp(&right.fee_currency))
     });
@@ -86,15 +103,40 @@ fn fee_summary_for_ledger(ledger: &Ledger) -> FeeSummaryResponse {
     }
 }
 
+fn ledger_evidence_epoch_id(allocator_epoch: Option<&str>) -> Option<String> {
+    allocator_epoch.map(|epoch| format!("pm-ledger-evidence:v1:{epoch}"))
+}
+
+fn has_canonical_lifecycle_attribution(trade: &PositionTrade) -> bool {
+    trade.lifecycle.as_ref().is_some_and(|link| {
+        link.schema_version > 0
+            && !link.opportunity_id.trim().is_empty()
+            && !link.episode_id.trim().is_empty()
+            && !link.trade_id.trim().is_empty()
+            && !link.execution_mode.trim().is_empty()
+            && !link.entry_policy.trim().is_empty()
+            && !link.source.trim().is_empty()
+    })
+}
+
 #[derive(Serialize)]
 struct FinancialSnapshotLedgerCoverage {
     trade_rows: usize,
+    ledger_evidence_epoch: Option<String>,
+    ledger_evidence_epoch_status: &'static str,
+    fills_in_evidence_epoch: usize,
+    rows_without_fill_identity: usize,
+    rows_with_fill_identity_outside_evidence_epoch: usize,
+    clean_slate_eligible_rows: usize,
     known_fee_fills: usize,
     unknown_fee_fills: usize,
+    fee_currency_missing_rows: usize,
     fee_currency_unknown_rows: usize,
     fee_cashflow_currency_mismatch_rows: usize,
     parent_order_linked_rows: usize,
     rows_without_parent_order_id: usize,
+    canonical_lifecycle_linked_rows: usize,
+    rows_without_canonical_lifecycle: usize,
     timestamp_order_inversion_rows: usize,
     independent_execution_ledger_reconciled: bool,
 }
@@ -114,6 +156,89 @@ struct FinancialSnapshotResponse {
     fee_rates: FeeRatesResponse,
     ledger_snapshot_consistent: bool,
     ledger_coverage: FinancialSnapshotLedgerCoverage,
+}
+
+#[derive(Deserialize)]
+struct PortfolioEvidenceIntervalsQuery {
+    after_ms: Option<u64>,
+    after_cursor: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn request_portfolio_evidence_baseline(
+    State(store): State<Arc<PositionStore>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let baseline = store
+        .persist_portfolio_evidence_baseline()
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(baseline))
+}
+
+async fn get_portfolio_evidence_intervals(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<PortfolioEvidenceIntervalsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = store.path.clone();
+    let after_ms = query.after_ms.unwrap_or(0);
+    let limit = query.limit.unwrap_or(250).clamp(1, 1_000);
+    let query_limit = limit + 1;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(i64, PortfolioEvidenceIntervalV1)>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = rusqlite::Connection::open(path)?;
+        let table_exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_evidence_intervals')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !table_exists {
+            return Ok(Vec::new());
+        }
+        let after_cursor = query.after_cursor;
+        let mut statement = if after_cursor.is_some() {
+            db.prepare("SELECT rowid,payload FROM portfolio_evidence_intervals WHERE rowid > ?1 ORDER BY rowid LIMIT ?2")?
+        } else {
+            db.prepare("SELECT rowid,payload FROM portfolio_evidence_intervals WHERE observed_at_ms > ?1 ORDER BY rowid LIMIT ?2")?
+        };
+        let rows = statement.query_map(
+            rusqlite::params![after_cursor.unwrap_or(i64::try_from(after_ms)?), i64::try_from(query_limit)?],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (cursor, payload) = row?;
+            Ok((cursor, serde_json::from_str::<PortfolioEvidenceIntervalV1>(&payload)?))
+        }).collect()
+    })
+    .await
+    .map_err(internal_error)?
+    .map_err(internal_error)?;
+    let mut result = result;
+    let truncated = result.len() > limit;
+    result.truncate(limit);
+    let next_cursor = result.last().map(|(cursor, _)| *cursor);
+    let intervals = result
+        .into_iter()
+        .map(|(_, interval)| interval)
+        .collect::<Vec<_>>();
+    let coverage = if intervals.is_empty() {
+        "no_durable_checkpoint"
+    } else if !truncated && intervals.iter().all(|interval| interval.complete) {
+        "pm_internal_complete"
+    } else if truncated {
+        "truncated"
+    } else {
+        "incomplete_or_unknown"
+    };
+    Ok(Json(serde_json::json!({
+        "schema_version": 1,
+        "coverage": coverage,
+        "quantitative_eligibility": "blocked_pending_independent_reconciliation",
+        "truncated": truncated,
+        "next_cursor": next_cursor,
+        "intervals": intervals,
+    })))
 }
 
 async fn get_financial_snapshot(
@@ -167,11 +292,95 @@ fn build_financial_snapshot(
         realized_pnl_all_time_by_quote: all_time_by_quote,
     };
     let known_fee_fills = ledger.trades.iter().filter(|trade| trade.fee_known).count();
+    let ledger_evidence_epoch = ledger_evidence_epoch_id(ledger.fill_id_epoch.as_deref());
+    let in_evidence_epoch = |trade: &PositionTrade| {
+        let (Some(epoch), Some(fill_id)) =
+            (ledger.fill_id_epoch.as_deref(), trade.fill_id.as_deref())
+        else {
+            return false;
+        };
+        fill_id
+            .strip_prefix(&format!("pm-fill:v1:{epoch}:"))
+            .and_then(|sequence| sequence.parse::<u64>().ok())
+            .is_some_and(|sequence| sequence > 0)
+    };
+    let fills_in_evidence_epoch = ledger
+        .trades
+        .iter()
+        .filter(|trade| in_evidence_epoch(trade))
+        .count();
+    let rows_without_fill_identity = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            trade
+                .fill_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        })
+        .count();
+    let rows_with_fill_identity_outside_evidence_epoch = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            trade
+                .fill_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+        })
+        .filter(|trade| !in_evidence_epoch(trade))
+        .count();
+    let fee_currency_missing_rows = ledger
+        .trades
+        .iter()
+        .filter(|trade| trade.fee_currency.trim().is_empty())
+        .count();
     let parent_order_linked_rows = ledger
         .trades
         .iter()
-        .filter(|trade| trade.parent_order_id.as_deref().is_some_and(|id| !id.is_empty()))
+        .filter(|trade| {
+            trade
+                .parent_order_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+        })
         .count();
+    let canonical_lifecycle_linked_rows = ledger
+        .trades
+        .iter()
+        .filter(|trade| has_canonical_lifecycle_attribution(trade))
+        .count();
+    let clean_slate_eligible_rows = ledger
+        .trades
+        .iter()
+        .filter(|trade| {
+            in_evidence_epoch(trade)
+                && trade.fee_known
+                && !trade.fee_currency.trim().is_empty()
+                && trade
+                    .symbol
+                    .split_once('-')
+                    .is_some_and(|(_, quote)| trade.fee_currency == quote)
+                && trade
+                    .parent_order_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                && has_canonical_lifecycle_attribution(trade)
+        })
+        .count();
+    let ledger_evidence_epoch_status = if ledger.trades.is_empty() {
+        if ledger.fill_id_epoch.is_some() {
+            "initialized_empty"
+        } else {
+            "uninitialized_empty"
+        }
+    } else if fills_in_evidence_epoch == 0 {
+        "legacy_or_unknown"
+    } else if fills_in_evidence_epoch == ledger.trades.len() {
+        "clean_slate"
+    } else {
+        "mixed_legacy_and_current"
+    };
     let fee_currency_unknown_rows = ledger
         .trades
         .iter()
@@ -224,8 +433,15 @@ fn build_financial_snapshot(
         },
         ledger_coverage: FinancialSnapshotLedgerCoverage {
             trade_rows: ledger.trades.len(),
+            ledger_evidence_epoch,
+            ledger_evidence_epoch_status,
+            fills_in_evidence_epoch,
+            rows_without_fill_identity,
+            rows_with_fill_identity_outside_evidence_epoch,
+            clean_slate_eligible_rows,
             known_fee_fills,
             unknown_fee_fills: ledger.trades.len().saturating_sub(known_fee_fills),
+            fee_currency_missing_rows,
             fee_currency_unknown_rows,
             fee_cashflow_currency_mismatch_rows,
             parent_order_linked_rows,
@@ -233,6 +449,11 @@ fn build_financial_snapshot(
                 .trades
                 .len()
                 .saturating_sub(parent_order_linked_rows),
+            canonical_lifecycle_linked_rows,
+            rows_without_canonical_lifecycle: ledger
+                .trades
+                .len()
+                .saturating_sub(canonical_lifecycle_linked_rows),
             timestamp_order_inversion_rows,
             independent_execution_ledger_reconciled: false,
         },
@@ -277,7 +498,9 @@ fn replay_realized_pnl(ledger: &Ledger) -> RealizedPnlLedgerSnapshot {
             .to_owned();
         *by_quote.entry(quote).or_default() += realized_delta;
         if let Some(parent_order_id) = trade.parent_order_id.as_deref() {
-            *by_parent_order.entry(parent_order_id.to_owned()).or_default() += realized_delta;
+            *by_parent_order
+                .entry(parent_order_id.to_owned())
+                .or_default() += realized_delta;
             if let Some(created_at) = barrier_created_at.get(parent_order_id) {
                 *by_barrier_created_at.entry(created_at.clone()).or_default() += realized_delta;
             }
@@ -355,7 +578,9 @@ async fn get_realized_pnl(
                 .collect::<Vec<_>>();
             let trade_count = ledger.trades.len();
             let barrier_count = ledger.barrier_orders.len();
-            let barrier_created_at = ledger.barrier_orders.iter()
+            let barrier_created_at = ledger
+                .barrier_orders
+                .iter()
                 .map(|barrier| (barrier.id.clone(), barrier.created_at.to_string()))
                 .collect::<HashMap<_, _>>();
             drop(ledger);
@@ -446,7 +671,6 @@ async fn get_realized_pnl(
     }))
 }
 
-
 fn cached_position_summary(
     store: &PositionStore,
     ledger: &Ledger,
@@ -521,7 +745,11 @@ mod financial_snapshot_tests {
             lifecycle: None,
             fee,
             fee_known,
-            fee_currency: if fee_known { "USDT".to_owned() } else { String::new() },
+            fee_currency: if fee_known {
+                "USDT".to_owned()
+            } else {
+                String::new()
+            },
             fee_rate: 0.001,
             fee_liquidity: "taker".to_owned(),
             resting_order_id: None,
@@ -533,13 +761,46 @@ mod financial_snapshot_tests {
         }
     }
 
+    fn complete_lifecycle_link() -> CanonicalLifecycleLink {
+        CanonicalLifecycleLink {
+            schema_version: 1,
+            opportunity_id: "opportunity-1".to_owned(),
+            episode_id: "episode-1".to_owned(),
+            trade_id: "trade-1".to_owned(),
+            profile_id: Some("profile-1".to_owned()),
+            profile_hash: Some("hash-1".to_owned()),
+            profile_version: Some(1),
+            execution_mode: "paper".to_owned(),
+            entry_policy: "limit".to_owned(),
+            source: "strategy".to_owned(),
+        }
+    }
+
     #[test]
     fn composite_snapshot_uses_one_ledger_copy_and_preserves_fee_integrity() {
         let store = test_store();
         let mut ledger = Ledger::default();
         ledger.trades = vec![
-            trade("fill-1", TradeSide::Buy, 1.0, 100.0, 2, -1.0, true, Some("order-1")),
-            trade("fill-2", TradeSide::Sell, 1.0, 120.0, 1, -1.0, true, Some("order-2")),
+            trade(
+                "fill-1",
+                TradeSide::Buy,
+                1.0,
+                100.0,
+                2,
+                -1.0,
+                true,
+                Some("order-1"),
+            ),
+            trade(
+                "fill-2",
+                TradeSide::Sell,
+                1.0,
+                120.0,
+                1,
+                -1.0,
+                true,
+                Some("order-2"),
+            ),
             trade("fill-3", TradeSide::Buy, 0.5, 50.0, 3, 0.0, false, None),
         ];
         let rates = BTreeMap::from([("USDT".to_owned(), 1.0)]);
@@ -549,7 +810,10 @@ mod financial_snapshot_tests {
 
         assert_eq!(snapshot.snapshot_consistency, "single_locked_ledger_clone");
         assert!(snapshot.ledger_snapshot_consistent);
-        assert_eq!(snapshot.market_marks_consistency, "sampled_during_account_projection");
+        assert_eq!(
+            snapshot.market_marks_consistency,
+            "sampled_during_account_projection"
+        );
         assert_eq!(snapshot.captured_at_ms, 42);
         assert_eq!(snapshot.execution_mode, "paper");
         assert_eq!(snapshot.account.realized_pnl, 18.0);
@@ -557,19 +821,152 @@ mod financial_snapshot_tests {
         assert_eq!(snapshot.account.fees_paid, 2.0);
         assert_eq!(snapshot.fee_summary.fills, 3);
         assert_eq!(snapshot.ledger_coverage.trade_rows, 3);
+        assert_eq!(
+            snapshot.ledger_coverage.ledger_evidence_epoch_status,
+            "legacy_or_unknown"
+        );
+        assert_eq!(snapshot.ledger_coverage.fills_in_evidence_epoch, 0);
+        assert_eq!(snapshot.ledger_coverage.rows_without_fill_identity, 3);
+        assert_eq!(snapshot.ledger_coverage.clean_slate_eligible_rows, 0);
         assert_eq!(snapshot.ledger_coverage.known_fee_fills, 2);
         assert_eq!(snapshot.ledger_coverage.unknown_fee_fills, 1);
         assert_eq!(snapshot.ledger_coverage.parent_order_linked_rows, 2);
         assert_eq!(snapshot.ledger_coverage.rows_without_parent_order_id, 1);
         assert_eq!(snapshot.ledger_coverage.timestamp_order_inversion_rows, 1);
         assert_eq!(snapshot.ledger_coverage.fee_currency_unknown_rows, 0);
-        assert_eq!(snapshot.ledger_coverage.fee_cashflow_currency_mismatch_rows, 0);
-        assert!(!snapshot.ledger_coverage.independent_execution_ledger_reconciled);
+        assert_eq!(
+            snapshot.ledger_coverage.fee_cashflow_currency_mismatch_rows,
+            0
+        );
+        assert!(
+            !snapshot
+                .ledger_coverage
+                .independent_execution_ledger_reconciled
+        );
 
         let serialized = serde_json::to_value(snapshot).unwrap();
         assert_eq!(serialized["execution_mode"], "paper");
         assert_eq!(serialized["ledger_coverage"]["unknown_fee_fills"], 1);
-        assert_eq!(serialized["realized_pnl"]["realized_pnl_all_time_by_quote"]["USDT"], 18.0);
+        assert_eq!(
+            serialized["ledger_coverage"]["ledger_evidence_epoch_status"],
+            "legacy_or_unknown"
+        );
+        assert_eq!(
+            serialized["realized_pnl"]["realized_pnl_all_time_by_quote"]["USDT"],
+            18.0
+        );
+    }
+
+    #[test]
+    fn evidence_epoch_separates_empty_new_legacy_mixed_and_restarted_ledgers() {
+        let store = test_store();
+        let rates = BTreeMap::from([("USDT".to_owned(), 1.0)]);
+        let fx_as_of = BTreeMap::from([("USDT".to_owned(), 40)]);
+
+        let empty =
+            build_financial_snapshot(&store, &Ledger::default(), &rates, fx_as_of.clone(), 42)
+                .unwrap();
+        assert_eq!(
+            empty.ledger_coverage.ledger_evidence_epoch_status,
+            "uninitialized_empty"
+        );
+        assert_eq!(empty.ledger_coverage.ledger_evidence_epoch, None);
+        assert_eq!(empty.ledger_coverage.clean_slate_eligible_rows, 0);
+
+        let mut current = Ledger::default();
+        let current_fill_id = allocate_fill_id(&mut current, 100);
+        let mut current_trade = trade(
+            "row-current",
+            TradeSide::Buy,
+            1.0,
+            100.0,
+            100,
+            -0.1,
+            true,
+            Some("order-current"),
+        );
+        current_trade.fill_id = Some(current_fill_id.clone());
+        current_trade.lifecycle = Some(complete_lifecycle_link());
+        current.trades.push(current_trade);
+
+        let fresh =
+            build_financial_snapshot(&store, &current, &rates, fx_as_of.clone(), 43).unwrap();
+        assert_eq!(
+            fresh.ledger_coverage.ledger_evidence_epoch_status,
+            "clean_slate"
+        );
+        assert_eq!(fresh.ledger_coverage.fills_in_evidence_epoch, 1);
+        assert_eq!(fresh.ledger_coverage.rows_without_fill_identity, 0);
+        assert_eq!(fresh.ledger_coverage.clean_slate_eligible_rows, 1);
+        let evidence_epoch = fresh.ledger_coverage.ledger_evidence_epoch.clone().unwrap();
+        assert!(evidence_epoch.starts_with("pm-ledger-evidence:v1:"));
+
+        // The allocator epoch and sequence are serialized in the ledger itself.
+        // A restart preserves the public evidence epoch and cohort membership.
+        let restarted: Ledger =
+            serde_json::from_slice(&serde_json::to_vec(&current).unwrap()).unwrap();
+        let after_restart =
+            build_financial_snapshot(&store, &restarted, &rates, fx_as_of.clone(), 44).unwrap();
+        assert_eq!(
+            after_restart.ledger_coverage.ledger_evidence_epoch,
+            Some(evidence_epoch)
+        );
+        assert_eq!(after_restart.ledger_coverage.fills_in_evidence_epoch, 1);
+        assert_eq!(after_restart.ledger_coverage.clean_slate_eligible_rows, 1);
+
+        let mut legacy = Ledger::default();
+        let mut legacy_trade = trade(
+            "row-legacy",
+            TradeSide::Buy,
+            1.0,
+            90.0,
+            90,
+            0.0,
+            false,
+            None,
+        );
+        legacy_trade.fee_currency.clear();
+        legacy.trades.push(legacy_trade);
+        let historical =
+            build_financial_snapshot(&store, &legacy, &rates, fx_as_of.clone(), 45).unwrap();
+        assert_eq!(
+            historical.ledger_coverage.ledger_evidence_epoch_status,
+            "legacy_or_unknown"
+        );
+        assert_eq!(historical.ledger_coverage.rows_without_fill_identity, 1);
+        assert_eq!(historical.ledger_coverage.fee_currency_missing_rows, 1);
+        assert_eq!(historical.ledger_coverage.clean_slate_eligible_rows, 0);
+
+        let mut mixed = restarted;
+        mixed.trades.push(legacy.trades.remove(0));
+        let mut foreign_epoch = trade(
+            "row-foreign",
+            TradeSide::Buy,
+            0.5,
+            95.0,
+            95,
+            -0.05,
+            true,
+            Some("order-foreign"),
+        );
+        foreign_epoch.fill_id = Some("pm-fill:v1:prior-epoch:7".to_owned());
+        foreign_epoch.lifecycle = Some(complete_lifecycle_link());
+        mixed.trades.push(foreign_epoch);
+        let mixed_snapshot =
+            build_financial_snapshot(&store, &mixed, &rates, fx_as_of, 46).unwrap();
+        assert_eq!(
+            mixed_snapshot.ledger_coverage.ledger_evidence_epoch_status,
+            "mixed_legacy_and_current"
+        );
+        assert_eq!(mixed_snapshot.ledger_coverage.fills_in_evidence_epoch, 1);
+        assert_eq!(mixed_snapshot.ledger_coverage.rows_without_fill_identity, 1);
+        assert_eq!(
+            mixed_snapshot
+                .ledger_coverage
+                .rows_with_fill_identity_outside_evidence_epoch,
+            1
+        );
+        assert_eq!(mixed_snapshot.ledger_coverage.clean_slate_eligible_rows, 1);
     }
 
     #[test]
@@ -577,11 +974,56 @@ mod financial_snapshot_tests {
         let store = test_store();
         let mut ledger = Ledger::default();
         ledger.trades = vec![
-            trade("buy-1", TradeSide::Buy, 1.0, 100.0, 1, 0.0, true, Some("o1")),
-            trade("buy-2", TradeSide::Buy, 1.0, 200.0, 2, 0.0, true, Some("o2")),
-            trade("sell-1", TradeSide::Sell, 1.0, 150.0, 4, 0.0, true, Some("o3")),
-            trade("buy-3", TradeSide::Buy, 1.0, 300.0, 3, 0.0, true, Some("o4")),
-            trade("sell-2", TradeSide::Sell, 1.0, 250.0, 5, 0.0, true, Some("o5")),
+            trade(
+                "buy-1",
+                TradeSide::Buy,
+                1.0,
+                100.0,
+                1,
+                0.0,
+                true,
+                Some("o1"),
+            ),
+            trade(
+                "buy-2",
+                TradeSide::Buy,
+                1.0,
+                200.0,
+                2,
+                0.0,
+                true,
+                Some("o2"),
+            ),
+            trade(
+                "sell-1",
+                TradeSide::Sell,
+                1.0,
+                150.0,
+                4,
+                0.0,
+                true,
+                Some("o3"),
+            ),
+            trade(
+                "buy-3",
+                TradeSide::Buy,
+                1.0,
+                300.0,
+                3,
+                0.0,
+                true,
+                Some("o4"),
+            ),
+            trade(
+                "sell-2",
+                TradeSide::Sell,
+                1.0,
+                250.0,
+                5,
+                0.0,
+                true,
+                Some("o5"),
+            ),
         ];
         let rates = BTreeMap::from([("USDT".to_owned(), 1.0)]);
         let snapshot = build_financial_snapshot(
@@ -617,7 +1059,65 @@ mod financial_snapshot_tests {
         )
         .unwrap();
 
-        assert_eq!(snapshot.ledger_coverage.fee_cashflow_currency_mismatch_rows, 1);
+        assert_eq!(
+            snapshot.ledger_coverage.fee_cashflow_currency_mismatch_rows,
+            1
+        );
         assert_eq!(snapshot.ledger_coverage.fee_currency_unknown_rows, 1);
+    }
+
+    #[tokio::test]
+    async fn portfolio_interval_cursor_pages_same_millisecond_rows_without_gaps() {
+        let path = std::env::temp_dir().join(format!(
+            "pm-portfolio-interval-page-{}-{}.sqlite",
+            std::process::id(),
+            now_ms().unwrap_or_default(),
+        ));
+        let mut store = test_store();
+        store.path = path.clone();
+        let store = Arc::new(store);
+        let mut ledger = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("page-epoch".to_owned()),
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+        ledger.topups.push(AccountTopup {
+            amount: 25.0,
+            timestamp: 900,
+        });
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+
+        let Json(first) = get_portfolio_evidence_intervals(
+            State(store.clone()),
+            Query(PortfolioEvidenceIntervalsQuery {
+                after_ms: None,
+                after_cursor: None,
+                limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["truncated"], true);
+        let first_id = first["intervals"][0]["evidence_id"].as_str().unwrap();
+        let cursor = first["next_cursor"].as_i64().unwrap();
+
+        let Json(second) = get_portfolio_evidence_intervals(
+            State(store),
+            Query(PortfolioEvidenceIntervalsQuery {
+                after_ms: None,
+                after_cursor: Some(cursor),
+                limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second["truncated"], false);
+        assert_ne!(second["intervals"][0]["evidence_id"], first_id);
+        assert_eq!(second["intervals"][0]["interval_end_utc_ms"], 1_000);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }

@@ -640,6 +640,10 @@ struct OrderResponse {
     average_execution_price: Option<f64>,
     order: Option<RestingOrder>,
     barrier_order: Option<BarrierOrder>,
+    /// Authoritative fill rows from the durable ledger, including versioned
+    /// fill ID and fee-currency provenance. Empty for legacy/unattributed calls.
+    #[serde(default)]
+    fill_evidence: Vec<PositionTrade>,
     #[serde(default)]
     processing_timings_ms: BTreeMap<String, f64>,
 }

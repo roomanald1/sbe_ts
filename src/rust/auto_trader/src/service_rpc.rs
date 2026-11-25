@@ -195,6 +195,14 @@ fn rpc_client_pool() -> &'static StdMutex<RpcClientPool> {
     CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
+pub fn clear_rpc_client_pool_for_tests() {
+    rpc_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
 async fn pooled_client(endpoint: &str) -> anyhow::Result<Arc<Client>> {
     if let Some(client) = rpc_client_pool()
         .lock()

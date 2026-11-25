@@ -1,5 +1,6 @@
 struct ActivityPositionSnapshot {
     orders: Vec<TraderOrder>,
+    lifecycle_links: BTreeMap<String, serde_json::Value>,
     auto_positions: Vec<(String, TraderPosition)>,
     strategy_positions: Vec<OpenStrategyPosition>,
     open_position_symbols: Vec<String>,
@@ -34,6 +35,7 @@ fn external_close_order_for_trade<'a>(
 
 fn build_closed_ledger_rows(
     orders: &[TraderOrder],
+    lifecycle_links: &BTreeMap<String, serde_json::Value>,
     open_positions: &[OpenStrategyPosition],
     carry_positions: &[DatedCarryPosition],
     body: &serde_json::Value,
@@ -235,11 +237,37 @@ fn build_closed_ledger_rows(
         };
         let manually_closed =
             manual_close_groups.contains(&(strategy.clone(), decision_id.clone(), symbol.clone()));
+        // Provenance comes only from the persisted entry order and its durable
+        // lifecycle link. Legacy rows intentionally retain unknown values.
+        let entry_order = orders.iter().find(|order| {
+            order.decision_id.as_deref() == Some(decision_id.as_str())
+                && order.symbol == symbol
+                && matches!(order.purpose.as_str(), "signal" | "scout")
+        });
+        let lifecycle = lifecycle_links.get(&decision_id);
+        let worker_identity = entry_order
+            .and_then(|order| order.revalidation_snapshot.as_ref())
+            .filter(|snapshot| snapshot.event_identity_version.is_some());
+        let provenance = serde_json::json!({
+            "exploratory": entry_order.map(|order| order.exploratory),
+            "purpose": entry_order.map(|order| order.purpose.as_str()),
+            "opportunityId": lifecycle.and_then(|identity| identity["opportunity_id"].as_str()),
+            "episodeId": lifecycle.and_then(|identity| identity["episode_id"].as_str()),
+            "tradeId": lifecycle.and_then(|identity| identity["trade_id"].as_str()),
+            "profileId": lifecycle.and_then(|identity| identity["profile_id"].as_str()),
+            "profileHash": lifecycle.and_then(|identity| identity["profile_hash"].as_str()),
+            "profileVersion": lifecycle.and_then(|identity| identity["profile_version"].as_u64()),
+            "executionMode": lifecycle.and_then(|identity| identity["execution_mode"].as_str()),
+            "entryPolicy": lifecycle.and_then(|identity| identity["entry_policy"].as_str()),
+            "workerEventIdentityVersion": worker_identity.and_then(|snapshot| snapshot.event_identity_version),
+            "workerEventId": worker_identity.and_then(|snapshot| snapshot.event_id.as_deref()),
+            "workerEpisodeId": worker_identity.and_then(|snapshot| snapshot.episode_id.as_deref()),
+        });
         let key = format!("{strategy}:{decision_id}:{symbol}");
-        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"totalFees":total_fees,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":false,"source":"unknown","manuallyClosed":manually_closed,"components":{}}));
+        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"totalFees":total_fees,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":"unknown","provenance":provenance.clone(),"manuallyClosed":manually_closed,"components":{}}));
         for trade in trades {
             let trade_source = trade["source"].as_str().unwrap_or("auto");
-            rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":false,"source":"unknown","components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));
+            rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":"unknown","provenance":provenance.clone(),"components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));
         }
     }
     rows.extend(
@@ -248,7 +276,7 @@ fn build_closed_ledger_rows(
             .filter(|position| position.status.starts_with("closed"))
             .filter_map(|position| {
                 let pnl = position.net_pnl_usdt.filter(|value| value.is_finite())?;
-        let closed_at = position.closed_at_ms?;
+                let closed_at = position.closed_at_ms?;
                 Some(serde_json::json!({
                     "rowId": format!(
                         "ledger-summary:dated-futures-carry:dated-carry:{}:{}",
@@ -288,6 +316,115 @@ fn build_closed_ledger_rows(
 #[cfg(test)]
 mod closed_ledger_rows_tests {
     use super::*;
+
+    fn lineage_order(exploratory: bool, with_worker_identity: bool) -> TraderOrder {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": 100, "symbol": "LINK-USDT", "side": "buy",
+            "order_type": "Limit", "purpose": "signal", "exploratory": exploratory,
+            "strategy": "risk-adjusted-trend-portfolio", "decision_id": "decision-1",
+            "quantity": 1.0, "filled_quantity": 1.0, "status": "filled", "realized_pnl": 0.0,
+            "execution_order_id": "entry-order",
+            "revalidation_snapshot": if with_worker_identity { serde_json::json!({
+                "symbol":"LINK-USDT", "strategy":"risk-adjusted-trend-portfolio", "direction":"LONG",
+                "signal_timestamp_ms":99, "profile_id":"profile-a", "profile_version":3,
+                "parameter_hash":"hash-a", "event_identity_version":1,
+                "event_id":"event-7", "episode_id":"episode-2"
+            }) } else { serde_json::Value::Null }
+        })).unwrap()
+    }
+
+    fn closed_trades() -> serde_json::Value {
+        serde_json::json!({"trades":[
+            {"id":"fill-1", "source":"auto", "symbol":"LINK-USDT", "side":"buy", "timestamp":100,
+             "quantity":1.0, "execution_price":10.0, "fee":0.1, "fee_rate":0.01, "parent_order_id":"entry-order"},
+            {"id":"fill-2", "source":"auto", "symbol":"LINK-USDT", "side":"sell", "timestamp":120,
+             "quantity":1.0, "execution_price":11.0, "fee":0.1, "fee_rate":0.01, "parent_order_id":"exit-order"}
+        ]})
+    }
+
+    #[test]
+    fn closed_activity_rows_project_versioned_exploratory_lineage() {
+        let orders = vec![
+            lineage_order(true, true),
+            serde_json::from_value(serde_json::json!({
+                "timestamp":120,"symbol":"LINK-USDT","side":"sell","order_type":"Market",
+                "purpose":"external-close","strategy":"risk-adjusted-trend-portfolio",
+                "decision_id":"decision-1","quantity":1.0,"filled_quantity":1.0,
+                "status":"filled","realized_pnl":0.0,"execution_order_id":"exit-order"
+            }))
+            .unwrap(),
+        ];
+        let links = BTreeMap::from([(
+            "decision-1".to_owned(),
+            serde_json::json!({
+                "opportunity_id":"opportunity-1", "episode_id":"canonical-episode-1", "trade_id":"trade-1",
+                "profile_id":"profile-a", "profile_hash":"sha256:v1:abc", "profile_version":3,
+                "execution_mode":"paper", "entry_policy":"exploratory"
+            }),
+        )]);
+        let rows = build_closed_ledger_rows(&orders, &links, &[], &[], &closed_trades(), None);
+        assert_eq!(rows.len(), 3);
+        let summary = rows
+            .iter()
+            .find(|row| {
+                row["rowId"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ledger-summary:")
+            })
+            .unwrap();
+        let provenance = &summary["provenance"];
+        assert_eq!(provenance["exploratory"], true);
+        assert_eq!(provenance["purpose"], "signal");
+        assert_eq!(provenance["opportunityId"], "opportunity-1");
+        assert_eq!(provenance["tradeId"], "trade-1");
+        assert_eq!(provenance["entryPolicy"], "exploratory");
+        assert_eq!(provenance["workerEventIdentityVersion"], 1);
+        assert_eq!(provenance["workerEventId"], "event-7");
+        assert_eq!(provenance["workerEpisodeId"], "episode-2");
+        assert!(rows
+            .iter()
+            .filter(|row| row["ledgerTrade"].is_object())
+            .all(|row| row["provenance"] == *provenance));
+    }
+
+    #[test]
+    fn legacy_closed_activity_rows_keep_missing_lineage_unknown() {
+        // Legacy orders keep exploratory status from the durable order while
+        // absent lifecycle and worker identities remain unknown.
+        let orders = vec![
+            lineage_order(true, false),
+            serde_json::from_value(serde_json::json!({
+                "timestamp":120,"symbol":"LINK-USDT","side":"sell","order_type":"Market",
+                "purpose":"external-close","strategy":"risk-adjusted-trend-portfolio",
+                "decision_id":"decision-1","quantity":1.0,"filled_quantity":1.0,
+                "status":"filled","realized_pnl":0.0,"execution_order_id":"exit-order"
+            }))
+            .unwrap(),
+        ];
+        let links = BTreeMap::new();
+        let rows = build_closed_ledger_rows(&orders, &links, &[], &[], &closed_trades(), None);
+        let summary = rows
+            .iter()
+            .find(|row| {
+                row["rowId"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ledger-summary:")
+            })
+            .unwrap();
+        let provenance = &summary["provenance"];
+        assert_eq!(provenance["exploratory"], true);
+        assert_eq!(provenance["opportunityId"], serde_json::Value::Null);
+        assert_eq!(provenance["tradeId"], serde_json::Value::Null);
+        assert_eq!(provenance["executionMode"], serde_json::Value::Null);
+        assert_eq!(
+            provenance["workerEventIdentityVersion"],
+            serde_json::Value::Null
+        );
+        assert_eq!(provenance["workerEventId"], serde_json::Value::Null);
+        assert_eq!(provenance["workerEpisodeId"], serde_json::Value::Null);
+    }
 
     fn external_close_order() -> TraderOrder {
         serde_json::from_value(serde_json::json!({
@@ -538,6 +675,15 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
         .collect();
     ActivityPositionSnapshot {
         orders,
+        lifecycle_links: settings
+            .canonical_lifecycle_links
+            .iter()
+            .filter_map(|(key, identity)| {
+                serde_json::to_value(identity)
+                    .ok()
+                    .map(|value| (key.clone(), value))
+            })
+            .collect(),
         auto_positions,
         strategy_positions,
         open_position_symbols,

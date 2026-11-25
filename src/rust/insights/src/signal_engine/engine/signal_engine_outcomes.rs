@@ -326,7 +326,7 @@ impl SignalEngine {
                     signal_timestamp: pending.timestamp,
                     evaluated_timestamp: timestamp,
                     horizon_seconds: evaluation_horizon_seconds,
-                    signal_direction: pending.direction,
+                    signal_direction: pending.direction.clone(),
                     signal_score: pending.score,
                     ranging_probability: pending.ranging_probability,
                     reference_entry_price: pending.base_price,
@@ -352,6 +352,68 @@ impl SignalEngine {
                     short_time_to_positive_net_seconds: pending
                         .first_short_positive_net_timestamp
                         .map(|first| first.saturating_sub(pending.timestamp) / 1000),
+                    scout_path_evidence: pending.sample_id.as_ref().map(|_| {
+                        let path = &pending.scout_path;
+                        let source_freshness_ms = path
+                            .last_source_timestamp
+                            .filter(|source_time| *source_time <= timestamp)
+                            .map(|source_time| timestamp.saturating_sub(source_time));
+                        let starts_near_signal = path.first_source_timestamp.is_some_and(|first| {
+                            first >= pending.timestamp
+                                && first.saturating_sub(pending.timestamp) <= MAX_BOOK_AGE_MS
+                        });
+                        let endpoint_near_horizon = !pending.scout_observation_only
+                            || path.last_source_timestamp.is_some_and(|last| {
+                                let target = pending
+                                    .timestamp
+                                    .saturating_add(pending.horizon_seconds.saturating_mul(1_000));
+                                last.abs_diff(target) <= MAX_BOOK_AGE_MS
+                            });
+                        let completeness_reason = if pending.entry_quote_timestamp.is_none() {
+                            "missing_entry_quote"
+                        } else if path.sample_count == 0 {
+                            "no_book_samples"
+                        } else if !path.source_timestamps_monotonic {
+                            "non_monotonic_source_timestamps"
+                        } else if path.maximum_gap_ms > MAX_BOOK_AGE_MS {
+                            "maximum_gap_exceeded"
+                        } else if !starts_near_signal {
+                            "coverage_starts_late"
+                        } else if source_freshness_ms.is_none_or(|age| age > MAX_BOOK_AGE_MS) {
+                            "stale_at_evaluation"
+                        } else if !endpoint_near_horizon {
+                            "horizon_endpoint_missing"
+                        } else {
+                            "complete"
+                        };
+                        ScoutPathEvidence {
+                            schema_version: 1,
+                            source: "per_symbol_book_event".into(),
+                            completeness_basis: "observed_book_events_with_5s_max_gap".into(),
+                            per_symbol_freshness_guaranteed: false,
+                            observation_only: pending.scout_observation_only,
+                            direction: pending.direction.clone(),
+                            executable_side: match pending.direction.as_str() {
+                                "bullish" => "sell_bid_for_long".into(),
+                                "bearish" => "buy_ask_for_short".into(),
+                                _ => "unsupported_direction".into(),
+                            },
+                            entry_quote_timestamp: pending.entry_quote_timestamp,
+                            first_source_event_timestamp: path.first_source_timestamp,
+                            last_source_event_timestamp: path.last_source_timestamp,
+                            evaluated_timestamp: timestamp,
+                            source_freshness_ms,
+                            sample_count: path.sample_count,
+                            maximum_gap_ms: path.maximum_gap_ms,
+                            source_timestamps_monotonic: path.source_timestamps_monotonic,
+                            maximum_favorable_excursion_percent: path
+                                .maximum_favorable_excursion_percent,
+                            maximum_adverse_excursion_percent: path
+                                .maximum_adverse_excursion_percent,
+                            complete: completeness_reason == "complete",
+                            completeness_reason: completeness_reason.into(),
+                        }
+                    }),
                 };
                 let scout_id = pending.sample_id.clone();
                 if let Some(sample_id) = scout_id
@@ -433,8 +495,10 @@ mod completed_scout_id_tests {
             MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL
         );
         assert!(!engine.completed_scout_ids.contains("sample-0"));
-        assert!(engine
-            .completed_scout_ids
-            .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}")));
+        assert!(
+            engine
+                .completed_scout_ids
+                .contains(&format!("sample-{MAX_COMPLETED_SCOUT_IDS_PER_SYMBOL}"))
+        );
     }
 }

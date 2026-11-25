@@ -23,15 +23,41 @@ export type LearningScoutActivity = {
   rank_basis: string;
 };
 
+export type LearningScoutActiveAssignment = {
+  assignment_id: string;
+  strategy: string;
+  symbol: string;
+  mode: string;
+  lifecycle_status: 'assigned' | string;
+  assigned_at_ms: number;
+  elapsed_ms: number;
+  profile?: {
+    profile_id?: string;
+    version?: number;
+    parameters?: Record<string, unknown>;
+    learning_samples?: number;
+    positive_samples?: number;
+    realized_pnl?: number;
+  } | null;
+};
+
 export class LearningScoutActivityModel {
   readonly state$ = new BehaviorSubject<{
     rows: LearningScoutActivity[];
+    activeAssignments: LearningScoutActiveAssignment[];
+    activeAssignmentsAvailable: boolean;
     profiles: AutoTraderStrategyProfile[];
     loading: boolean;
     error?: string;
     profilesError?: string;
     updatedAt?: number;
-  }>({ rows: [], profiles: [], loading: false });
+  }>({
+    rows: [],
+    activeAssignments: [],
+    activeAssignmentsAvailable: false,
+    profiles: [],
+    loading: false,
+  });
 
   private timer?: ReturnType<typeof setInterval>;
   private stopped = true;
@@ -59,6 +85,8 @@ export class LearningScoutActivityModel {
 
     const current = this.state$.value;
     let rows = current.rows;
+    let activeAssignments = current.activeAssignments;
+    let activeAssignmentsAvailable = current.activeAssignmentsAvailable;
     let error: string | undefined;
     if (activityResult.status === 'rejected') {
       error =
@@ -70,8 +98,11 @@ export class LearningScoutActivityModel {
     } else {
       const payload = (await activityResult.value.json()) as {
         items?: LearningScoutActivity[];
+        active_assignments?: LearningScoutActiveAssignment[];
       };
       rows = payload.items ?? [];
+      activeAssignments = payload.active_assignments ?? [];
+      activeAssignmentsAvailable = Array.isArray(payload.active_assignments);
     }
 
     let profiles = current.profiles;
@@ -91,6 +122,8 @@ export class LearningScoutActivityModel {
     }
     this.state$.next({
       rows,
+      activeAssignments,
+      activeAssignmentsAvailable,
       profiles,
       loading: false,
       error,

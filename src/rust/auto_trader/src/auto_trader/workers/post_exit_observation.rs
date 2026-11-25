@@ -46,18 +46,39 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             crate::service_rpc::execution_get(&format!("/internal/market-mark?symbol={symbol}"))
                 .await
                 .map_err(|error| error.to_string())?;
+        let observed_at = current_time_ms();
         let book_updated_at = market["updated_at_ms"].as_u64().unwrap_or_default();
-        if book_updated_at == 0 || now.saturating_sub(book_updated_at) > 5_000 {
-            defer_post_exit_observation(state, &observation, now, "stale_market_mark").await?;
+        let freshness_contract = &market["symbol_freshness"];
+        let freshness_max_age = freshness_contract["max_age_ms"].as_u64();
+        if freshness_contract["contract_version"].as_u64() != Some(1)
+            || freshness_contract["scope"].as_str() != Some("symbol")
+            || freshness_contract["state"].as_str() != Some("fresh")
+            || freshness_max_age.is_none()
+        {
+            defer_post_exit_observation(
+                state,
+                &observation,
+                observed_at,
+                "symbol_freshness_contract_missing_or_unsupported",
+            )
+            .await?;
+            continue;
+        }
+        if book_updated_at == 0
+            || book_updated_at > observed_at
+            || observed_at.saturating_sub(book_updated_at) > freshness_max_age.unwrap_or_default()
+        {
+            defer_post_exit_observation(state, &observation, observed_at, "stale_market_mark")
+                .await?;
             continue;
         }
         let bid = market["bid"].as_f64();
         let ask = market["ask"].as_f64();
         let (Some(bid), Some(ask)) = (bid, ask) else {
-            defer_post_exit_observation(state, &observation, now, "incomplete_market_book").await?;
+            defer_post_exit_observation(state, &observation, observed_at, "incomplete_market_book")
+                .await?;
             continue;
         };
-        let observed_at = current_time_ms();
         let mark = (bid + ask) * 0.5;
         let exit_price = observation["exit_price"].as_f64().unwrap_or_default();
         if exit_price <= 0.0 || !mark.is_finite() || mark <= 0.0 {
@@ -75,8 +96,15 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let sample =
-            serde_json::json!({"timestamp": observed_at, "bid": bid, "ask": ask, "mid": mark});
+        let sample = serde_json::json!({
+            "timestamp": observed_at,
+            "bid": bid,
+            "ask": ask,
+            "mid": mark,
+            "source_updated_at_ms": book_updated_at,
+            "source_fresh": true,
+            "symbol_freshness": freshness_contract,
+        });
         if price_path
             .last()
             .is_none_or(|last| last["timestamp"].as_u64() != Some(observed_at))
@@ -131,7 +159,16 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
         let path_returns = price_path
             .iter()
             .filter_map(|sample| {
-                let price = sample["mid"].as_f64()?;
+                if sample["source_fresh"] != serde_json::Value::Bool(true)
+                    || sample["symbol_freshness"]["contract_version"] != serde_json::json!(1)
+                {
+                    return None;
+                }
+                let price = if direction > 0.0 {
+                    sample["bid"].as_f64()?
+                } else {
+                    sample["ask"].as_f64()?
+                };
                 (price.is_finite() && price > 0.0)
                     .then_some((price / exit_price - 1.0) * direction * 100.0)
             })
@@ -146,6 +183,81 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             .copied()
             .reduce(f64::min)
             .unwrap_or(post_exit_return_percent);
+        let path_timestamps = price_path
+            .iter()
+            .filter_map(|sample| sample["timestamp"].as_u64())
+            .collect::<Vec<_>>();
+        let maximum_path_gap_ms = path_timestamps
+            .windows(2)
+            .map(|window| window[1].saturating_sub(window[0]))
+            .max()
+            .unwrap_or_default();
+        let expected_first_at_ms = observation["exit_timestamp_ms"]
+            .as_u64()
+            .unwrap_or_default();
+        let expected_last_at_ms = observation["observe_at_ms"].as_u64().unwrap_or_default();
+        let max_allowed_gap_ms = POST_EXIT_SAMPLE_INTERVAL_MS.saturating_mul(2);
+        let path_coverage_complete = completed
+            && !path_returns.is_empty()
+            && path_returns.len() == price_path.len()
+            && path_timestamps.len() == price_path.len()
+            && path_timestamps.first().is_some_and(|first| {
+                *first >= expected_first_at_ms
+                    && first.saturating_sub(expected_first_at_ms) <= max_allowed_gap_ms
+            })
+            && path_timestamps.last().is_some_and(|last| {
+                *last <= observed_at
+                    && observed_at.saturating_sub(*last) <= max_allowed_gap_ms
+                    && last.saturating_add(max_allowed_gap_ms) >= expected_last_at_ms
+            })
+            && maximum_path_gap_ms <= max_allowed_gap_ms;
+        let price_path_evidence = serde_json::json!({
+            "schema_version": 1,
+            "scope": "post_exit_executable_bid_ask_relative_to_exit_fill",
+            "complete": path_coverage_complete,
+            "sample_count": price_path.len(),
+            "fresh_sample_count": path_returns.len(),
+            "maximum_observed_gap_ms": maximum_path_gap_ms,
+            "maximum_allowed_gap_ms": max_allowed_gap_ms,
+            "expected_first_sample_at_ms": expected_first_at_ms,
+            "expected_last_sample_at_ms": expected_last_at_ms,
+            "fee_adjusted": false,
+            "missing_reason": if path_coverage_complete { serde_json::Value::Null } else { serde_json::json!("path_has_missing_or_incomplete_coverage") },
+        });
+        let post_exit_observation = serde_json::json!({
+            "event_id": event_id,
+            "horizon_ms": POST_EXIT_OBSERVATION_HORIZON_MS,
+            "exit_timestamp_ms": observation["exit_timestamp_ms"],
+            "observed_at_ms": observed_at,
+            "exit_price": exit_price,
+            "side": observation["side"],
+            "entry_context": observation["entry_context"],
+            "exit_fees": observation["exit_fees"],
+            "exit_filled_quantity": observation["exit_filled_quantity"],
+            "effective_stop_loss_percent": observation["effective_stop_loss_percent"],
+            "effective_take_profit_percent": observation["effective_take_profit_percent"],
+            "pre_exit_price_path": observation["pre_exit_price_path"],
+            "mark_price": mark,
+            "bid": bid,
+            "ask": ask,
+            "exit_return_percent": observation["exit_return_percent"],
+            "post_exit_return_percent": post_exit_return_percent,
+            "missed_return_percent": post_exit_return_percent,
+            "hold_to_horizon_net_return_percent": hold_to_horizon_net_return_percent,
+            "hold_improvement_percent": hold_improvement_percent,
+            "counterfactual_exit_price": executable_hold_price,
+            "counterfactual_exit_fee_rate": taker_fee_rate,
+            "best_post_exit_return_percent": best_post_exit_return_percent,
+            "worst_post_exit_return_percent": worst_post_exit_return_percent,
+            "post_exit_mfe_percent": best_post_exit_return_percent,
+            "post_exit_mae_percent": worst_post_exit_return_percent,
+            "price_path_evidence": price_path_evidence,
+            "price_path": price_path,
+            "missed_pnl_quote": hold_improvement_percent
+                .map(|improvement| improvement / 100.0 * entry_notional),
+            "learning_context": observation["learning_context"],
+            "strategy_decision": observation["strategy_decision"]
+        });
         let payload = serde_json::json!({
             "record_schema_version": 1,
             "decision_id": observation["decision_id"],
@@ -156,37 +268,7 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             "strategy": observation["strategy"],
             "reason": observation["reason"],
             "status": "observed",
-            "post_exit_observation": {
-                "event_id": event_id,
-                "horizon_ms": POST_EXIT_OBSERVATION_HORIZON_MS,
-                "exit_timestamp_ms": observation["exit_timestamp_ms"],
-                "observed_at_ms": observed_at,
-                "exit_price": exit_price,
-                "side": observation["side"],
-                "entry_context": observation["entry_context"],
-                "exit_fees": observation["exit_fees"],
-                "exit_filled_quantity": observation["exit_filled_quantity"],
-                "effective_stop_loss_percent": observation["effective_stop_loss_percent"],
-                "effective_take_profit_percent": observation["effective_take_profit_percent"],
-                "pre_exit_price_path": observation["pre_exit_price_path"],
-                "mark_price": mark,
-                "bid": bid,
-                "ask": ask,
-                "exit_return_percent": observation["exit_return_percent"],
-                "post_exit_return_percent": post_exit_return_percent,
-                "missed_return_percent": post_exit_return_percent,
-                "hold_to_horizon_net_return_percent": hold_to_horizon_net_return_percent,
-                "hold_improvement_percent": hold_improvement_percent,
-                "counterfactual_exit_price": executable_hold_price,
-                "counterfactual_exit_fee_rate": taker_fee_rate,
-                "best_post_exit_return_percent": best_post_exit_return_percent,
-                "worst_post_exit_return_percent": worst_post_exit_return_percent,
-                "price_path": price_path,
-                "missed_pnl_quote": hold_improvement_percent
-                    .map(|improvement| improvement / 100.0 * entry_notional),
-                "learning_context": observation["learning_context"],
-                "strategy_decision": observation["strategy_decision"]
-            }
+            "post_exit_observation": post_exit_observation
         });
         queue_auto_trader_audit(state, payload.clone());
         let mut settings = state.settings.lock().await;
@@ -445,13 +527,19 @@ fn compact_exit_timing_feedback_for_delivery(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let post_exit_path = payload["price_path"].as_array().cloned().unwrap_or_default();
-    let mut pre_exit_cap = pre_exit_path.len().min(EXIT_TIMING_PRE_EXIT_PATH_MAX_POINTS);
-    let mut post_exit_cap = post_exit_path.len().min(EXIT_TIMING_POST_EXIT_PATH_MAX_POINTS);
+    let post_exit_path = payload["price_path"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut pre_exit_cap = pre_exit_path
+        .len()
+        .min(EXIT_TIMING_PRE_EXIT_PATH_MAX_POINTS);
+    let mut post_exit_cap = post_exit_path
+        .len()
+        .min(EXIT_TIMING_POST_EXIT_PATH_MAX_POINTS);
     loop {
-        payload["pre_exit_price_path"] = serde_json::Value::Array(
-            sample_exit_timing_path(&pre_exit_path, pre_exit_cap),
-        );
+        payload["pre_exit_price_path"] =
+            serde_json::Value::Array(sample_exit_timing_path(&pre_exit_path, pre_exit_cap));
         payload["price_path"] =
             serde_json::Value::Array(sample_exit_timing_path(&post_exit_path, post_exit_cap));
         let compacted = pre_exit_cap < pre_exit_path.len() || post_exit_cap < post_exit_path.len();
@@ -619,9 +707,13 @@ mod post_exit_feedback_tests {
         assert_eq!(payload["event_id"], "exit-timing:large-event");
         assert_eq!(payload["pre_exit_path_original_count"], 2_618);
         assert_eq!(payload["history_path_compacted"], true);
-        assert_eq!(payload["pre_exit_price_path"][0], event["pre_exit_price_path"][0]);
         assert_eq!(
-            payload["pre_exit_price_path"][payload["pre_exit_price_path"].as_array().unwrap().len() - 1],
+            payload["pre_exit_price_path"][0],
+            event["pre_exit_price_path"][0]
+        );
+        assert_eq!(
+            payload["pre_exit_price_path"]
+                [payload["pre_exit_price_path"].as_array().unwrap().len() - 1],
             event["pre_exit_price_path"][2_617]
         );
         assert!(payload.get("delivery_attempts").is_none());

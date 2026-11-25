@@ -16,10 +16,10 @@ async fn submit_and_record_selected_order(
         ask,
         mid,
         order_type,
-        execution_params,
+        execution_params: _execution_params,
         timestamp,
         decision_id,
-        lifecycle_identity,
+        lifecycle_identity: _lifecycle_identity,
         learning_context,
         exploration_risk_adjustment,
         horizon_take_profit_percent,
@@ -30,6 +30,8 @@ async fn submit_and_record_selected_order(
         limit_to_mid_bps,
         limit_to_crossing_quote_bps,
         expires_at,
+        persisted_request,
+        is_recovery,
     } = input;
     let state = &state;
     let signal = &signal;
@@ -37,6 +39,12 @@ async fn submit_and_record_selected_order(
     let decision_id = decision_id.as_str();
     let learning_context = learning_context.as_str();
     if !state.enabled.load(Ordering::Relaxed) {
+        if is_recovery {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Auto Trader disabled during ambiguous submission recovery; request was not replayed".to_owned(),
+            ));
+        }
         let mut settings = state.settings.lock().await;
         if let Some(order) = settings
             .orders
@@ -64,55 +72,56 @@ async fn submit_and_record_selected_order(
             "Auto Trader was disabled before order submission",
         ));
     }
-    let response = match submit_configured_order(
-        &signal.symbol,
-        side,
-        quantity,
-        notional,
-        bid,
-        ask,
-        order_type,
-        execution_params,
-        lifecycle_identity.opportunity_id.clone(),
-        false,
-        Some(&lifecycle_identity),
-    )
-    .await
-    {
+    let response = match submit_persisted_entry_request(&persisted_request).await {
         Ok(response) => response,
         Err(error) => {
             let mut settings = state.settings.lock().await;
+            let mut terminal_rejection_applied = false;
             if let Some(order) = settings
                 .orders
                 .iter_mut()
-                .find(|order| order.timestamp == timestamp)
+                .find(|order| order.timestamp == timestamp && order.status == "submitting")
             {
-                order.status = "failed".into();
-                order.failure_reason = Some(error.1.clone());
+                match error.disposition {
+                    SubmissionFailureDisposition::DefinitiveRejection => {
+                        order.status = "failed".into();
+                        order.failure_reason =
+                            Some(format!("position_manager_rejected: {}", error.reason));
+                        terminal_rejection_applied = true;
+                    }
+                    SubmissionFailureDisposition::RetryableAmbiguity => {
+                        // The transport or PM failure may follow a durable PM
+                        // commit. Keep the exact reservation for same-key replay.
+                        order.status = "submitting".into();
+                        order.failure_reason =
+                            Some(format!("submission_pending_recovery: {}", error.reason));
+                    }
+                }
             }
-            if let Some(order) = settings
-                .orders
-                .iter()
-                .find(|order| order.timestamp == timestamp)
-                .cloned()
-            {
-                let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
-                record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
+            settings.used_notional_today = allocated_notional(&settings);
+            if terminal_rejection_applied {
+                if let Some(order) = settings
+                    .orders
+                    .iter()
+                    .find(|order| order.timestamp == timestamp)
+                    .cloned()
+                {
+                    let Settings {
+                        execution_feedback_outbox,
+                        execution_learning_order_ids,
+                        ..
+                    } = &mut *settings;
+                    record_execution_order_quality(
+                        execution_feedback_outbox,
+                        execution_learning_order_ids,
+                        &order,
+                    );
+                }
             }
             request_settings_persist(state)?;
-            if let Some(strategy) = signal.strategy.as_deref() {
-                queue_strategy_rejection_audit(
-                    state,
-                    signal,
-                    strategy,
-                    &format!("Asynchronous order submission failed: {}", error.1),
-                    timestamp,
-                    counterfactual_stop_loss_percent,
-                    counterfactual_take_profit_percent,
-                    "async_submission",
-                );
-            }
-            return Err(error);
+            drop(settings);
+            persist_settings_snapshot_durable(state).await?;
+            return Err((error.status, error.reason));
         }
     };
     let submit_response_ms = response
@@ -127,6 +136,25 @@ async fn submit_and_record_selected_order(
     let response_apply_started = Instant::now();
     let cycle_guard = acquire_cycle_lock(state, "signal").await;
     let mut settings = state.settings.lock().await;
+    if !settings
+        .orders
+        .iter()
+        .any(|order| order.timestamp == timestamp && order.status == "submitting")
+    {
+        drop(settings);
+        drop(cycle_guard);
+        return Ok(CycleResult {
+            status: "submission_already_applied",
+            reason: Some("A concurrent response handler already applied this reservation".into()),
+            symbol: Some(signal.symbol.clone()),
+            side: Some(side.to_owned()),
+            quantity: Some(quantity),
+            order_type: Some(format!("{order_type:?}")),
+            order_response: Some(response),
+            filled_quantity: None,
+            entry_diagnostic: None,
+        });
+    }
     reset_daily_budget(&mut settings);
     let filled = response
         .get("filled_quantity")
@@ -183,6 +211,8 @@ async fn submit_and_record_selected_order(
             })
             .unwrap_or_default();
         if let Some(price) = average_price {
+            let lifecycle_identity_for_position =
+                settings.canonical_lifecycle_links.get(decision_id).cloned();
             let Settings {
                 strategy_positions,
                 positions,
@@ -206,9 +236,27 @@ async fn submit_and_record_selected_order(
                 Some(effective_stop_loss_percent),
                 Some(effective_take_profit_percent),
             );
+            if let Some(position) = positions.get_mut(&signal.symbol).filter(|position| {
+                position.quantity.abs() > 1e-12 && position.quantity.signum() == incoming_sign
+            }) {
+                append_entry_fill_evidence(position, &response);
+                position.lifecycle_identity = lifecycle_identity_for_position.clone();
+            }
+            if let Some(position) = strategy_positions
+                .get_mut(&signal.symbol)
+                .and_then(|lots| lots.get_mut(strategy_key))
+                .filter(|position| {
+                    position.quantity.abs() > 1e-12 && position.quantity.signum() == incoming_sign
+                })
+            {
+                append_entry_fill_evidence(position, &response);
+                position.lifecycle_identity = lifecycle_identity_for_position;
+            }
             if exploratory {
-                if let Some(position) = strategy_positions.get_mut(&signal.symbol)
-                    .and_then(|lots| lots.get_mut(signal.strategy.as_deref().unwrap_or("unattributed")))
+                if let Some(position) =
+                    strategy_positions.get_mut(&signal.symbol).and_then(|lots| {
+                        lots.get_mut(signal.strategy.as_deref().unwrap_or("unattributed"))
+                    })
                 {
                     position.exploratory = true;
                 }
@@ -227,6 +275,37 @@ async fn submit_and_record_selected_order(
                 && incoming_sign != position.quantity.signum()
                 && filled + 1e-12 >= position.quantity.abs()
         }) {
+            let replay_context = average_price.and_then(|exit_price| {
+                let trade_key = prior.trade_id.as_deref()?;
+                let context = build_trade_replay_context(
+                    &signal.symbol,
+                    prior.entry_timestamp_ms,
+                    current_time_ms(),
+                    if prior.quantity > 0.0 {
+                        "long"
+                    } else {
+                        "short"
+                    },
+                    prior.average_entry_price,
+                    exit_price,
+                    prior.quantity.abs(),
+                    prior.total_entry_fees_paid.max(prior.entry_fees),
+                    fee,
+                    entry_walk_forward_evidence(prior.strategy_decision.as_ref()),
+                )?;
+                let lifecycle_identity = settings
+                    .canonical_lifecycle_links
+                    .get(trade_key)
+                    .cloned()
+                    .or_else(|| prior.lifecycle_identity.clone());
+                Some(attach_authoritative_outcome_lineage(
+                    context,
+                    &prior,
+                    &response,
+                    lifecycle_identity.as_ref(),
+                    trade_key,
+                ))
+            });
             let total_trade_pnl = prior.realized_pnl + strategy_realized_delta;
             let entry_notional = if prior.initial_entry_notional > 0.0 {
                 prior.initial_entry_notional
@@ -238,22 +317,10 @@ async fn submit_and_record_selected_order(
                 prior.entry_context,
                 prior.scout_entry,
                 total_trade_pnl,
-                (entry_notional > 0.0)
-                    .then_some(total_trade_pnl / entry_notional * 100.0),
+                (entry_notional > 0.0).then_some(total_trade_pnl / entry_notional * 100.0),
                 prior.strategy_decision.clone(),
                 prior.trade_id,
-                average_price.and_then(|exit_price| build_trade_replay_context(
-                    &signal.symbol,
-                    prior.entry_timestamp_ms,
-                    current_time_ms(),
-                    if prior.quantity > 0.0 { "long" } else { "short" },
-                    prior.average_entry_price,
-                    exit_price,
-                    prior.quantity.abs(),
-                    prior.total_entry_fees_paid.max(prior.entry_fees),
-                    fee,
-                    entry_walk_forward_evidence(prior.strategy_decision.as_ref()),
-                )),
+                replay_context,
             ));
         }
         if let Some(position) = settings.positions.get_mut(&signal.symbol) {
@@ -279,7 +346,17 @@ async fn submit_and_record_selected_order(
     settings.realized_pnl += realized_delta_usd;
     settings.daily_realized_pnl += realized_delta_usd;
     let mut trade_feedback_enqueued = false;
-    if let Some((strategy, learning_context, scout_entry, total_pnl, net_return_percent, decision, trade_id, replay_context)) = completed_strategy_trade {
+    if let Some((
+        strategy,
+        learning_context,
+        scout_entry,
+        total_pnl,
+        net_return_percent,
+        decision,
+        trade_id,
+        replay_context,
+    )) = completed_strategy_trade
+    {
         let total_pnl_usd = realized_usd(&settings, &signal.symbol, total_pnl);
         trade_feedback_enqueued = record_strategy_trade_outcome(
             &mut settings,
@@ -348,8 +425,16 @@ async fn submit_and_record_selected_order(
         .find(|order| order.timestamp == timestamp)
         .cloned()
     {
-        let Settings { execution_feedback_outbox, execution_learning_order_ids, .. } = &mut *settings;
-        record_execution_order_quality(execution_feedback_outbox, execution_learning_order_ids, &order);
+        let Settings {
+            execution_feedback_outbox,
+            execution_learning_order_ids,
+            ..
+        } = &mut *settings;
+        record_execution_order_quality(
+            execution_feedback_outbox,
+            execution_learning_order_ids,
+            &order,
+        );
     }
     // Keep realized trade calibration separate from Scout walk-forward
     // evidence so a selected strict entry can be evaluated against both.
@@ -357,20 +442,28 @@ async fn submit_and_record_selected_order(
         settings
             .learned_profiles
             .get(&format!("{}:{strategy}", signal.symbol))
-            .map(|profile| serde_json::json!({
-                "samples": profile.learning_samples,
-                "positive": profile.positive_samples,
-                "realized_pnl": profile.realized_pnl,
-            }))
+            .map(|profile| {
+                serde_json::json!({
+                    "samples": profile.learning_samples,
+                    "positive": profile.positive_samples,
+                    "realized_pnl": profile.realized_pnl,
+                })
+            })
     });
     request_settings_persist(state)?;
     drop(settings);
-    if trade_feedback_enqueued {
-        if let Err(error) = persist_settings_snapshot_durable(state).await {
-            crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
-        }
-    }
+    // The response is applied under the Settings mutex. Its pre-submit durable
+    // intent remains until the coalescing full-state writer commits this fill
+    // and any outcome outbox; a crash before that snapshot replays the exact
+    // PM request with the same idempotent client order ID. Feedback delivery
+    // independently waits for a durable full snapshot.
     drop(cycle_guard);
+    if trade_feedback_enqueued {
+        crate::service_log!(
+            "INFO",
+            "Recovered or live entry feedback outcome awaits the durable settings snapshot before delivery"
+        );
+    }
     let mut audit_payload = signal_audit_payload(
         signal,
         "entry",
@@ -388,8 +481,7 @@ async fn submit_and_record_selected_order(
         "weighted_net_return_percent": exploration_risk_adjustment.weighted_net_return_percent,
         "regime_scoped": exploration_risk_adjustment.regime_scoped,
     });
-    audit_payload["realized_trade_calibration"] =
-        serde_json::json!(realized_trade_calibration);
+    audit_payload["realized_trade_calibration"] = serde_json::json!(realized_trade_calibration);
     audit_payload["effective_stop_loss_percent"] = serde_json::json!(effective_stop_loss_percent);
     audit_payload["effective_take_profit_percent"] =
         serde_json::json!(effective_take_profit_percent);
@@ -420,9 +512,11 @@ async fn submit_and_record_selected_order(
     audit_payload["fill_rate"] = serde_json::json!((filled / quantity).clamp(0.0, 1.0));
     audit_payload["implementation_shortfall_bps"] = serde_json::json!(implementation_shortfall_bps);
     audit_payload["fee_bps"] = serde_json::json!(fee_bps);
-    audit_payload["all_in_cost_bps"] = serde_json::json!(implementation_shortfall_bps
-        .zip(fee_bps)
-        .map(|(shortfall, fees)| shortfall + fees));
+    audit_payload["all_in_cost_bps"] = serde_json::json!(
+        implementation_shortfall_bps
+            .zip(fee_bps)
+            .map(|(shortfall, fees)| shortfall + fees)
+    );
     audit_payload["volatility_size_scale"] = serde_json::json!(volatility_size_scale(
         counterfactual_stop_loss_percent,
         effective_stop_loss_percent,
@@ -447,8 +541,11 @@ async fn submit_and_record_selected_order(
         (side == "buy" && assessment.depth_imbalance_10bps < 0.0)
             || (side == "sell" && assessment.depth_imbalance_10bps > 0.0)
     });
-    let shadow_microstructure_size_scale =
-        if spread_bps > 3.0 || opposed_depth { 0.5 } else { 1.0 };
+    let shadow_microstructure_size_scale = if spread_bps > 3.0 || opposed_depth {
+        0.5
+    } else {
+        1.0
+    };
     audit_payload["shadow_microstructure_size_scale"] =
         serde_json::json!(shadow_microstructure_size_scale);
     audit_payload["shadow_microstructure_notional"] =
@@ -496,4 +593,149 @@ async fn submit_and_record_selected_order(
         filled_quantity: Some(filled),
         entry_diagnostic: None,
     })
+}
+
+/// Submit the already persisted body byte-for-byte at the same path. The two
+/// supported AutoTrader entry endpoints resolve `client_order_id` before
+/// matching/starting a run, so repeating this request returns the original
+/// result rather than creating a second fill.
+async fn submit_persisted_entry_request(
+    request: &PersistedEntryRequest,
+) -> Result<serde_json::Value, PersistedEntrySubmissionError> {
+    if !persisted_entry_request_is_replayable(request) {
+        return Err(PersistedEntrySubmissionError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            reason: "Stored entry request is unsupported or incomplete; refusing replay".to_owned(),
+            disposition: SubmissionFailureDisposition::DefinitiveRejection,
+        });
+    }
+    let prepare_started = Instant::now();
+    let request_body = request.body.clone();
+    let request_prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
+    let started = Instant::now();
+    let response =
+        crate::service_rpc::position_request(&request.method, &request.path, Some(request_body))
+            .await
+            .map_err(|error| transport_submission_error(error.to_string()))?;
+    let response_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut payload = response.body;
+    if !payload.is_object() {
+        payload = serde_json::json!({"error": payload.to_string()});
+    }
+    payload["client_request_prepare_local_ms"] = serde_json::json!(request_prepare_ms);
+    payload["client_response_headers_ms"] = serde_json::json!(response_ms);
+    payload["client_body_read_ms"] = serde_json::json!(0.0);
+    add_order_submission_timing_metadata(&mut payload, request_prepare_ms, response_ms);
+    if let Some(handler_ms) = response
+        .headers
+        .get("x-position-manager-handler-ms")
+        .and_then(|value| value.parse::<f64>().ok())
+    {
+        payload["position_manager_handler_ms"] = serde_json::json!(handler_ms);
+    }
+    if !status.is_success() {
+        return Err(PersistedEntrySubmissionError {
+            status,
+            reason: format!(
+                "Position Management rejected persisted entry replay ({status}): {}",
+                payload
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no error detail")
+            ),
+            disposition: classify_pm_response_failure(status),
+        });
+    }
+    Ok(payload)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionFailureDisposition {
+    DefinitiveRejection,
+    RetryableAmbiguity,
+}
+
+#[derive(Debug)]
+struct PersistedEntrySubmissionError {
+    status: StatusCode,
+    reason: String,
+    disposition: SubmissionFailureDisposition,
+}
+
+fn classify_pm_response_failure(status: StatusCode) -> SubmissionFailureDisposition {
+    if status.is_client_error() {
+        SubmissionFailureDisposition::DefinitiveRejection
+    } else {
+        SubmissionFailureDisposition::RetryableAmbiguity
+    }
+}
+
+fn transport_submission_error(reason: String) -> PersistedEntrySubmissionError {
+    PersistedEntrySubmissionError {
+        status: StatusCode::BAD_GATEWAY,
+        reason,
+        disposition: SubmissionFailureDisposition::RetryableAmbiguity,
+    }
+}
+
+#[cfg(test)]
+mod persisted_entry_failure_classification_tests {
+    use super::{
+        SubmissionFailureDisposition, classify_pm_response_failure, transport_submission_error,
+    };
+    use axum::http::StatusCode;
+
+    #[test]
+    fn definitive_pm_client_rejection_is_terminal() {
+        assert_eq!(
+            classify_pm_response_failure(StatusCode::UNPROCESSABLE_ENTITY),
+            SubmissionFailureDisposition::DefinitiveRejection
+        );
+        assert_eq!(
+            classify_pm_response_failure(StatusCode::BAD_REQUEST),
+            SubmissionFailureDisposition::DefinitiveRejection
+        );
+    }
+
+    #[test]
+    fn transport_and_server_failures_remain_retryable_ambiguities() {
+        assert_eq!(
+            transport_submission_error("RSocket timed out".to_owned()).disposition,
+            SubmissionFailureDisposition::RetryableAmbiguity
+        );
+        assert_eq!(
+            classify_pm_response_failure(StatusCode::SERVICE_UNAVAILABLE),
+            SubmissionFailureDisposition::RetryableAmbiguity
+        );
+        assert_eq!(
+            classify_pm_response_failure(StatusCode::GATEWAY_TIMEOUT),
+            SubmissionFailureDisposition::RetryableAmbiguity
+        );
+    }
+}
+
+fn persisted_entry_request_is_replayable(request: &PersistedEntryRequest) -> bool {
+    request.schema_version == 1
+        && request.method == "POST"
+        && matches!(
+            request.path.as_str(),
+            "/positions/orders" | "/positions/vwap"
+        )
+        && request
+            .body
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            == Some("auto")
+        && request
+            .body
+            .get("client_order_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        && request
+            .body
+            .get("lifecycle")
+            .and_then(|value| value.get("schema_version"))
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
 }

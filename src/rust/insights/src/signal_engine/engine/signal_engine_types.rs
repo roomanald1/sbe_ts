@@ -25,6 +25,7 @@ struct PendingOutcome {
     score: f64,
     ranging_probability: Option<f64>,
     entry_quote_timestamp: Option<u64>,
+    scout_path: ScoutPathAccumulator,
     taker_fee_rate: f64,
     first_long_positive_net_timestamp: Option<u64>,
     first_short_positive_net_timestamp: Option<u64>,
@@ -44,6 +45,17 @@ struct PendingOutcome {
     profit_protection_peak_return_percent: Option<f64>,
     strategy_active_seen: bool,
     strategy_exit_requested: bool,
+}
+
+#[derive(Clone, Default)]
+struct ScoutPathAccumulator {
+    sample_count: u64,
+    first_source_timestamp: Option<u64>,
+    last_source_timestamp: Option<u64>,
+    maximum_gap_ms: u64,
+    source_timestamps_monotonic: bool,
+    maximum_favorable_excursion_percent: Option<f64>,
+    maximum_adverse_excursion_percent: Option<f64>,
 }
 #[derive(Default)]
 struct PerformanceTotals {

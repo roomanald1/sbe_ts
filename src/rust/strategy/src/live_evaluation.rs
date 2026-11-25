@@ -57,17 +57,19 @@ pub const STRATEGY_INSIGHT_UPDATE_VERSION: u16 = 1;
 pub const LIVE_STRATEGY_EVENT_ID_VERSION: u16 = 1;
 
 /// Deterministic identity assigned to one upstream strategy insight update.
-/// The upstream source key is retained verbatim after a versioned namespace so
-/// retries and worker restarts produce the same identity.
+/// Event identity follows the source update; episode identity follows the
+/// strategy thesis and intentionally excludes event timestamp/payload.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct LiveStrategyEventIdentity {
     pub schema_version: u16,
     pub event_id: String,
-    /// Current feed contract has no continuity/episode key. Each distinct
-    /// source update is therefore its own atomic episode; a reset must arrive
-    /// as a distinct source event key. This does not infer continuity between
-    /// snapshots.
+    /// Stable across market updates while the canonical thesis is unchanged.
+    /// If upstream state provides no authoritative reset, the same thesis
+    /// conservatively reuses this ID, including after worker restarts.
     pub episode_id: String,
+    /// Durable AutoTrader reset token for a completed, fully filled stop.
+    /// Zero preserves the original v1 thesis hash byte-for-byte.
+    pub episode_reset_generation: u64,
 }
 
 impl LiveStrategyEventIdentity {
@@ -78,12 +80,95 @@ impl LiveStrategyEventIdentity {
         );
         Self {
             schema_version: LIVE_STRATEGY_EVENT_ID_VERSION,
-            event_id: key.clone(),
+            event_id: key,
+            // Source-only consumers (daily and carry) have no authoritative
+            // thesis/reset state. Keep their episode best-effort and stable
+            // for retries without pretending a reset occurred.
             episode_id: format!(
-                "strategy-episode:v{}:{source_event_id}",
+                "strategy-episode:v{}:source:{source_event_id}",
                 LIVE_STRATEGY_EVENT_ID_VERSION
             ),
+            episode_reset_generation: 0,
         }
+    }
+
+    /// Build a deterministic episode identity from durable thesis dimensions.
+    /// Source event changes never alter the episode ID. A new event ID still
+    /// results for every distinct source key. Missing reset evidence therefore
+    /// conservatively reuses the ID for an identical thesis.
+    pub fn for_thesis(
+        source_event_id: &str,
+        strategy: crate::Strategy,
+        symbol: &str,
+        profile_id: &str,
+        direction: &str,
+        active_market_state_key: Option<&str>,
+    ) -> Self {
+        Self::for_thesis_with_reset_generation(
+            source_event_id,
+            strategy,
+            symbol,
+            profile_id,
+            direction,
+            active_market_state_key,
+            0,
+        )
+    }
+
+    /// Versioned episode continuity with an optional authoritative reset
+    /// token. Reset generation zero retains the v1 encoding exactly; a
+    /// completed stop advances the token durably in AutoTrader and causes a
+    /// new episode even when all thesis and market-state dimensions match.
+    pub fn for_thesis_with_reset_generation(
+        source_event_id: &str,
+        strategy: crate::Strategy,
+        symbol: &str,
+        profile_id: &str,
+        direction: &str,
+        active_market_state_key: Option<&str>,
+        episode_reset_generation: u64,
+    ) -> Self {
+        use sha2::{Digest, Sha256};
+
+        let mut identity = Self::from_source_event_id(source_event_id);
+        let canonical_thesis = if episode_reset_generation == 0 {
+            // Preserve deployed v1 episode IDs when no authoritative reset
+            // has occurred; source event changes still do not affect them.
+            serde_json::to_vec(&(
+                "strategy-thesis",
+                LIVE_STRATEGY_EVENT_ID_VERSION,
+                strategy.as_str(),
+                symbol,
+                profile_id,
+                direction,
+                active_market_state_key,
+            ))
+        } else {
+            serde_json::to_vec(&(
+                "strategy-thesis",
+                LIVE_STRATEGY_EVENT_ID_VERSION,
+                strategy.as_str(),
+                symbol,
+                profile_id,
+                direction,
+                active_market_state_key,
+                "completed-stop-reset",
+                episode_reset_generation,
+            ))
+        }
+        .expect("serializing thesis dimensions cannot fail");
+        let digest = Sha256::digest(canonical_thesis);
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        identity.episode_id = format!(
+            "strategy-episode:v{}:sha256:{hex}",
+            LIVE_STRATEGY_EVENT_ID_VERSION
+        );
+        identity.episode_reset_generation = episode_reset_generation;
+        identity
     }
 }
 
@@ -138,6 +223,27 @@ pub struct LiveStrategyProfileSet {
     pub profiles: Vec<LiveStrategyProfile>,
     #[serde(default)]
     pub open_positions: Vec<LiveStrategyOpenPosition>,
+    /// Persisted reset generations for a thesis after a fully filled closing
+    /// stop. Missing entries are legacy generation zero.
+    #[serde(default)]
+    pub episode_reset_generations: Vec<LiveStrategyEpisodeResetGeneration>,
+}
+
+impl LiveStrategyProfileSet {
+    pub fn episode_reset_generation(&self, symbol: &str, profile_id: &str) -> u64 {
+        self.episode_reset_generations
+            .iter()
+            .find(|reset| reset.symbol == symbol && reset.profile_id == profile_id)
+            .map(|reset| reset.generation)
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveStrategyEpisodeResetGeneration {
+    pub symbol: String,
+    pub profile_id: String,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -156,8 +262,8 @@ pub struct LiveStrategyDecisionReport {
     /// legacy reports, where consumers should treat identity as unversioned.
     #[serde(default)]
     pub event_identity_version: u16,
-    /// One source update is one atomic episode until Insights supplies a
-    /// durable continuity/reset identity.
+    /// Stable identity for the unchanged trading thesis; source events can
+    /// advance while this episode continues.
     #[serde(default)]
     pub episode_id: String,
     pub strategy: Strategy,
@@ -375,6 +481,7 @@ mod socket_contract_tests {
             enabled: true,
             profiles: Vec::new(),
             open_positions: Vec::new(),
+            episode_reset_generations: Vec::new(),
         };
         let profile_request = LiveStrategySocketRequest::UpdateProfiles(profile_set);
         let profile_wire = serde_json::to_value(&profile_request).unwrap();
@@ -421,15 +528,158 @@ mod socket_contract_tests {
     }
 
     #[test]
-    fn worker_event_identity_is_versioned_deterministic_and_starts_a_new_episode_per_source_key() {
+    fn source_identity_is_versioned_deterministic_and_thesis_identity_ignores_source_key() {
         let retry = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:123");
         let replay = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:123");
-        let reset = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:124");
+        let thesis_a = LiveStrategyEventIdentity::for_thesis(
+            "BTC-USDT:123",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+        );
+        let thesis_b = LiveStrategyEventIdentity::for_thesis(
+            "BTC-USDT:124",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+        );
 
         assert_eq!(retry, replay);
         assert_eq!(retry.schema_version, LIVE_STRATEGY_EVENT_ID_VERSION);
         assert!(retry.event_id.starts_with("strategy-insight:v1:"));
-        assert_ne!(retry.episode_id, reset.episode_id);
-        assert!(retry.episode_id.starts_with("strategy-episode:v1:"));
+        assert_ne!(thesis_a.event_id, thesis_b.event_id);
+        assert_eq!(thesis_a.episode_id, thesis_b.episode_id);
+        assert!(
+            thesis_a
+                .episode_id
+                .starts_with("strategy-episode:v1:sha256:")
+        );
+    }
+
+    #[test]
+    fn thesis_identity_resets_on_supported_thesis_dimensions_only() {
+        let baseline = || {
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveMomentum,
+                "BTC-USDT",
+                "profile-a",
+                "bullish",
+                Some("v2:trend_up:normal"),
+            )
+        };
+        let base = baseline();
+        let variants = [
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveTradeFlow,
+                "BTC-USDT",
+                "profile-a",
+                "bullish",
+                Some("v2:trend_up:normal"),
+            ),
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveMomentum,
+                "ETH-USDT",
+                "profile-a",
+                "bullish",
+                Some("v2:trend_up:normal"),
+            ),
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveMomentum,
+                "BTC-USDT",
+                "profile-b",
+                "bullish",
+                Some("v2:trend_up:normal"),
+            ),
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveMomentum,
+                "BTC-USDT",
+                "profile-a",
+                "bearish",
+                Some("v2:trend_up:normal"),
+            ),
+            LiveStrategyEventIdentity::for_thesis(
+                "event-1",
+                crate::Strategy::LiveMomentum,
+                "BTC-USDT",
+                "profile-a",
+                "bullish",
+                Some("v2:range:normal"),
+            ),
+        ];
+        assert!(
+            variants
+                .iter()
+                .all(|variant| variant.episode_id != base.episode_id)
+        );
+        let no_state_a = LiveStrategyEventIdentity::for_thesis(
+            "event-1",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            None,
+        );
+        let no_state_b = LiveStrategyEventIdentity::for_thesis(
+            "event-2",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            None,
+        );
+        assert_eq!(no_state_a.episode_id, no_state_b.episode_id);
+    }
+
+    #[test]
+    fn completed_stop_reset_generation_changes_episode_but_not_event_identity() {
+        let baseline = LiveStrategyEventIdentity::for_thesis(
+            "event-1",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+        );
+        let explicit_zero = LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+            "event-1",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+            0,
+        );
+        let reset_one = LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+            "event-1",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+            1,
+        );
+        let reset_one_after_update = LiveStrategyEventIdentity::for_thesis_with_reset_generation(
+            "event-2",
+            crate::Strategy::LiveMomentum,
+            "BTC-USDT",
+            "profile-a",
+            "bullish",
+            Some("v2:trend_up:normal"),
+            1,
+        );
+        assert_eq!(baseline.episode_id, explicit_zero.episode_id);
+        assert_ne!(baseline.episode_id, reset_one.episode_id);
+        assert_eq!(reset_one.episode_id, reset_one_after_update.episode_id);
+        assert_ne!(reset_one.event_id, reset_one_after_update.event_id);
+        assert_eq!(reset_one.episode_reset_generation, 1);
     }
 }

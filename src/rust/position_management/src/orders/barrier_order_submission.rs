@@ -178,7 +178,10 @@ async fn submit_barrier_order(
             })?;
     } else if let Err(error) = store.persist(&ledger).await {
         ledger.barrier_orders.pop();
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Unable to persist barrier order: {error}")));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to persist barrier order: {error}"),
+        ));
     }
     return Ok(Json(OrderResponse {
         estimated_fee: 0.0,
@@ -189,6 +192,7 @@ async fn submit_barrier_order(
         average_execution_price: None,
         order: None,
         barrier_order: Some(barrier_order),
+        fill_evidence: Vec::new(),
         processing_timings_ms: BTreeMap::new(),
     }));
 }

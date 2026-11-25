@@ -6,7 +6,10 @@ fn tag_position_strategy(
     let Some(strategy) = strategy.filter(|strategy| *strategy != "generic-insight-signals") else {
         return;
     };
-    if let Some(position) = positions.get_mut(symbol).filter(|position| position.quantity.abs() > 1e-12) {
+    if let Some(position) = positions
+        .get_mut(symbol)
+        .filter(|position| position.quantity.abs() > 1e-12)
+    {
         position.strategy = Some(strategy.to_owned());
     }
 }
@@ -30,6 +33,146 @@ fn strategy_from_entry_context(context: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
+fn append_entry_fill_evidence(position: &mut TraderPosition, response: &serde_json::Value) {
+    let fills = response
+        .get("fill_evidence")
+        .and_then(serde_json::Value::as_array);
+    let Some(fills) = fills.filter(|fills| !fills.is_empty()) else {
+        position.entry_fill_costs_complete = false;
+        return;
+    };
+    if response
+        .get("fee_complete")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        position.entry_fill_costs_complete = false;
+    }
+    for fill in fills {
+        if let Some(fill_id) = fill
+            .get("fill_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|fill_id| !fill_id.trim().is_empty())
+        {
+            if !position
+                .entry_fill_ids
+                .iter()
+                .any(|existing| existing == fill_id)
+            {
+                position.entry_fill_ids.push(fill_id.to_owned());
+            }
+        } else {
+            position.entry_fill_costs_complete = false;
+        }
+        if fill.get("fee_known").and_then(serde_json::Value::as_bool) != Some(true) {
+            position.entry_fill_costs_complete = false;
+        }
+        if let Some(currency) = fill
+            .get("fee_currency")
+            .and_then(serde_json::Value::as_str)
+            .filter(|currency| !currency.trim().is_empty())
+        {
+            if !position
+                .entry_fee_currencies
+                .iter()
+                .any(|existing| existing == currency)
+            {
+                position.entry_fee_currencies.push(currency.to_owned());
+            }
+        } else {
+            position.entry_fill_costs_complete = false;
+        }
+    }
+}
+
+fn attach_authoritative_outcome_lineage(
+    mut context: strategy::TradeReplayContext,
+    position: &TraderPosition,
+    response: &serde_json::Value,
+    identity: Option<&CanonicalLifecycleIdentity>,
+    outcome_key: &str,
+) -> strategy::TradeReplayContext {
+    let Some(identity) = identity else {
+        return context;
+    };
+    let exit_fills = response
+        .get("fill_evidence")
+        .and_then(serde_json::Value::as_array);
+    let mut exit_fill_ids = Vec::new();
+    let mut currencies = position
+        .entry_fee_currencies
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut fees_complete = position.entry_fill_costs_complete
+        && !position.entry_fill_ids.is_empty()
+        && response
+            .get("fee_complete")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if let Some(fills) = exit_fills {
+        if fills.is_empty() {
+            fees_complete = false;
+        }
+        for fill in fills {
+            if let Some(fill_id) = fill
+                .get("fill_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|fill_id| !fill_id.trim().is_empty())
+            {
+                exit_fill_ids.push(fill_id.to_owned());
+            } else {
+                fees_complete = false;
+            }
+            if fill.get("fee_known").and_then(serde_json::Value::as_bool) != Some(true) {
+                fees_complete = false;
+            }
+            if let Some(currency) = fill
+                .get("fee_currency")
+                .and_then(serde_json::Value::as_str)
+                .filter(|currency| !currency.trim().is_empty())
+            {
+                currencies.insert(currency.to_owned());
+            } else {
+                fees_complete = false;
+            }
+        }
+    } else {
+        fees_complete = false;
+    }
+    let fee_currency = (currencies.len() == 1).then(|| currencies.into_iter().next().unwrap());
+    fees_complete &= fee_currency.is_some();
+    let source_event_id = position
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("live_worker_event_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    context.lineage = Some(strategy::TradeOutcomeLineage {
+        outcome_event_id: format!("trade:{outcome_key}"),
+        source_event_id,
+        episode_id: Some(identity.episode_id.clone()),
+        opportunity_id: Some(identity.opportunity_id.clone()),
+        trade_id: Some(identity.trade_id.clone()),
+        profile_hash: identity.profile_hash.clone(),
+        profile_version: identity.profile_version,
+        execution_mode: Some(identity.execution_mode.clone()),
+        entry_policy: Some(identity.entry_policy.clone()),
+        source: Some(identity.source.clone()),
+        entry_fill_ids: position.entry_fill_ids.clone(),
+        exit_fill_ids,
+        fee_currency,
+        fees_complete,
+        evidence_gain_correlation: position
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("evidence_gain_correlation_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    });
+    context
+}
+
 fn apply_auto_fill(
     positions: &mut BTreeMap<String, TraderPosition>,
     symbol: &str,
@@ -47,10 +190,25 @@ fn apply_auto_fill(
     let incoming = if side == "buy" { quantity } else { -quantity };
     if old == 0.0 || old.signum() == incoming.signum() {
         if position.entry_order_types.is_empty() && !position.entry_order_type.is_empty() {
-            position.entry_order_types.push(position.entry_order_type.split(" · ").next().unwrap_or(&position.entry_order_type).to_owned());
+            position.entry_order_types.push(
+                position
+                    .entry_order_type
+                    .split(" · ")
+                    .next()
+                    .unwrap_or(&position.entry_order_type)
+                    .to_owned(),
+            );
         }
-        let entry_kind = order_type.split(" · ").next().unwrap_or(order_type).to_owned();
-        if !position.entry_order_types.iter().any(|kind| kind == &entry_kind) {
+        let entry_kind = order_type
+            .split(" · ")
+            .next()
+            .unwrap_or(order_type)
+            .to_owned();
+        if !position
+            .entry_order_types
+            .iter()
+            .any(|kind| kind == &entry_kind)
+        {
             position.entry_order_types.push(entry_kind);
         }
         // A changed entry basis starts a fresh profit-protection trail.
@@ -62,9 +220,15 @@ fn apply_auto_fill(
             position.entries = 1;
             position.entry_timestamp_ms = current_time_ms();
             position.price_path.clear();
+            position.price_path_total_samples = 0;
+            position.price_path_truncated = false;
+            position.price_path_restart_interrupted = false;
             position.initial_entry_notional = incoming.abs() * price;
             position.total_fees_paid = fee;
             position.total_entry_fees_paid = fee;
+            position.entry_fill_ids.clear();
+            position.entry_fee_currencies.clear();
+            position.entry_fill_costs_complete = true;
         } else {
             if position.initial_entry_notional <= 0.0 {
                 position.initial_entry_notional = old.abs() * position.average_entry_price;
@@ -133,12 +297,19 @@ fn apply_auto_fill(
         position.total_fees_paid = fee - closing_fee;
         position.total_entry_fees_paid = fee - closing_fee;
         position.entry_order_type = order_type.to_owned();
-        position.entry_order_types = vec![order_type.split(" · ").next().unwrap_or(order_type).to_owned()];
+        position.entry_order_types = vec![order_type
+            .split(" · ")
+            .next()
+            .unwrap_or(order_type)
+            .to_owned()];
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
         position.entries = 1;
         position.horizon_take_profit_percent = horizon_take_profit_percent;
         position.take_profit_deferred_at_ms = None;
+        position.entry_fill_ids.clear();
+        position.entry_fee_currencies.clear();
+        position.entry_fill_costs_complete = true;
     } else {
         position.quantity = net;
         position.entry_fees -= entry_fee_closed;
@@ -166,12 +337,23 @@ fn apply_strategy_position_fill(
     take_profit_percent: Option<f64>,
 ) -> (f64, Option<String>) {
     let mut one_position = BTreeMap::new();
-    if let Some(position) = strategy_positions.get(symbol).and_then(|lots| lots.get(strategy)) {
+    if let Some(position) = strategy_positions
+        .get(symbol)
+        .and_then(|lots| lots.get(strategy))
+    {
         one_position.insert(strategy.to_owned(), position.clone());
     }
     let result = apply_auto_fill(
-        &mut one_position, strategy, side, quantity, price, fee, order_type,
-        context, count_entry, horizon_take_profit_percent,
+        &mut one_position,
+        strategy,
+        side,
+        quantity,
+        price,
+        fee,
+        order_type,
+        context,
+        count_entry,
+        horizon_take_profit_percent,
     );
     let updated = one_position.remove(strategy).unwrap_or_default();
     let active = updated.quantity.abs() > 1e-12;
@@ -190,22 +372,36 @@ fn apply_strategy_position_fill(
         if updated.strategy_decision.is_none() {
             updated.strategy_decision = strategy_decision.cloned();
         }
-        if updated.stop_loss_percent.is_none() { updated.stop_loss_percent = stop_loss_percent; }
-        if updated.take_profit_percent.is_none() { updated.take_profit_percent = take_profit_percent; }
+        if updated.stop_loss_percent.is_none() {
+            updated.stop_loss_percent = stop_loss_percent;
+        }
+        if updated.take_profit_percent.is_none() {
+            updated.take_profit_percent = take_profit_percent;
+        }
         lots.insert(strategy.to_owned(), updated);
     } else {
         lots.remove(strategy);
     }
     let category_key = strategy_category_key(strategy_category(Some(strategy))).to_owned();
-    let category_entries = lots.iter()
-        .filter(|(name, _)| strategy_category(Some(name.as_str())) == strategy_category(Some(strategy)))
+    let category_entries = lots
+        .iter()
+        .filter(|(name, _)| {
+            strategy_category(Some(name.as_str())) == strategy_category(Some(strategy))
+        })
         .map(|(_, position)| position.entries)
         .sum::<u32>();
     if let Some(aggregate) = aggregate_positions.get_mut(symbol) {
-        if category_entries > 0 { aggregate.entries_by_category.insert(category_key, category_entries); }
-        else { aggregate.entries_by_category.remove(&category_key); }
+        if category_entries > 0 {
+            aggregate
+                .entries_by_category
+                .insert(category_key, category_entries);
+        } else {
+            aggregate.entries_by_category.remove(&category_key);
+        }
     }
-    if lots.is_empty() { strategy_positions.remove(symbol); }
+    if lots.is_empty() {
+        strategy_positions.remove(symbol);
+    }
     result
 }
 
@@ -265,15 +461,15 @@ fn next_unique_order_timestamp(now: u64) -> u64 {
 }
 
 fn record_strategy_order_realized_pnl(order: &mut TraderOrder, realized_delta: f64) {
-    order.strategy_realized_pnl = Some(order.strategy_realized_pnl.unwrap_or_default() + realized_delta);
+    order.strategy_realized_pnl =
+        Some(order.strategy_realized_pnl.unwrap_or_default() + realized_delta);
     let today = utc_day();
     if order.strategy_realized_pnl_day.as_deref() != Some(today.as_str()) {
         order.strategy_realized_pnl_day = Some(today);
         order.strategy_realized_pnl_today = Some(0.0);
     }
-    order.strategy_realized_pnl_today = Some(
-        order.strategy_realized_pnl_today.unwrap_or_default() + realized_delta,
-    );
+    order.strategy_realized_pnl_today =
+        Some(order.strategy_realized_pnl_today.unwrap_or_default() + realized_delta);
 }
 
 fn effective_audit_entry_threshold(
@@ -308,7 +504,11 @@ fn signal_audit_payload(
     let mut audited_components = serde_json::to_value(&signal.components).unwrap_or_default();
     if let (Some(component_values), Some(parameters)) = (
         audited_components.as_object_mut(),
-        signal.strategy_decision.as_ref().and_then(|decision| decision.get("strategy_parameters")).and_then(serde_json::Value::as_object),
+        signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .and_then(serde_json::Value::as_object),
     ) {
         for key in [
             StrategyParameterKey::MinimumMomentum,
@@ -317,15 +517,11 @@ fn signal_audit_payload(
             StrategyParameterKey::MinimumVwapDislocationBps,
             StrategyParameterKey::MinimumAbsorptionPressure,
         ] {
-            if let Some(value) = effective_audit_entry_threshold(
-                parameters,
-                key,
-                signal.market_regime.as_deref(),
-            ) {
-                component_values.insert(
-                    format!("{}_floor", key.as_str()),
-                    serde_json::json!(value),
-                );
+            if let Some(value) =
+                effective_audit_entry_threshold(parameters, key, signal.market_regime.as_deref())
+            {
+                component_values
+                    .insert(format!("{}_floor", key.as_str()), serde_json::json!(value));
             }
         }
     }
@@ -376,9 +572,7 @@ fn signal_audit_payload(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
     }
-    if stage == "entry"
-        || (stage == "decision" && matches!(status, "selected" | "scouted"))
-    {
+    if stage == "entry" || (stage == "decision" && matches!(status, "selected" | "scouted")) {
         payload["trade_id"] = serde_json::json!(decision_id);
     }
     payload
@@ -501,7 +695,10 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
         .get("stage")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|stage| {
-            stage == "entry" || stage == "entry_fill" || stage == "dated_carry_entry" || stage.starts_with("exit")
+            stage == "entry"
+                || stage == "entry_fill"
+                || stage == "dated_carry_entry"
+                || stage.starts_with("exit")
         });
     let queue = if is_execution {
         &state.execution_audit_tx
@@ -520,7 +717,10 @@ fn queue_auto_trader_audit(state: &AutoTraderState, payload: serde_json::Value) 
             let bit = if is_execution { 2 } else { 1 };
             state.audit_health.fetch_and(!bit, Ordering::Relaxed);
             if !state.audit_failure_latched.swap(true, Ordering::Relaxed) {
-                crate::service_log!("ERROR", "Auto-trader audit queue reached capacity; an audit event was dropped and new signal entries are paused until restart");
+                crate::service_log!(
+                    "ERROR",
+                    "Auto-trader audit queue reached capacity; an audit event was dropped and new signal entries are paused until restart"
+                );
             }
         }
     }
@@ -531,10 +731,16 @@ async fn store_auto_trader_audit(payload: &serde_json::Value) -> bool {
         "POST",
         "/signals/auto-trader-audit",
         Some(payload.clone()),
-    ).await {
+    )
+    .await
+    {
         Ok(response) if (200..300).contains(&response.status) => true,
         Ok(response) => {
-            crate::service_log!("ERROR", "Auto-trader audit write failed with status {}", response.status);
+            crate::service_log!(
+                "ERROR",
+                "Auto-trader audit write failed with status {}",
+                response.status
+            );
             false
         }
         Err(error) => {
@@ -552,7 +758,10 @@ async fn store_execution_audit_until_saved(
     let mut retry_delay = Duration::from_secs(1);
     while !store_auto_trader_audit(payload).await {
         if audit_health.fetch_and(!healthy_bit, Ordering::Relaxed) & healthy_bit != 0 {
-            crate::service_log!("ERROR", "Auto-trader audit persistence unavailable; new signal entries are paused while queued events retry");
+            crate::service_log!(
+                "ERROR",
+                "Auto-trader audit persistence unavailable; new signal entries are paused while queued events retry"
+            );
         }
         tokio::time::sleep(retry_delay).await;
         retry_delay = (retry_delay * 2).min(Duration::from_secs(30));
@@ -578,9 +787,22 @@ mod strategy_lot_pnl_tests {
             "learned_exit_protection_policy": { "as_of_ms": 1234 }
         });
         apply_strategy_position_fill(
-            &mut lots, &mut aggregate, "BTC-USDT", "live-momentum", "buy", 1.0,
-            100.0, 0.0, "Limit", "live-momentum:strict", true, None,
-            Some("entry-1"), Some(&captured), Some(0.5), Some(0.8),
+            &mut lots,
+            &mut aggregate,
+            "BTC-USDT",
+            "live-momentum",
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "Limit",
+            "live-momentum:strict",
+            true,
+            None,
+            Some("entry-1"),
+            Some(&captured),
+            Some(0.5),
+            Some(0.8),
         );
         let refreshed = serde_json::json!({
             "strategy_parameters": { "profit_protection_activation_percent": 0.50 },
@@ -588,9 +810,22 @@ mod strategy_lot_pnl_tests {
             "learning_profile_version": 18
         });
         apply_strategy_position_fill(
-            &mut lots, &mut aggregate, "BTC-USDT", "live-momentum", "buy", 0.5,
-            101.0, 0.0, "Limit", "live-momentum:strict", true, None,
-            Some("entry-2"), Some(&refreshed), Some(0.7), Some(1.2),
+            &mut lots,
+            &mut aggregate,
+            "BTC-USDT",
+            "live-momentum",
+            "buy",
+            0.5,
+            101.0,
+            0.0,
+            "Limit",
+            "live-momentum:strict",
+            true,
+            None,
+            Some("entry-2"),
+            Some(&refreshed),
+            Some(0.7),
+            Some(1.2),
         );
         let position = &lots["BTC-USDT"]["live-momentum"];
         assert_eq!(position.strategy_decision.as_ref(), Some(&captured));
@@ -602,14 +837,30 @@ mod strategy_lot_pnl_tests {
     fn real_fill_turns_scout_only_aggregate_into_real_position() {
         let mut positions = BTreeMap::new();
         apply_auto_fill(
-            &mut positions, "ETH-USDT", "buy", 1.0, 100.0, 0.0,
-            "Limit", "scout:scout", true, None,
+            &mut positions,
+            "ETH-USDT",
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "Limit",
+            "scout:scout",
+            true,
+            None,
         );
         assert!(positions["ETH-USDT"].scout_entry);
 
         apply_auto_fill(
-            &mut positions, "ETH-USDT", "buy", 1.0, 101.0, 0.0,
-            "Limit", "live-momentum:strict", true, None,
+            &mut positions,
+            "ETH-USDT",
+            "buy",
+            1.0,
+            101.0,
+            0.0,
+            "Limit",
+            "live-momentum:strict",
+            true,
+            None,
         );
         assert!(!positions["ETH-USDT"].scout_entry);
     }
@@ -639,8 +890,22 @@ mod strategy_lot_pnl_tests {
             )]),
         )]);
         let (lot_pnl, _) = apply_strategy_position_fill(
-            &mut lots, &mut aggregate, symbol, strategy, "sell", 1.0, 101.0,
-            0.1, "Ioc", "take-profit", false, None, None, None, None, None,
+            &mut lots,
+            &mut aggregate,
+            symbol,
+            strategy,
+            "sell",
+            1.0,
+            101.0,
+            0.1,
+            "Ioc",
+            "take-profit",
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!((lot_pnl - 0.8).abs() < 1e-12);
         assert!(!lots.contains_key(symbol));

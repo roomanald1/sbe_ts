@@ -1,3 +1,148 @@
+const TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS: u64 = 5_000;
+const TRADE_PRICE_PATH_MAX_GAP_MS: u64 = 10_000;
+
+fn price_path_excursion_evidence(
+    position: &TraderPosition,
+    exit_observed_at_ms: u64,
+) -> serde_json::Value {
+    price_path_excursion_evidence_for_samples(
+        &position.price_path,
+        position.price_path_total_samples,
+        position.price_path_truncated,
+        position.price_path_restart_interrupted,
+        position.average_entry_price,
+        position.quantity,
+        position.entry_timestamp_ms,
+        exit_observed_at_ms,
+    )
+}
+
+fn price_path_excursion_evidence_for_samples(
+    price_path: &[TradePriceSample],
+    total_sample_count: u64,
+    path_truncated: bool,
+    restart_interrupted: bool,
+    entry_price: f64,
+    signed_quantity: f64,
+    entry_timestamp_ms: u64,
+    exit_observed_at_ms: u64,
+) -> serde_json::Value {
+    let is_long = signed_quantity > 0.0;
+    let mut excursions = Vec::with_capacity(price_path.len());
+    let mut missing = Vec::new();
+    if entry_timestamp_ms == 0 {
+        missing.push("entry_timestamp_unknown");
+    }
+    if price_path.is_empty() {
+        missing.push("price_path_empty");
+    }
+    if path_truncated {
+        missing.push("price_path_retention_truncated");
+    }
+    if restart_interrupted {
+        missing.push("price_path_restart_interrupted");
+    }
+    if total_sample_count > price_path.len() as u64 {
+        missing.push("price_path_has_unretained_samples");
+    }
+    let mut maximum_gap_ms = 0_u64;
+    let mut freshness_unknown_samples = 0_usize;
+    let mut stale_samples = 0_usize;
+    let mut invalid_quote_samples = 0_usize;
+    let mut non_monotonic = false;
+
+    for (index, sample) in price_path.iter().enumerate() {
+        if index > 0 {
+            let previous = &price_path[index - 1];
+            if sample.timestamp <= previous.timestamp {
+                non_monotonic = true;
+            } else {
+                maximum_gap_ms = maximum_gap_ms.max(sample.timestamp - previous.timestamp);
+            }
+        }
+        if sample.source_fresh != Some(true)
+            || sample.freshness_contract_version != Some(1)
+            || sample.freshness_max_age_ms.is_none()
+            || sample.source_updated_at_ms.is_none()
+        {
+            if sample.source_fresh == Some(false) {
+                stale_samples += 1;
+            } else {
+                freshness_unknown_samples += 1;
+            }
+            continue;
+        }
+        let executable_price = if is_long { sample.bid } else { sample.ask };
+        if !executable_price.is_finite() || executable_price <= 0.0 || entry_price <= 0.0 {
+            invalid_quote_samples += 1;
+            continue;
+        }
+        let signed_return_percent = if is_long {
+            (executable_price / entry_price - 1.0) * 100.0
+        } else {
+            (entry_price / executable_price - 1.0) * 100.0
+        };
+        if signed_return_percent.is_finite() {
+            excursions.push(signed_return_percent);
+        } else {
+            invalid_quote_samples += 1;
+        }
+    }
+
+    if non_monotonic {
+        missing.push("price_path_timestamps_not_monotonic");
+    }
+    if maximum_gap_ms > TRADE_PRICE_PATH_MAX_GAP_MS {
+        missing.push("price_path_gap_exceeds_bound");
+    }
+    if stale_samples > 0 {
+        missing.push("stale_source_marks");
+    }
+    if freshness_unknown_samples > 0 {
+        missing.push("source_freshness_unknown");
+    }
+    if invalid_quote_samples > 0 {
+        missing.push("invalid_executable_quotes");
+    }
+
+    let first_timestamp = price_path.first().map(|sample| sample.timestamp);
+    let last_timestamp = price_path.last().map(|sample| sample.timestamp);
+    if first_timestamp.is_some_and(|first| {
+        first < entry_timestamp_ms
+            || first.saturating_sub(entry_timestamp_ms) > TRADE_PRICE_PATH_MAX_GAP_MS
+    }) {
+        missing.push("entry_to_first_sample_gap_exceeds_bound");
+    }
+    if last_timestamp.is_some_and(|last| {
+        last > exit_observed_at_ms
+            || exit_observed_at_ms.saturating_sub(last) > TRADE_PRICE_PATH_MAX_GAP_MS
+    }) {
+        missing.push("last_sample_to_exit_gap_exceeds_bound");
+    }
+
+    let mfe = excursions.iter().copied().reduce(f64::max);
+    let mae = excursions.iter().copied().reduce(f64::min);
+    serde_json::json!({
+        "schema_version": 1,
+        "sampling_interval_ms": TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS,
+        "maximum_allowed_gap_ms": TRADE_PRICE_PATH_MAX_GAP_MS,
+        "retained_sample_count": price_path.len(),
+        "total_sample_count": total_sample_count.max(price_path.len() as u64),
+        "source_fresh_sample_count": excursions.len(),
+        "source_stale_sample_count": stale_samples,
+        "source_freshness_unknown_sample_count": freshness_unknown_samples,
+        "invalid_quote_sample_count": invalid_quote_samples,
+        "maximum_observed_gap_ms": maximum_gap_ms,
+        "first_sample_at_ms": first_timestamp,
+        "last_sample_at_ms": last_timestamp,
+        "gross_executable_mfe_percent": mfe,
+        "gross_executable_mae_percent": mae,
+        "fee_adjusted_mfe_mae_status": "not_computed_without_path_level_execution_costs",
+        "complete": missing.is_empty(),
+        "missing_coverage": missing,
+    })
+}
+
 fn position_exit_audit_payload(
     decision_id: &str,
     observed_at: u64,
@@ -55,9 +200,22 @@ fn position_exit_audit_payload(
         "effective_stop_loss_percent": stop_loss_percent,
         "effective_take_profit_percent": take_profit_percent,
     });
-    payload["price_path"] = serde_json::json!(position.price_path.iter().map(|sample| {
-        serde_json::json!({ "timestamp": sample.timestamp, "bid": sample.bid, "ask": sample.ask })
-    }).collect::<Vec<_>>());
+    payload["price_path"] = serde_json::json!(position
+        .price_path
+        .iter()
+        .map(|sample| {
+            serde_json::json!({
+                "timestamp": sample.timestamp,
+                "bid": sample.bid,
+                "ask": sample.ask,
+                "source_updated_at_ms": sample.source_updated_at_ms,
+                "freshness_contract_version": sample.freshness_contract_version,
+                "freshness_max_age_ms": sample.freshness_max_age_ms,
+                "source_fresh": sample.source_fresh,
+            })
+        })
+        .collect::<Vec<_>>());
+    payload["price_path_evidence"] = price_path_excursion_evidence(position, observed_at);
     payload["entry_context"] = serde_json::json!({
         "trade_id": position.trade_id.as_deref().unwrap_or(decision_id),
         "strategy_decision": position.strategy_decision,
@@ -70,6 +228,10 @@ fn position_exit_audit_payload(
         "timestamp_ms": position.entry_timestamp_ms,
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
         "quantity": position.quantity.abs(),
+        "entry_fill_ids": position.entry_fill_ids,
+        "entry_fee_currencies": position.entry_fee_currencies,
+        "entry_fill_costs_complete": position.entry_fill_costs_complete,
+        "lifecycle_identity": position.lifecycle_identity,
     });
     payload["exit_decision_context"] = exit_decision_context.clone();
     payload["exit_rule_trace"] = serde_json::json!({
@@ -99,7 +261,6 @@ fn position_exit_audit_payload(
             .and_then(|decision| decision.get("learned_exit_protection_policy")),
     });
     payload
-
 }
 
 fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Value) {
@@ -107,18 +268,31 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
     if !matches!(
         reason,
         "take-profit" | "stop-loss" | "profit-protection" | "thesis-failure"
-    )
-        || payload["trade_closed"].as_bool() != Some(true)
+    ) || payload["trade_closed"].as_bool() != Some(true)
     {
         return;
     }
-    let Some(exit_price) = payload["exit_average_price"].as_f64().filter(|value| *value > 0.0) else {
+    let Some(exit_price) = payload["exit_average_price"]
+        .as_f64()
+        .filter(|value| *value > 0.0)
+    else {
         return;
     };
-    let direction = if payload["side"].as_str() == Some("sell") { 1.0 } else { -1.0 };
+    let direction = if payload["side"].as_str() == Some("sell") {
+        1.0
+    } else {
+        -1.0
+    };
     let now = current_time_ms();
-    let event_id = format!("exit-timing:{}", payload["trade_id"].as_str().unwrap_or_default());
-    if settings.post_exit_observations.iter().any(|item| item["event_id"] == event_id) {
+    let event_id = format!(
+        "exit-timing:{}",
+        payload["trade_id"].as_str().unwrap_or_default()
+    );
+    if settings
+        .post_exit_observations
+        .iter()
+        .any(|item| item["event_id"] == event_id)
+    {
         return;
     }
     settings.post_exit_observations.push(serde_json::json!({
@@ -137,6 +311,7 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
         "effective_stop_loss_percent": payload["effective_stop_loss_percent"],
         "effective_take_profit_percent": payload["effective_take_profit_percent"],
         "pre_exit_price_path": payload["price_path"],
+        "pre_exit_price_path_evidence": payload["price_path_evidence"],
         "exit_timestamp_ms": now,
         "observe_at_ms": now.saturating_add(POST_EXIT_OBSERVATION_HORIZON_MS),
         "next_sample_at_ms": now,
@@ -157,7 +332,6 @@ fn exit_fill_status(filled: f64, quantity: f64) -> &'static str {
     }
 }
 
-
 fn new_position_exit_order(
     timestamp: u64,
     symbol: &str,
@@ -172,7 +346,8 @@ fn new_position_exit_order(
         triggered_at: None,
         symbol: symbol.to_owned(),
         side: side.to_owned(),
-        order_type: if position.exploratory && matches!(reason, "take-profit" | "profit-protection") {
+        order_type: if position.exploratory && matches!(reason, "take-profit" | "profit-protection")
+        {
             "PostOnlyLimit · exit".into()
         } else {
             "Ioc".into()
@@ -223,7 +398,6 @@ fn new_position_exit_order(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,13 +410,36 @@ mod tests {
             entry_fees: 0.2,
             entry_timestamp_ms: 1_000,
             strategy_decision: Some(serde_json::json!({"strategy": "test"})),
-            price_path: vec![TradePriceSample { timestamp: 1_500, bid: 101.0, ask: 102.0 }],
+            price_path: vec![TradePriceSample {
+                timestamp: 1_500,
+                bid: 101.0,
+                ask: 102.0,
+                ..TradePriceSample::default()
+            }],
             ..TraderPosition::default()
         };
         let payload = position_exit_audit_payload(
-            "decision-1", 2_000, 1_800, "BTC-USDT", "take-profit", "sell",
-            "PostOnlyLimit", &serde_json::json!({"ok": true}), &position, 2.0, 2.0, Some(110.0),
-            0.1, 19.7, 200.0, 0.0985, 109.0, 111.0, 2.0, 5.0, 10.0,
+            "decision-1",
+            2_000,
+            1_800,
+            "BTC-USDT",
+            "take-profit",
+            "sell",
+            "PostOnlyLimit",
+            &serde_json::json!({"ok": true}),
+            &position,
+            2.0,
+            2.0,
+            Some(110.0),
+            0.1,
+            19.7,
+            200.0,
+            0.0985,
+            109.0,
+            111.0,
+            2.0,
+            5.0,
+            10.0,
             &serde_json::json!({"signal_active": true}),
         );
 
@@ -259,15 +456,107 @@ mod tests {
     #[test]
     fn position_exit_audit_handles_zero_quantity_metrics() {
         let payload = position_exit_audit_payload(
-            "decision-2", 2, 1, "ETH-USDT", "stop-loss", "buy",
-            "Ioc", &serde_json::Value::Null, &TraderPosition::default(), 0.0, 0.0,
-            None, 0.0, 0.0, 0.0, 0.0, 99.0, 101.0, 0.0, 5.0, 10.0,
+            "decision-2",
+            2,
+            1,
+            "ETH-USDT",
+            "stop-loss",
+            "buy",
+            "Ioc",
+            &serde_json::Value::Null,
+            &TraderPosition::default(),
+            0.0,
+            0.0,
+            None,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            99.0,
+            101.0,
+            0.0,
+            5.0,
+            10.0,
             &serde_json::Value::Null,
         );
         assert_eq!(payload["status"], "filled");
         assert_eq!(payload["fill_rate"], serde_json::Value::Null);
         assert_eq!(payload["net_return_percent"], serde_json::Value::Null);
         assert_eq!(payload["fee_bps"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn executable_mfe_mae_uses_side_prices_and_marks_missing_coverage() {
+        let fresh_sample = |timestamp, bid, ask| TradePriceSample {
+            timestamp,
+            bid,
+            ask,
+            source_updated_at_ms: Some(timestamp.saturating_sub(100)),
+            freshness_contract_version: Some(1),
+            freshness_max_age_ms: Some(5_000),
+            source_fresh: Some(true),
+        };
+        let long = TraderPosition {
+            quantity: 1.0,
+            average_entry_price: 100.0,
+            entry_timestamp_ms: 10_000,
+            price_path: vec![
+                fresh_sample(10_000, 101.0, 102.0),
+                fresh_sample(15_000, 98.0, 99.0),
+                fresh_sample(20_000, 103.0, 104.0),
+            ],
+            price_path_total_samples: 3,
+            ..TraderPosition::default()
+        };
+        let evidence = price_path_excursion_evidence(&long, 25_000);
+        assert_eq!(evidence["complete"], true);
+        assert!((evidence["gross_executable_mfe_percent"].as_f64().unwrap() - 3.0).abs() < 1e-12);
+        assert!((evidence["gross_executable_mae_percent"].as_f64().unwrap() + 2.0).abs() < 1e-12);
+        assert_eq!(
+            evidence["fee_adjusted_mfe_mae_status"],
+            "not_computed_without_path_level_execution_costs"
+        );
+
+        let mut short = TraderPosition {
+            quantity: -1.0,
+            average_entry_price: 100.0,
+            entry_timestamp_ms: 10_000,
+            price_path: vec![
+                fresh_sample(10_000, 98.0, 99.0),
+                fresh_sample(15_000, 101.0, 102.0),
+                fresh_sample(20_000, 96.0, 97.0),
+            ],
+            price_path_total_samples: 3,
+            ..TraderPosition::default()
+        };
+        let short_evidence = price_path_excursion_evidence(&short, 25_000);
+        assert_eq!(short_evidence["complete"], true);
+        assert!(
+            (short_evidence["gross_executable_mfe_percent"]
+                .as_f64()
+                .unwrap()
+                - ((100.0 / 97.0 - 1.0) * 100.0))
+                .abs()
+                < 1e-12
+        );
+        assert!(
+            (short_evidence["gross_executable_mae_percent"]
+                .as_f64()
+                .unwrap()
+                - ((100.0 / 102.0 - 1.0) * 100.0))
+                .abs()
+                < 1e-12
+        );
+
+        short.price_path[1].source_fresh = Some(false);
+        let incomplete = price_path_excursion_evidence(&short, 25_000);
+        assert_eq!(incomplete["complete"], false);
+        assert_eq!(incomplete["source_stale_sample_count"], 1);
+        assert!(incomplete["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "stale_source_marks"));
     }
 
     #[test]
@@ -298,7 +587,10 @@ mod tests {
         queue_post_exit_observation(&mut settings, &payload);
 
         assert_eq!(settings.post_exit_observations.len(), 1);
-        assert_eq!(settings.post_exit_observations[0]["reason"], "thesis-failure");
+        assert_eq!(
+            settings.post_exit_observations[0]["reason"],
+            "thesis-failure"
+        );
         let observation = &settings.post_exit_observations[0];
         assert_eq!(observation["entry_context"]["average_price"], 100.0);
         assert_eq!(observation["entry_context"]["fees"], 0.1);

@@ -27,4 +27,6 @@ struct SelectedOrderExecution {
     limit_to_mid_bps: Option<f64>,
     limit_to_crossing_quote_bps: Option<f64>,
     expires_at: Option<u64>,
+    persisted_request: PersistedEntryRequest,
+    is_recovery: bool,
 }

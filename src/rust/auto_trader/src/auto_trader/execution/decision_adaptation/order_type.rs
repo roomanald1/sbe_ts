@@ -293,6 +293,33 @@ mod order_type_selection_behavior_tests {
     }
 
     #[test]
+    fn unknown_or_non_finite_book_impact_cannot_improve_selected_order_type() {
+        let signal = signal();
+        let baseline = AutoOrderType::PostOnlyLimit;
+        let learned = AutoOrderType::Vwap;
+        let invalid_books = [
+            None,
+            Some(DeepBookAssessment {
+                available_within_band: 100.0,
+                notional_cap: 100.0,
+                impact_bps: f64::INFINITY,
+                bid_depth_10bps: 100.0,
+                ask_depth_10bps: 100.0,
+                depth_imbalance_10bps: 0.0,
+            }),
+        ];
+
+        for book in invalid_books {
+            assert_eq!(
+                score_execution_order_type(
+                    &signal, 50.0, 10.0, baseline, learned, book, DEFAULT_SCHEDULE_DEPTH_RATIO,
+                ),
+                baseline,
+            );
+        }
+    }
+
+    #[test]
     fn exploration_assignment_is_stable_and_only_uses_parameterized_order_types() {
         let mut candidate = signal();
         assert!(!should_explore_execution_profile(&candidate, AutoOrderType::Ioc));

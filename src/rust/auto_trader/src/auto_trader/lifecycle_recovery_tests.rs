@@ -65,7 +65,12 @@ impl RSocket for LifecycleResponder {
             let response = router.oneshot(request).await?;
             let status = response.status().as_u16();
             let body = response.into_body().collect().await?.to_bytes();
-            let body = serde_json::from_slice(&body)?;
+            // Preserve non-JSON router errors as strings so lifecycle tests
+            // report the actual HTTP status/reason instead of a transport
+            // decode failure.
+            let body = serde_json::from_slice(&body).unwrap_or_else(|_| {
+                serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+            });
             let response = strategy::ScoutCoordinatorResponse::LearningRoute(
                 strategy::ScoutCoordinatorRouteResult {
                     request_id: command.request_id,
@@ -98,9 +103,13 @@ impl RSocket for LifecycleResponder {
             ("POST", "/internal/orders/match") => {
                 let body = request.body.unwrap_or_default();
                 let quantity = body["quantity"].as_f64().unwrap_or_default();
-                let price = body["limit_price"]
-                    .as_f64()
-                    .unwrap_or_else(|| if body["side"] == "buy" { 100.0 } else { 101.0 });
+                let price = body["limit_price"].as_f64().unwrap_or_else(|| {
+                    if body["side"] == "buy" {
+                        100.0
+                    } else {
+                        101.0
+                    }
+                });
                 (
                     200,
                     serde_json::json!({
@@ -139,20 +148,41 @@ impl RSocket for LifecycleResponder {
                         .idempotent_orders
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let response = idempotent.entry(client_order_id).or_insert_with(|| {
-                    self.accepted_order_count
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    serde_json::json!({
-                        "status": "filled",
-                        "filled_quantity": body["quantity"],
-                        "average_execution_price": if body["side"] == "buy" { 100.0 } else { 101.0 },
-                        "estimated_fee": 0.01,
-                        // A fully executed post-only request has no resting
-                        // remainder. AutoTrader treats an order object as a
-                        // live/resting order even when the fill is complete.
-                        "order": null
-                    })
-                });
+                    let response = idempotent
+                        .entry(client_order_id.clone())
+                        .or_insert_with(|| {
+                            self.accepted_order_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let execution_price = if body["side"] == "buy" { 100.0 } else { 101.0 };
+                            serde_json::json!({
+                                "status": "filled",
+                                "filled_quantity": body["quantity"],
+                                "average_execution_price": execution_price,
+                                "estimated_fee": 0.01,
+                                "fee_complete": true,
+                                "unknown_fee_fills": 0,
+                                "fill_evidence": [{
+                                    "id": format!("fixture-fill-{client_order_id}"),
+                                    "fill_id": format!("pm-fill:v1:fixture:{client_order_id}"),
+                                    "symbol": body["symbol"],
+                                    "side": body["side"],
+                                    "quantity": body["quantity"],
+                                    "execution_price": execution_price,
+                                    "timestamp": 1_700_000_000_000u64,
+                                    "source": "auto",
+                                    "parent_order_id": client_order_id,
+                                    "client_order_id": client_order_id,
+                                    "lifecycle": body["lifecycle"],
+                                    "fee": 0.01,
+                                    "fee_known": true,
+                                    "fee_currency": "USDT"
+                                }],
+                                // A fully executed post-only request has no resting
+                                // remainder. AutoTrader treats an order object as a
+                                // live/resting order even when the fill is complete.
+                                "order": null
+                            })
+                        });
                     (200, response.clone())
                 }
             }
@@ -187,6 +217,72 @@ impl RSocket for LifecycleResponder {
     }
 }
 
+#[derive(Clone)]
+struct DropFirstPositionAckProxy {
+    position_management_endpoint: String,
+    drop_next_submission_response: Arc<std::sync::atomic::AtomicBool>,
+    dropped_submission_responses: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[rsocket_rust::async_trait]
+impl RSocket for DropFirstPositionAckProxy {
+    async fn metadata_push(&self, _: Payload) -> anyhow::Result<()> {
+        anyhow::bail!("unsupported")
+    }
+
+    async fn fire_and_forget(&self, _: Payload) -> anyhow::Result<()> {
+        anyhow::bail!("unsupported")
+    }
+
+    async fn request_response(&self, payload: Payload) -> anyhow::Result<Option<Payload>> {
+        let request: crate::service_rpc::RpcRequest = serde_json::from_slice(
+            payload
+                .data()
+                .ok_or_else(|| anyhow::anyhow!("position request data missing"))?
+                .as_ref(),
+        )?;
+        let response = crate::service_rpc::position_request_at(
+            &self.position_management_endpoint,
+            &request.method,
+            &request.path,
+            request.body.clone(),
+        )
+        .await?;
+        let is_submission = request.method == "POST"
+            && matches!(
+                request.path.as_str(),
+                "/positions/orders" | "/positions/vwap"
+            );
+        if is_submission
+            && self
+                .drop_next_submission_response
+                .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.dropped_submission_responses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // PM has durably handled the request; the AutoTrader client sees
+            // the same no-payload transport ambiguity as a lost acknowledgment.
+            return Ok(None);
+        }
+        Ok(Some(
+            Payload::builder()
+                .set_data(serde_json::to_vec(&response)?)
+                .build(),
+        ))
+    }
+
+    fn request_stream(
+        &self,
+        _: Payload,
+    ) -> Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<Payload>> + Send + 'static>> {
+        Box::pin(futures_util::stream::empty())
+    }
+
+    fn request_channel(&self, _: Flux<anyhow::Result<Payload>>) -> Flux<anyhow::Result<Payload>> {
+        Box::pin(futures_util::stream::empty())
+    }
+}
+
 fn unique_path(label: &str) -> PathBuf {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     std::env::temp_dir().join(format!(
@@ -202,11 +298,38 @@ fn versioned_lifecycle_dashboard(fixture_index: usize, source_key: &str) -> Dash
         .best
         .first_mut()
         .expect("benchmark dashboard contains one selected signal");
+    let strategy_name = signal
+        .strategy
+        .as_deref()
+        .expect("benchmark signal has a registered strategy");
+    let strategy_kind = strategy::Strategy::from_name(strategy_name)
+        .expect("benchmark strategy name is registered");
+    let parameters = serde_json::from_value::<BTreeMap<String, f64>>(
+        signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("strategy_parameters"))
+            .cloned()
+            .expect("benchmark signal includes strategy parameters"),
+    )
+    .expect("benchmark strategy parameters are numeric");
+    let profile_id = strategy::profile_id(&signal.symbol, strategy_name, &parameters);
     let decision = signal
         .strategy_decision
         .get_or_insert_with(|| serde_json::json!({}));
+    decision["learning_profile_id"] = serde_json::json!(profile_id);
+    // The deterministic fixture uses the built-in version-zero profile; live
+    // workers send the same field from their authoritative profile snapshot.
+    decision["learning_profile_version"] = serde_json::json!(0);
     let source_event_id = format!("insights-event:v1:sha256:{source_key}");
-    let identity = strategy::LiveStrategyEventIdentity::from_source_event_id(&source_event_id);
+    let identity = strategy::LiveStrategyEventIdentity::for_thesis(
+        &source_event_id,
+        strategy_kind,
+        &signal.symbol,
+        &profile_id,
+        &signal.direction,
+        None,
+    );
     decision["live_worker_event_id"] = serde_json::json!(identity.event_id);
     decision["live_worker_event_identity_version"] = serde_json::json!(identity.schema_version);
     decision["live_worker_episode_id"] = serde_json::json!(identity.episode_id);
@@ -267,12 +390,14 @@ impl Drop for EndpointEnvironmentRestore {
         restore_env("POSITION_MANAGEMENT_RSOCKET_URL", self.position.take());
         restore_env("LEARNING_RSOCKET_URL", self.learning.take());
         restore_env("PAPER_EXCHANGE_RSOCKET_URL", self.paper_exchange.take());
+        crate::service_rpc::clear_rpc_client_pool_for_tests();
     }
 }
 
 #[tokio::test]
 async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     let _environment = super::service_endpoint_environment_lock();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
@@ -308,17 +433,36 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     }
 
     let fixture_index = 700_001;
-    let source_event_id = "insights-event:v1:sha256:source-700001";
-    let replay_identity =
-        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
-    let exact_retry_identity =
-        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
-    let reset_identity = strategy::LiveStrategyEventIdentity::from_source_event_id(
-        "insights-event:v1:sha256:source-700002",
-    );
+    let replay_identity = versioned_lifecycle_dashboard(fixture_index, "source-700001")
+        .best
+        .into_iter()
+        .next()
+        .unwrap()
+        .strategy_decision
+        .unwrap();
+    let exact_retry_identity = versioned_lifecycle_dashboard(fixture_index, "source-700001")
+        .best
+        .into_iter()
+        .next()
+        .unwrap()
+        .strategy_decision
+        .unwrap();
+    let next_event_same_thesis = versioned_lifecycle_dashboard(fixture_index, "source-700002")
+        .best
+        .into_iter()
+        .next()
+        .unwrap()
+        .strategy_decision
+        .unwrap();
     assert_eq!(replay_identity, exact_retry_identity);
-    assert_ne!(replay_identity.event_id, reset_identity.event_id);
-    assert_ne!(replay_identity.episode_id, reset_identity.episode_id);
+    assert_ne!(
+        replay_identity["live_worker_event_id"],
+        next_event_same_thesis["live_worker_event_id"]
+    );
+    assert_eq!(
+        replay_identity["live_worker_episode_id"],
+        next_event_same_thesis["live_worker_episode_id"]
+    );
 
     let mut state = benchmark_precomputed_ingress_state("lifecycle");
     let dashboard = versioned_lifecycle_dashboard(fixture_index, "source-700001");
@@ -420,15 +564,24 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
         duplicate.reason.as_deref(),
         Some("Exploratory source event already reserved for this profile")
     );
+    let next_event_same_thesis = run_cycle_inner(
+        &state,
+        versioned_lifecycle_dashboard(fixture_index, "source-700002"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(next_event_same_thesis.status, "skipped");
+    assert_eq!(
+        next_event_same_thesis.reason.as_deref(),
+        Some("Exploratory source event already reserved for this profile")
+    );
     {
         let settings = state.settings.lock().await;
         assert_eq!(settings.orders.len(), order_count_before_replay);
         assert_eq!(settings.exploratory_event_reservations.len(), 1);
-        assert!(
-            settings
-                .exploratory_event_reservations
-                .contains_key(&event_key)
-        );
+        assert!(settings
+            .exploratory_event_reservations
+            .contains_key(&event_key));
     }
     {
         let mut settings = state.settings.lock().await;
@@ -453,7 +606,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     let restored_order_count = restored_state.settings.lock().await.orders.len();
     let duplicate_after_restart = run_cycle_inner(
         &restored_state,
-        versioned_lifecycle_dashboard(fixture_index, "source-700001"),
+        versioned_lifecycle_dashboard(fixture_index, "source-700002"),
     )
     .await
     .unwrap();
@@ -512,7 +665,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     let exit_result = submit_position_exit_order(
         &state,
         entry_order.symbol.clone(),
-        strategy_key,
+        strategy_key.clone(),
         position.clone(),
         100.99,
         101.01,
@@ -608,7 +761,11 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     )
     .await
     .unwrap();
-    assert_eq!(learning_result.status, 200);
+    assert_eq!(
+        learning_result.status, 200,
+        "Learning rejected outcome: {}; payload={learning_payload}",
+        learning_result.body,
+    );
     let forwarded = responder
         .learning_routes
         .lock()
@@ -858,6 +1015,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
 #[tokio::test]
 async fn production_entry_exit_persist_in_real_position_management_ledger_across_restart() {
     let _environment = super::service_endpoint_environment_lock();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
 
     let exchange_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let exchange_address = exchange_listener.local_addr().unwrap();
@@ -926,11 +1084,50 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     state.settings_path = unique_path("real-pm-auto-trader");
     state.dated_carry_path = unique_path("real-pm-carry");
     let sqlite_path = state.settings_path.clone();
-    let source_event_id = "insights-event:v1:sha256:real-pm-source-700101";
-    let worker_identity =
-        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
     let dashboard = versioned_lifecycle_dashboard(fixture_index, "real-pm-source-700101");
-    let entry_result = run_cycle_inner(&state, dashboard).await.unwrap();
+    let worker_decision = dashboard.best[0]
+        .strategy_decision
+        .clone()
+        .expect("fixture dashboard has worker identity");
+    // Hold the durable writer so the reservation pauses at its commit point.
+    // The portfolio cycle lock must already be released, while PM must still
+    // have no order: durable-before-submit and cross-symbol progress are both
+    // required by the lock-scope optimization.
+    let durable_writer_gate = state.settings_persist_write_lock.clone().lock_owned().await;
+    let entry_state = state.clone();
+    let entry_task = tokio::spawn(async move { run_cycle_inner(&entry_state, dashboard).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let reserved = state
+                .settings
+                .lock()
+                .await
+                .orders
+                .iter()
+                .any(|order| order.purpose == "signal" && order.status == "submitting");
+            if reserved {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .expect("the in-memory reservation should reach its durability wait");
+    let cycle_progress = state
+        .cycle_lock
+        .try_lock()
+        .expect("durable storage wait must not serialize other portfolio cycles");
+    drop(cycle_progress);
+    let before_commit = crate::service_rpc::position_get("/positions/trades?source=auto")
+        .await
+        .expect("PM ledger read should be available before entry submission");
+    assert_eq!(
+        before_commit["trades"].as_array().map(Vec::len),
+        Some(0),
+        "no PM order may be dispatched before the durable reservation commits"
+    );
+    drop(durable_writer_gate);
+    let entry_result = entry_task.await.unwrap().unwrap();
     assert_eq!(
         entry_result.status, "order_submitting",
         "the production entry should pass through the real PM service"
@@ -962,15 +1159,17 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
         .expect("production entry captures worker identity for fresh revalidation");
     assert_eq!(
         revalidation_identity.event_identity_version,
-        Some(worker_identity.schema_version)
+        worker_decision["live_worker_event_identity_version"]
+            .as_u64()
+            .and_then(|version| u16::try_from(version).ok())
     );
     assert_eq!(
         revalidation_identity.event_id.as_deref(),
-        Some(worker_identity.event_id.as_str())
+        worker_decision["live_worker_event_id"].as_str()
     );
     assert_eq!(
         revalidation_identity.episode_id.as_deref(),
-        Some(worker_identity.episode_id.as_str())
+        worker_decision["live_worker_episode_id"].as_str()
     );
     let decision_id = entry_order
         .decision_id
@@ -996,6 +1195,13 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
                 .expect("real PM fill should create the AutoTrader position"),
         )
     };
+    assert_eq!(
+        identity.episode_id,
+        worker_decision["live_worker_episode_id"]
+            .as_str()
+            .expect("versioned worker report has a stable thesis episode ID"),
+        "canonical lifecycle identity preserves the worker episode across the real PM path"
+    );
 
     let accepted_matches_before_retry = responder
         .requests
@@ -1010,11 +1216,11 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     let exit_result = submit_position_exit_order(
         &state,
         entry_order.symbol.clone(),
-        strategy_key,
+        strategy_key.clone(),
         position,
         100.99,
         101.01,
-        "fixture-close",
+        "stop-loss",
         0.01,
         1.0,
         2.0,
@@ -1024,6 +1230,23 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     .await
     .unwrap();
     assert!(exit_result.is_some());
+    {
+        let settings = state.settings.lock().await;
+        let reset = settings
+            .strategy_episode_reset_generations
+            .values()
+            .find(|reset| {
+                reset.symbol == entry_order.symbol
+                    && reset.strategy == strategy_key
+                    && reset.profile_id == identity.profile_id.as_deref().unwrap_or_default()
+            })
+            .expect("fully filled closing stop advances the durable thesis reset");
+        assert_eq!(reset.generation, 1);
+        assert_eq!(
+            reset.last_reset_episode_id.as_deref(),
+            Some(identity.episode_id.as_str())
+        );
+    }
 
     let trades_response = crate::service_rpc::position_request("GET", "/positions/trades", None)
         .await
@@ -1043,6 +1266,21 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     assert!(
         lifecycle_trades.len() >= 2,
         "both fills retain canonical linkage"
+    );
+    let fill_ids = lifecycle_trades
+        .iter()
+        .map(|trade| {
+            trade["fill_id"]
+                .as_str()
+                .filter(|fill_id| fill_id.starts_with("pm-fill:v1:"))
+                .expect("PM linked fills have a versioned allocator ID")
+                .to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        fill_ids.len(),
+        lifecycle_trades.len(),
+        "each persisted lifecycle fill has its own stable ID"
     );
     for trade in lifecycle_trades {
         assert_eq!(
@@ -1093,7 +1331,11 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     )
     .await
     .unwrap();
-    assert_eq!(learning_result.status, 200);
+    assert_eq!(
+        learning_result.status, 200,
+        "Learning rejected outcome: {}; payload={learning_payload}",
+        learning_result.body
+    );
     let event_id = match &trade_outcome {
         FeedbackEvent::TradeOutcome { event_id, .. } => event_id.clone(),
         _ => unreachable!("fixture outcome must be a TradeOutcome"),
@@ -1251,6 +1493,288 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(sqlite_path.with_extension("sqlite-shm"));
     let _ = std::fs::remove_file(&state.dated_carry_path);
+    let _ = std::fs::remove_file(&pm_db_path);
+    let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-shm"));
+    let _ = std::fs::remove_file(&learning_db_path);
+    let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-shm"));
+}
+
+#[tokio::test]
+async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restart() {
+    let _environment = super::service_endpoint_environment_lock();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
+
+    let exchange_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exchange_address = exchange_listener.local_addr().unwrap();
+    drop(exchange_listener);
+    let exchange_endpoint = format!("ws://{exchange_address}");
+    let pm_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pm_address = pm_listener.local_addr().unwrap();
+    drop(pm_listener);
+    let pm_endpoint = format!("ws://{pm_address}");
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_address = proxy_listener.local_addr().unwrap();
+    drop(proxy_listener);
+    let proxy_endpoint = format!("ws://{proxy_address}");
+
+    let pm_db_path = unique_path("lost-ack-pm-ledger").with_extension("sqlite");
+    let learning_db_path = unique_path("lost-ack-learning").with_extension("sqlite");
+    let settings_path = unique_path("lost-ack-auto-trader").with_extension("sqlite");
+    let carry_path = unique_path("lost-ack-carry").with_extension("sqlite");
+    let learning_router = learning::router(learning_db_path.clone()).unwrap();
+    let responder = LifecycleResponder {
+        learning_router: Arc::new(StdMutex::new(learning_router)),
+        ..LifecycleResponder::default()
+    };
+    let service = responder.clone();
+    let exchange_and_learning_server = tokio::spawn(async move {
+        RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(exchange_address.to_string()))
+            .acceptor(Box::new(move |_, _| Ok(Box::new(service.clone()))))
+            .serve()
+            .await
+            .expect("test Paper Exchange and Learning services remain available");
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let previous_position_endpoint = std::env::var_os("POSITION_MANAGEMENT_RSOCKET_URL");
+    let previous_learning_endpoint = std::env::var_os("LEARNING_RSOCKET_URL");
+    let previous_paper_exchange_endpoint = std::env::var_os("PAPER_EXCHANGE_RSOCKET_URL");
+    let _restore_endpoints = EndpointEnvironmentRestore {
+        position: previous_position_endpoint,
+        learning: previous_learning_endpoint,
+        paper_exchange: previous_paper_exchange_endpoint,
+    };
+    // SAFETY: endpoint changes are serialized by the fixture lock and target
+    // only local temporary services.
+    unsafe {
+        std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &proxy_endpoint);
+        std::env::set_var("LEARNING_RSOCKET_URL", &exchange_endpoint);
+        std::env::set_var("PAPER_EXCHANGE_RSOCKET_URL", &exchange_endpoint);
+    }
+    position_management::positions::set_test_usd_rates(BTreeMap::from([
+        ("USD".to_owned(), 1.0),
+        ("USDT".to_owned(), 1.0),
+    ]));
+    let pm_server = position_management::positions::start_test_rsocket_service(
+        pm_db_path.clone(),
+        pm_address.to_string(),
+    )
+    .await
+    .expect("real PM test service opens its temporary SQLite ledger");
+    let proxy = DropFirstPositionAckProxy {
+        position_management_endpoint: pm_endpoint.clone(),
+        drop_next_submission_response: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        dropped_submission_responses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    };
+    let proxy_for_acceptor = proxy.clone();
+    let proxy_server = tokio::spawn(async move {
+        RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(proxy_address.to_string()))
+            .acceptor(Box::new(move |_, _| {
+                Ok(Box::new(proxy_for_acceptor.clone()))
+            }))
+            .serve()
+            .await
+            .expect("ack-loss proxy RSocket service remains available");
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let fixture_index = 700_201;
+    let mut state = benchmark_precomputed_ingress_state("lost-pm-ack");
+    state.settings_path = settings_path.clone();
+    state.dated_carry_path = carry_path.clone();
+    let run_result = run_cycle_inner(
+        &state,
+        versioned_lifecycle_dashboard(fixture_index, "lost-ack-source-700201"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(run_result.status, "order_submitting");
+
+    let mut pending_order = None;
+    for _ in 0..500 {
+        pending_order = state
+            .settings
+            .lock()
+            .await
+            .orders
+            .iter()
+            .find(|order| order.purpose == "signal")
+            .cloned();
+        if pending_order.as_ref().is_some_and(|order| {
+            order
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("submission_pending_recovery:"))
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pending_order = pending_order.expect("durable entry reservation remains present");
+    assert_eq!(pending_order.status, "submitting");
+    assert!(pending_order
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("submission_pending_recovery:")));
+    assert_eq!(
+        proxy
+            .dropped_submission_responses
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "PM committed one request before the proxy discarded its acknowledgment"
+    );
+    let initial_pm_history =
+        crate::service_rpc::position_request_at(&pm_endpoint, "GET", "/positions/trades", None)
+            .await
+            .unwrap();
+    assert_eq!(initial_pm_history.status, 200);
+    assert_eq!(
+        initial_pm_history.body["trades"].as_array().unwrap().len(),
+        1
+    );
+
+    // Simulate process death by recovering the committed Settings snapshot in
+    // a new AutoTraderState after PM committed but before AutoTrader applied
+    // the response. No runtime database is used by this fixture.
+    let mut restored = read_settings_database(&settings_path)
+        .unwrap()
+        .expect("ambiguous submitting reservation was durably persisted");
+    let restored_order = restored
+        .orders
+        .iter()
+        .find(|order| order.timestamp == pending_order.timestamp)
+        .expect("restored Settings contains the same pending reservation");
+    assert_eq!(restored_order.status, "submitting");
+    assert!(restored_order
+        .revalidation_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.submission_request.as_ref())
+        .is_some());
+    drop(state);
+
+    let mut restarted_state = benchmark_precomputed_ingress_state("lost-pm-ack-restarted");
+    restarted_state.settings_path = settings_path.clone();
+    restarted_state.dated_carry_path = carry_path.clone();
+    *restarted_state.settings.lock().await = std::mem::take(&mut restored);
+    unsafe {
+        std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &pm_endpoint);
+    }
+    recover_submitting_entry_orders(&restarted_state).await;
+    // A repeated maintenance pass sees no pending reservation and performs no
+    // second request or local fill application.
+    recover_submitting_entry_orders(&restarted_state).await;
+
+    let (recovered_order, identity, position) = {
+        let settings = restarted_state.settings.lock().await;
+        let order = settings
+            .orders
+            .iter()
+            .find(|order| order.timestamp == pending_order.timestamp)
+            .cloned()
+            .expect("recovered order remains in AutoTrader history");
+        let decision_id = order.decision_id.as_deref().unwrap();
+        let identity = settings.canonical_lifecycle_links[decision_id].clone();
+        let strategy_key = order.strategy.as_deref().unwrap();
+        let position = settings.strategy_positions[&order.symbol][strategy_key].clone();
+        (order, identity, position)
+    };
+    assert_eq!(recovered_order.status, "filled");
+    assert!((position.quantity - recovered_order.filled_quantity).abs() <= 1e-12);
+    assert_eq!(
+        position.trade_id.as_deref(),
+        recovered_order.decision_id.as_deref(),
+        "AutoTrader position retains the durable reservation lookup key"
+    );
+    let recovered_pm_history =
+        crate::service_rpc::position_request_at(&pm_endpoint, "GET", "/positions/trades", None)
+            .await
+            .unwrap();
+    let pm_trades = recovered_pm_history.body["trades"].as_array().unwrap();
+    assert_eq!(
+        pm_trades.len(),
+        1,
+        "idempotent replay must not create a second fill"
+    );
+    assert_eq!(
+        pm_trades[0]["lifecycle"]["trade_id"], identity.trade_id,
+        "the recovered fill retains its canonical lifecycle lineage"
+    );
+    let match_calls = responder
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.path == "/internal/orders/match")
+        .count();
+    assert_eq!(
+        match_calls, 1,
+        "retry is served by PM idempotency before rematching"
+    );
+
+    let exit_result = submit_position_exit_order(
+        &restarted_state,
+        recovered_order.symbol.clone(),
+        recovered_order.strategy.clone().unwrap(),
+        position,
+        100.99,
+        101.01,
+        "fixture-close",
+        0.01,
+        1.0,
+        2.0,
+        recovered_order.timestamp.saturating_add(1),
+        serde_json::json!({"fixture": "ack-loss-recovery"}),
+    )
+    .await
+    .unwrap();
+    assert!(exit_result.is_some());
+    {
+        let settings = restarted_state.settings.lock().await;
+        let outcomes = settings
+            .feedback_outbox
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    strategy::FeedbackEvent::TradeOutcome {
+                        trade_id: Some(trade_id),
+                        ..
+                    } if trade_id == &identity.trade_id
+                )
+            })
+            .count();
+        assert_eq!(outcomes, 1, "the recovered trade queues one outcome");
+    }
+    let completed_pm_history =
+        crate::service_rpc::position_request_at(&pm_endpoint, "GET", "/positions/trades", None)
+            .await
+            .unwrap();
+    let completed_trades = completed_pm_history.body["trades"].as_array().unwrap();
+    assert_eq!(completed_trades.len(), 2);
+    assert!(completed_trades
+        .iter()
+        .all(|trade| trade["lifecycle"]["trade_id"] == identity.trade_id));
+    let fill_ids = completed_trades
+        .iter()
+        .filter_map(|trade| trade["fill_id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        fill_ids.len(),
+        2,
+        "replayed entry and real exit have unique PM fills"
+    );
+
+    proxy_server.abort();
+    pm_server.abort();
+    exchange_and_learning_server.abort();
+    let _ = std::fs::remove_file(&settings_path);
+    let _ = std::fs::remove_file(settings_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(settings_path.with_extension("sqlite-shm"));
+    let _ = std::fs::remove_file(&carry_path);
     let _ = std::fs::remove_file(&pm_db_path);
     let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-shm"));

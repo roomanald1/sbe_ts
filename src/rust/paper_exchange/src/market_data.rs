@@ -305,11 +305,22 @@ struct SymbolQuery {
 
 #[derive(Serialize)]
 struct MarketMark {
+    symbol: String,
     bid: Option<f64>,
     ask: Option<f64>,
     mid: Option<f64>,
     worst_ask: Option<f64>,
     updated_at_ms: u64,
+    symbol_freshness: SymbolMarkFreshness,
+}
+
+#[derive(Serialize)]
+struct SymbolMarkFreshness {
+    contract_version: u16,
+    scope: &'static str,
+    state: &'static str,
+    max_age_ms: u64,
+    timestamp_field: &'static str,
 }
 
 async fn get_market_mark(
@@ -339,11 +350,19 @@ async fn get_market_mark(
     let bid = book.bids.first().map(|level| level.price);
     let ask = book.asks.first().map(|level| level.price);
     Ok(Json(MarketMark {
+        symbol,
         bid,
         ask,
         mid: bid.zip(ask).map(|(bid, ask)| (bid + ask) / 2.0),
         worst_ask: book.asks.last().map(|level| level.price),
         updated_at_ms: book.updated_at_ms,
+        symbol_freshness: SymbolMarkFreshness {
+            contract_version: 1,
+            scope: "symbol",
+            state: "fresh",
+            max_age_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
+            timestamp_field: "updated_at_ms",
+        },
     }))
 }
 
@@ -882,6 +901,39 @@ mod tests {
                     "history_freshness_basis": "per-symbol active book subscription and current mark; history sample age bounded by sample spacing plus mark freshness"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn market_mark_serializes_a_per_symbol_freshness_guarantee() {
+        let response = MarketMark {
+            symbol: "BTC-USDT".into(),
+            bid: Some(99.0),
+            ask: Some(101.0),
+            mid: Some(100.0),
+            worst_ask: Some(101.0),
+            updated_at_ms: 10_000,
+            symbol_freshness: SymbolMarkFreshness {
+                contract_version: 1,
+                scope: "symbol",
+                state: "fresh",
+                max_age_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
+                timestamp_field: "updated_at_ms",
+            },
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["symbol"], "BTC-USDT");
+        assert_eq!(value["updated_at_ms"], 10_000);
+        assert_eq!(value["symbol_freshness"]["contract_version"], 1);
+        assert_eq!(value["symbol_freshness"]["scope"], "symbol");
+        assert_eq!(value["symbol_freshness"]["state"], "fresh");
+        assert_eq!(
+            value["symbol_freshness"]["max_age_ms"],
+            MARKET_MARK_FRESHNESS.as_millis() as u64
+        );
+        assert_eq!(
+            value["symbol_freshness"]["timestamp_field"],
+            "updated_at_ms"
         );
     }
 

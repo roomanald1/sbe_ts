@@ -7,12 +7,12 @@ struct MarketMark {
     updated_at_ms: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct MatcherFill {
     quantity: f64,
     price: f64,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct MatcherResponse {
     reference_price: Option<f64>,
     best_bid: Option<f64>,

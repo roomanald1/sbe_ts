@@ -1,10 +1,7 @@
-use std::io::Write;
 use sha2::{Digest, Sha256};
+use std::io::Write;
 
-fn stable_signal_source_event_id(
-    symbol: &str,
-    event: &SignalFeedEvent,
-) -> String {
+fn stable_signal_source_event_id(symbol: &str, event: &SignalFeedEvent) -> String {
     let timestamp = match event {
         SignalFeedEvent::Price { timestamp, .. }
         | SignalFeedEvent::Trade { timestamp, .. }
@@ -136,28 +133,53 @@ fn valid_scout_sample(sample: &ScoutScoutRegistration, now: u64) -> bool {
         Some("variant") => has_single_comparison && !has_comparison_list,
         Some(_) => false,
     };
-    !(sample.decision_id.is_empty() || sample.decision_id.len() > 240
-        || sample.symbol.is_empty() || sample.symbol.len() > 32
-        || sample.timestamp > now.saturating_add(5_000) || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
-        || !sample.entry_price.is_finite() || sample.entry_price <= 0.0
-        || !sample.stop_loss_percent.is_finite() || sample.stop_loss_percent <= 0.0
-        || !sample.take_profit_percent.is_finite() || sample.take_profit_percent <= 0.0
-        || !sample.profit_protection_activation_percent.is_finite() || sample.profit_protection_activation_percent < 0.0
-        || !sample.profit_protection_giveback_percent.is_finite() || sample.profit_protection_giveback_percent < 0.0
-        || !sample.profit_protection_minimum_lock_percent.is_finite() || sample.profit_protection_minimum_lock_percent < 0.0
+    !(sample.decision_id.is_empty()
+        || sample.decision_id.len() > 240
+        || sample.symbol.is_empty()
+        || sample.symbol.len() > 32
+        || sample.timestamp > now.saturating_add(5_000)
+        || now.saturating_sub(sample.timestamp) > 7 * 86_400_000
+        || !sample.entry_price.is_finite()
+        || sample.entry_price <= 0.0
+        || !sample.stop_loss_percent.is_finite()
+        || sample.stop_loss_percent <= 0.0
+        || !sample.take_profit_percent.is_finite()
+        || sample.take_profit_percent <= 0.0
+        || !sample.profit_protection_activation_percent.is_finite()
+        || sample.profit_protection_activation_percent < 0.0
+        || !sample.profit_protection_giveback_percent.is_finite()
+        || sample.profit_protection_giveback_percent < 0.0
+        || !sample.profit_protection_minimum_lock_percent.is_finite()
+        || sample.profit_protection_minimum_lock_percent < 0.0
         || sample.strategy.is_empty()
         || !matches!(sample.exit_scenario.as_str(), "strategy" | "tight" | "wide")
-        || sample.scout_minimum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
-        || sample.scout_maximum_hold_days.is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
-        || sample.scout_maximum_duration_ms.is_some_and(|duration| duration == 0 || duration > 7 * 86_400_000)
+        || sample
+            .scout_minimum_hold_days
+            .is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
+        || sample
+            .scout_maximum_hold_days
+            .is_some_and(|days| !days.is_finite() || !(1.0..=365.0).contains(&days))
+        || sample
+            .scout_maximum_duration_ms
+            .is_some_and(|duration| duration == 0 || duration > 7 * 86_400_000)
         || !matches!(sample.direction.as_str(), "bullish" | "bearish")
-        || sample.scout_comparison_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 240)
+        || sample
+            .scout_comparison_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 240)
         || sample.scout_comparison_ids.len() > 128
-        || sample.scout_comparison_ids.iter().any(|id| id.is_empty() || id.len() > 240)
-        || sample.scout_comparison_ids.iter().collect::<std::collections::BTreeSet<_>>().len() != sample.scout_comparison_ids.len()
+        || sample
+            .scout_comparison_ids
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 240)
+        || sample
+            .scout_comparison_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != sample.scout_comparison_ids.len()
         || !valid_comparison_shape)
 }
-
 
 #[derive(serde::Deserialize)]
 struct ScoutScoutRegistration {
@@ -199,11 +221,19 @@ async fn register_scout(
     // this transient price-path tracker so market exits stay beside feed data.
     let now = now_ms();
     if !valid_scout_sample(&sample, now) {
-        return Err((StatusCode::BAD_REQUEST, "Invalid scout scout sample".to_owned()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid scout scout sample".to_owned(),
+        ));
     }
     admit_runtime_symbol(&runtime, &sample.symbol)
         .await
-        .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
+        .map_err(|()| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Insights active-symbol capacity reached".to_owned(),
+            )
+        })?;
     let engine = runtime
         .engines
         .entry(sample.symbol.clone())
@@ -216,9 +246,14 @@ async fn register_scout(
     let exit_scenario = sample.exit_scenario.clone();
     let timestamp = sample.timestamp;
     if !engine.track_scout_with_maximum_duration(
-        sample.decision_id, sample.symbol, sample.strategy,
-        sample.timestamp, sample.direction, sample.entry_price,
-        sample.stop_loss_percent, sample.take_profit_percent,
+        sample.decision_id,
+        sample.symbol,
+        sample.strategy,
+        sample.timestamp,
+        sample.direction,
+        sample.entry_price,
+        sample.stop_loss_percent,
+        sample.take_profit_percent,
         sample.profit_protection_activation_percent,
         sample.profit_protection_giveback_percent,
         sample.profit_protection_minimum_lock_percent,
@@ -230,7 +265,15 @@ async fn register_scout(
     ) {
         return Ok(StatusCode::NO_CONTENT);
     }
-    crate::service_log!("INFO", "Scout scout registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}", decision_id, symbol, strategy, exit_scenario, now.saturating_sub(timestamp));
+    crate::service_log!(
+        "INFO",
+        "Scout scout registered: sample_id={} symbol={} strategy={} exit_scenario={} age_ms={}",
+        decision_id,
+        symbol,
+        strategy,
+        exit_scenario,
+        now.saturating_sub(timestamp)
+    );
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -255,7 +298,10 @@ async fn register_counterfactual(
         || !sample.entry_price.is_finite()
         || sample.entry_price <= 0.0
     {
-        return Err((StatusCode::BAD_REQUEST, "Invalid counterfactual sample".to_owned()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid counterfactual sample".to_owned(),
+        ));
     }
     let engine = runtime
         .engines
@@ -268,7 +314,11 @@ async fn register_counterfactual(
         sample.direction,
         sample.entry_price,
     );
-    Ok(if accepted { StatusCode::ACCEPTED } else { StatusCode::NO_CONTENT })
+    Ok(if accepted {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::NO_CONTENT
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -283,9 +333,18 @@ async fn update_scout_strategy_status(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(update): Json<ScoutStrategyStatusUpdate>,
 ) -> StatusCode {
-    let active = update.active_strategy_symbols.into_iter().collect::<BTreeSet<_>>();
-    let active_parameter_profiles = update.active_parameter_profiles.into_iter().collect::<BTreeSet<_>>();
-    let enabled = update.enabled_strategies.into_iter().collect::<BTreeSet<_>>();
+    let active = update
+        .active_strategy_symbols
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let active_parameter_profiles = update
+        .active_parameter_profiles
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let enabled = update
+        .enabled_strategies
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let engines = runtime
         .engines
         .iter()
@@ -390,7 +449,6 @@ fn strategy_signal_from_snapshot(
         strategy_decision: Some(serde_json::json!({
             "live_worker_event_id": event_identity.event_id,
             "live_worker_event_identity_version": event_identity.schema_version,
-            "live_worker_episode_id": event_identity.episode_id,
         })),
         market_regime: None,
         market_state: None,
@@ -411,9 +469,15 @@ async fn ingest_signal_event(
     }
     admit_runtime_symbol(&runtime, &request.symbol)
         .await
-        .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
+        .map_err(|()| {
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Insights active-symbol capacity reached".to_owned(),
+            )
+        })?;
     let source_event_id = stable_signal_source_event_id(&request.symbol, &request.event);
-    let event_identity = strategy::LiveStrategyEventIdentity::from_source_event_id(&source_event_id);
+    let event_identity =
+        strategy::LiveStrategyEventIdentity::from_source_event_id(&source_event_id);
     let event_kind = match &request.event {
         SignalFeedEvent::Price { .. } => "price",
         SignalFeedEvent::Trade { .. } => "trade",
@@ -444,10 +508,7 @@ async fn ingest_signal_event(
         crate::latency::record_engine_lock_wait(engine_wait_started.elapsed());
         let mut records = Vec::new();
         let snapshot = match request.event {
-            SignalFeedEvent::Price {
-                timestamp,
-                price,
-            } => {
+            SignalFeedEvent::Price { timestamp, price } => {
                 let (volatility_1m, volatility_5m) = runtime
                     .rolling_volatility
                     .entry(request.symbol.clone())
@@ -468,7 +529,9 @@ async fn ingest_signal_event(
                     && latest_price == Some((timestamp, price))
                     && (price_count_after > price_count_before || previous_price != latest_price);
                 if accepted {
-                    runtime.latest_prices.insert(request.symbol.clone(), (timestamp, price));
+                    runtime
+                        .latest_prices
+                        .insert(request.symbol.clone(), (timestamp, price));
                 }
                 if !accepted && signal_diagnostic_due(&runtime, &request.symbol, timestamp) {
                     let reason = if !price.is_finite() || price <= 0.0 {
@@ -523,8 +586,7 @@ async fn ingest_signal_event(
                     records.push(StoredSignalRecord::Evaluation(outcome.evaluation));
                 }
                 let should_compute_snapshot = accepted && engine.live_snapshot_due(timestamp);
-                let should_capture_research =
-                    accepted && engine.research_sample_is_due(timestamp);
+                let should_capture_research = accepted && engine.research_sample_is_due(timestamp);
                 let snapshot_started = Instant::now();
                 let mut snapshot = should_compute_snapshot
                     .then(|| {
@@ -590,36 +652,34 @@ async fn ingest_signal_event(
                         // Reference returns are only consumed by research samples.
                         // Avoid two DashMap lookups and return-history scans for every
                         // market event; same-symbol context comes from the locked engine.
-                        let btc_context = if request.symbol == "BTC-USDT" {
-                            engine.return_context(event_timestamp)
-                        } else {
-                            runtime
-                                .engines
-                                .get("BTC-USDT")
-                                .and_then(|entry| {
-                                    entry
-                                        .value()
-                                        .try_lock()
-                                        .ok()
-                                        .map(|reference| reference.return_context(event_timestamp))
-                                })
-                                .unwrap_or((None, None))
-                        };
-                        let eth_context = if request.symbol == "ETH-USDT" {
-                            engine.return_context(event_timestamp)
-                        } else {
-                            runtime
-                                .engines
-                                .get("ETH-USDT")
-                                .and_then(|entry| {
-                                    entry
-                                        .value()
-                                        .try_lock()
-                                        .ok()
-                                        .map(|reference| reference.return_context(event_timestamp))
-                                })
-                                .unwrap_or((None, None))
-                        };
+                        let btc_context =
+                            if request.symbol == "BTC-USDT" {
+                                engine.return_context(event_timestamp)
+                            } else {
+                                runtime
+                                    .engines
+                                    .get("BTC-USDT")
+                                    .and_then(|entry| {
+                                        entry.value().try_lock().ok().map(|reference| {
+                                            reference.return_context(event_timestamp)
+                                        })
+                                    })
+                                    .unwrap_or((None, None))
+                            };
+                        let eth_context =
+                            if request.symbol == "ETH-USDT" {
+                                engine.return_context(event_timestamp)
+                            } else {
+                                runtime
+                                    .engines
+                                    .get("ETH-USDT")
+                                    .and_then(|entry| {
+                                        entry.value().try_lock().ok().map(|reference| {
+                                            reference.return_context(event_timestamp)
+                                        })
+                                    })
+                                    .unwrap_or((None, None))
+                            };
                         let features = engine.research_features(
                             &request.symbol,
                             snapshot.timestamp,
@@ -636,20 +696,33 @@ async fn ingest_signal_event(
                         if let Some(vote) = news_vote {
                             if let Ok(mut learning) = runtime.news_learning.try_lock() {
                                 prune_news_pending(&mut learning, now_ms());
-                                learning
-                                    .pending
-                                    .insert((snapshot.symbol.clone(), snapshot.timestamp), (vote, now_ms()));
+                                learning.pending.insert(
+                                    (snapshot.symbol.clone(), snapshot.timestamp),
+                                    (vote, now_ms()),
+                                );
                             }
                         }
                         let mut persisted_snapshot = snapshot.clone();
                         // Granular live-only variants are used by AutoTrader and
                         // are not needed in the long-term research snapshot store.
                         persisted_snapshot.components.momentum_by_window.clear();
-                        persisted_snapshot.components.trend_volatility_units_by_window.clear();
+                        persisted_snapshot
+                            .components
+                            .trend_volatility_units_by_window
+                            .clear();
                         persisted_snapshot.components.trade_flow_by_window.clear();
-                        persisted_snapshot.components.book_imbalance_by_depth.clear();
-                        persisted_snapshot.components.vwap_dislocation_by_window.clear();
-                        persisted_snapshot.components.absorption_pressure_by_window.clear();
+                        persisted_snapshot
+                            .components
+                            .book_imbalance_by_depth
+                            .clear();
+                        persisted_snapshot
+                            .components
+                            .vwap_dislocation_by_window
+                            .clear();
+                        persisted_snapshot
+                            .components
+                            .absorption_pressure_by_window
+                            .clear();
                         records.push(StoredSignalRecord::Snapshot(persisted_snapshot));
                     }
                 }
@@ -691,18 +764,16 @@ async fn ingest_signal_event(
                     && best_bid > 0.0
                     && best_ask >= best_bid
                 {
-                    runtime
-                        .market_cache
-                        .insert(
-                            request.symbol.clone(),
-                            CachedMarket {
-                                timestamp,
-                                best_bid,
-                                best_ask,
-                                bid_levels,
-                                ask_levels,
-                            },
-                        );
+                    runtime.market_cache.insert(
+                        request.symbol.clone(),
+                        CachedMarket {
+                            timestamp,
+                            best_bid,
+                            best_ask,
+                            bid_levels,
+                            ask_levels,
+                        },
+                    );
                 }
                 None
             }
@@ -762,7 +833,9 @@ async fn ingest_signal_event(
                 compressed.as_ref().map_or(0, Vec::len),
             );
             let encoded = Bytes::from(encoded);
-            runtime.latest_strategy_signal_updates.insert(snapshot.symbol.clone(), encoded.clone());
+            runtime
+                .latest_strategy_signal_updates
+                .insert(snapshot.symbol.clone(), encoded.clone());
             let _ = runtime.strategy_signal_events.send(encoded.clone());
             let _ = runtime.legacy_strategy_signal_events.send(encoded);
             match compressed {
@@ -789,16 +862,49 @@ async fn ingest_signal_event(
     Ok(Json(snapshot))
 }
 
-async fn publish_scout_markouts(
-    outcomes: Vec<(String, SignalEvaluation, bool, Option<String>)>,
-) {
+fn scout_path_evidence_payload(
+    evidence: Option<&insights::signals::ScoutPathEvidence>,
+) -> serde_json::Value {
+    let Some(evidence) = evidence else {
+        return serde_json::json!({
+            "schema_version": 1,
+            "status": "unavailable",
+            "reason": "path_evidence_not_collected",
+            "maximum_favorable_excursion_percent": null,
+            "maximum_adverse_excursion_percent": null,
+        });
+    };
+    serde_json::json!({
+        "schema_version": evidence.schema_version,
+        "status": if evidence.complete { "complete" } else { "incomplete" },
+        "source": evidence.source,
+        "completeness_basis": evidence.completeness_basis,
+        "per_symbol_freshness_guaranteed": evidence.per_symbol_freshness_guaranteed,
+        "observation_only": evidence.observation_only,
+        "direction": evidence.direction,
+        "executable_side": evidence.executable_side,
+        "entry_quote_timestamp": evidence.entry_quote_timestamp,
+        "first_source_event_timestamp": evidence.first_source_event_timestamp,
+        "last_source_event_timestamp": evidence.last_source_event_timestamp,
+        "evaluated_timestamp": evidence.evaluated_timestamp,
+        "source_freshness_ms": evidence.source_freshness_ms,
+        "sample_count": evidence.sample_count,
+        "maximum_gap_ms": evidence.maximum_gap_ms,
+        "source_timestamps_monotonic": evidence.source_timestamps_monotonic,
+        "maximum_favorable_excursion_percent": evidence.maximum_favorable_excursion_percent,
+        "maximum_adverse_excursion_percent": evidence.maximum_adverse_excursion_percent,
+        "completeness_reason": evidence.completeness_reason,
+    })
+}
+
+async fn publish_scout_markouts(outcomes: Vec<(String, SignalEvaluation, bool, Option<String>)>) {
     let _permit = SCOUT_LEARNING_DELIVERY_LIMIT
         .get_or_init(|| Semaphore::new(2))
         .acquire()
         .await
         .expect("scout learning delivery semaphore remains open");
-    let learning_rsocket_url = std::env::var("LEARNING_RSOCKET_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
+    let learning_rsocket_url =
+        std::env::var("LEARNING_RSOCKET_URL").unwrap_or_else(|_| "ws://127.0.0.1:10010".to_owned());
     for (decision_id, evaluation, observation_only, strategy_name) in outcomes {
         let strategy_target = strategy_name
             .as_deref()
@@ -826,12 +932,18 @@ async fn publish_scout_markouts(
             "path_low": evaluation.path_low,
             "long_time_to_positive_net_seconds": evaluation.long_time_to_positive_net_seconds,
             "short_time_to_positive_net_seconds": evaluation.short_time_to_positive_net_seconds,
+            "scout_path_evidence": scout_path_evidence_payload(
+                evaluation.scout_path_evidence.as_ref(),
+            ),
         });
         for attempt in 0..3 {
             let response = strategy::request_scout_worker_route(
                 &learning_rsocket_url,
                 &strategy::ScoutCoordinatorRouteCommand {
-                    request_id: format!("scout-markout:{decision_id}:{}", evaluation.evaluated_timestamp),
+                    request_id: format!(
+                        "scout-markout:{decision_id}:{}",
+                        evaluation.evaluated_timestamp
+                    ),
                     strategy: strategy_target,
                     method: strategy::ScoutWorkerHttpMethod::Post,
                     path: "/scout-markout".into(),
@@ -841,7 +953,14 @@ async fn publish_scout_markouts(
             .await;
             match response {
                 Ok(response) if response.status < 400 => {
-                    crate::service_log!("INFO", "Scout markout delivered: sample_id={} symbol={} status={} attempt={}", decision_id, evaluation.symbol, response.status, attempt + 1);
+                    crate::service_log!(
+                        "INFO",
+                        "Scout markout delivered: sample_id={} symbol={} status={} attempt={}",
+                        decision_id,
+                        evaluation.symbol,
+                        response.status,
+                        attempt + 1
+                    );
                     break;
                 }
                 Ok(response) if attempt == 2 => crate::service_log!(
@@ -904,10 +1023,8 @@ mod signal_ingestion_tests {
 
         let first_id = stable_signal_source_event_id(&first_request.symbol, &first_request.event);
         let retry_id = stable_signal_source_event_id(&retry_request.symbol, &retry_request.event);
-        let changed_id = stable_signal_source_event_id(
-            &changed_request.symbol,
-            &changed_request.event,
-        );
+        let changed_id =
+            stable_signal_source_event_id(&changed_request.symbol, &changed_request.event);
 
         assert_eq!(first_id, retry_id);
         assert_ne!(first_id, changed_id);
@@ -1013,14 +1130,19 @@ mod signal_ingestion_tests {
             "exit_scenario":"strategy", "stop_loss_percent":1.0, "take_profit_percent":2.0,
             "profit_protection_activation_percent":0.5, "profit_protection_giveback_percent":0.2,
             "profit_protection_minimum_lock_percent":0.1
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
     fn market_levels_filters_invalid_prices_and_sizes() {
         let encoded = encode_market_levels(&[
-            (100.0, 2.0), (0.0, 1.0), (-1.0, 1.0), (101.0, 0.0),
-            (102.0, f64::INFINITY), (f64::NAN, 1.0),
+            (100.0, 2.0),
+            (0.0, 1.0),
+            (-1.0, 1.0),
+            (101.0, 0.0),
+            (102.0, f64::INFINITY),
+            (f64::NAN, 1.0),
         ]);
         assert_eq!(encoded, vec![serde_json::json!({"price":100.0,"size":2.0})]);
     }
@@ -1032,8 +1154,14 @@ mod signal_ingestion_tests {
         assert!(market_value(1, f64::NAN, 2.0, &[], &[]).is_none());
         let value = market_value(42, 99.0, 100.0, &[(99.0, 1.0)], &[(100.0, 2.0)]).unwrap();
         assert_eq!(value["updated_at_ms"], 42);
-        assert_eq!(value["bids"][0], serde_json::json!({"price":99.0,"size":1.0}));
-        assert_eq!(value["asks"][0], serde_json::json!({"price":100.0,"size":2.0}));
+        assert_eq!(
+            value["bids"][0],
+            serde_json::json!({"price":99.0,"size":1.0})
+        );
+        assert_eq!(
+            value["asks"][0],
+            serde_json::json!({"price":100.0,"size":2.0})
+        );
     }
 
     #[tokio::test]
@@ -1049,12 +1177,13 @@ mod signal_ingestion_tests {
         for index in 0..INGEST_BENCHMARK_WARMUP_EVENTS {
             let request = decode_signal_event(&benchmark_event(index))
                 .expect("deterministic warm-up event decodes through production codec");
-            let result = ingest_signal_event(
-                axum::extract::State(Arc::clone(&runtime)),
-                Json(request),
-            )
-            .await;
-            assert!(result.is_ok(), "production ingress should accept warm-up event");
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "production ingress should accept warm-up event"
+            );
         }
         while published.try_recv().is_ok() {}
 
@@ -1070,14 +1199,14 @@ mod signal_ingestion_tests {
             let mut request = decode_signal_event(&raw_event)
                 .expect("deterministic raw market event decodes through production codec");
             request.queued_at = Some(ingress_started);
-            let result = ingest_signal_event(
-                axum::extract::State(Arc::clone(&runtime)),
-                Json(request),
-            )
-            .await;
-            assert!(result.is_ok(), "production market ingress should accept fixture event");
-            let update = published
-                .recv();
+            let result =
+                ingest_signal_event(axum::extract::State(Arc::clone(&runtime)), Json(request))
+                    .await;
+            assert!(
+                result.is_ok(),
+                "production market ingress should accept fixture event"
+            );
+            let update = published.recv();
             let update = tokio::time::timeout(Duration::from_secs(1), update)
                 .await
                 .expect("production signal publication should complete within one second")
@@ -1097,10 +1226,7 @@ mod signal_ingestion_tests {
                 value["signal"]["strategy_decision"]["live_worker_event_identity_version"],
                 worker_identity.schema_version
             );
-            assert_eq!(
-                value["signal"]["strategy_decision"]["live_worker_episode_id"],
-                worker_identity.episode_id
-            );
+            assert!(value["signal"]["strategy_decision"]["live_worker_episode_id"].is_null());
             assert_eq!(value["signal"]["timestamp"], timestamp);
             assert!(!value["signal"].is_null());
             elapsed_ns.push(ingress_started.elapsed().as_nanos());

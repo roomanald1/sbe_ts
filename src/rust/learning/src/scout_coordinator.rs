@@ -43,11 +43,18 @@ const MAX_REPLAY_SIGNAL_GAP_MS: u64 = 30_000;
 const MAX_WORKER_SCOUT_VARIANTS: usize = 2_000;
 const MAX_AUTOTRADER_SCOUT_VARIANTS: usize = 5_000;
 const MAX_EVIDENCE_REQUESTS_PER_BATCH: usize = 32;
+const MAX_ACTIVE_SCOUT_ACTIVITY_ITEMS: usize = 512;
 const MAX_REPLAY_ATTEMPTS: u32 = 5;
 const REPLAY_RETRY_BASE_MS: u64 = 5_000;
 const REPLAY_RETRY_MAX_MS: u64 = 60 * 60 * 1_000;
 
 type ScoutWorkerClientPool = HashMap<String, Arc<Client>>;
+
+#[derive(serde::Deserialize)]
+struct PositionManagerPortfolioEvidenceResponse {
+    status: u16,
+    body: serde_json::Value,
+}
 
 fn scout_worker_client_pool() -> &'static StdMutex<ScoutWorkerClientPool> {
     static CLIENTS: OnceLock<StdMutex<ScoutWorkerClientPool>> = OnceLock::new();
@@ -81,6 +88,126 @@ async fn pooled_scout_worker_client(endpoint: &str) -> anyhow::Result<Arc<Client
         .clone())
 }
 
+async fn position_manager_portfolio_interval_page(
+    endpoint: &str,
+    after_cursor: Option<i64>,
+) -> anyhow::Result<serde_json::Value> {
+    let client = pooled_scout_worker_client(endpoint).await?;
+    let request = serde_json::json!({
+        "method": "GET",
+        "path": after_cursor.map_or_else(
+            || "/positions/portfolio-evidence/intervals?limit=1000".to_owned(),
+            |cursor| format!("/positions/portfolio-evidence/intervals?after_cursor={cursor}&limit=1000"),
+        ),
+        "body": null,
+    });
+    let payload = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request_response(
+            Payload::builder()
+                .set_data(serde_json::to_vec(&request)?)
+                .build(),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("position management request timed out"))??
+    .ok_or_else(|| anyhow::anyhow!("position management returned an empty response"))?;
+    let data = payload
+        .data()
+        .ok_or_else(|| anyhow::anyhow!("position management response has no data"))?;
+    let response =
+        serde_json::from_slice::<PositionManagerPortfolioEvidenceResponse>(data.as_ref())?;
+    anyhow::ensure!(
+        (200..300).contains(&response.status),
+        "position management returned HTTP {}",
+        response.status
+    );
+    Ok(response.body)
+}
+
+async fn fetch_position_manager_portfolio_intervals() -> serde_json::Value {
+    let Some(endpoint) = std::env::var("POSITION_MANAGEMENT_RSOCKET_URL")
+        .ok()
+        .filter(|value| value.starts_with("ws://") || value.starts_with("wss://"))
+    else {
+        return serde_json::json!({
+            "schema_version": 1,
+            "coverage": "unavailable",
+            "quantitative_eligibility": "blocked_pending_independent_reconciliation",
+            "unavailable_reason": "position_management_endpoint_missing_or_invalid",
+            "intervals": [],
+        });
+    };
+    let mut after_cursor = None;
+    let mut intervals = Vec::new();
+    let mut interval_ids = BTreeSet::new();
+    let mut pages = 0usize;
+    let mut source_coverage = "pm_internal_complete".to_owned();
+    let mut truncated = false;
+    let mut unavailable_reason = None;
+    let mut final_cursor = None;
+    loop {
+        let page = match position_manager_portfolio_interval_page(&endpoint, after_cursor).await {
+            Ok(page) => page,
+            Err(_) => {
+                unavailable_reason = Some("position_management_request_failed_or_timed_out");
+                break;
+            }
+        };
+        pages += 1;
+        let page_coverage = page["coverage"].as_str().unwrap_or("unknown");
+        final_cursor = page["next_cursor"].as_i64();
+        if !matches!(page_coverage, "pm_internal_complete" | "truncated") {
+            source_coverage = page_coverage.to_owned();
+        }
+        let Some(page_intervals) = page["intervals"].as_array() else {
+            unavailable_reason = Some("position_management_interval_list_missing");
+            break;
+        };
+        for interval in page_intervals {
+            let Some(evidence_id) = interval["evidence_id"].as_str() else {
+                source_coverage = "incomplete_or_unknown".to_owned();
+                continue;
+            };
+            if interval_ids.insert(evidence_id.to_owned()) {
+                intervals.push(interval.clone());
+            }
+        }
+        if page["truncated"].as_bool() != Some(true) {
+            break;
+        }
+        if pages >= MAX_REPLAY_TOTAL_PAGES {
+            truncated = true;
+            unavailable_reason = Some("position_management_history_page_limit_reached");
+            break;
+        }
+        let Some(next_cursor) = page["next_cursor"]
+            .as_i64()
+            .filter(|value| after_cursor.is_none_or(|cursor| *value > cursor))
+        else {
+            truncated = true;
+            unavailable_reason = Some("position_management_history_cursor_did_not_advance");
+            break;
+        };
+        after_cursor = Some(next_cursor);
+    }
+    if unavailable_reason.is_some() {
+        truncated = true;
+        source_coverage = "incomplete_or_unknown".to_owned();
+    }
+    serde_json::json!({
+        "schema_version": 1,
+        "coverage": if unavailable_reason.is_some() { "incomplete_or_unknown" } else if truncated { "truncated" } else { source_coverage.as_str() },
+        "quantitative_eligibility": "blocked_pending_independent_reconciliation",
+        "independent_execution_ledger_reconciled": false,
+        "truncated": truncated,
+        "pages_read": pages,
+        "next_cursor": final_cursor,
+        "unavailable_reason": unavailable_reason,
+        "intervals": intervals,
+    })
+}
+
 fn invalidate_scout_worker_client(endpoint: &str, failed_client: &Arc<Client>) {
     let mut clients = scout_worker_client_pool()
         .lock()
@@ -98,7 +225,15 @@ struct ScoutUpdateHub {
     sequence: AtomicU64,
     latest: std::sync::RwLock<BTreeMap<(String, String), ScoutStreamEnvelope>>,
     assignments: AsyncMutex<BTreeMap<String, oneshot::Sender<Result<ScoutWorkResult, String>>>>,
+    active_assignments: std::sync::RwLock<BTreeMap<String, ActiveScoutAssignment>>,
     replays: AsyncMutex<BTreeMap<String, oneshot::Sender<Result<StrategyReplayResponse, String>>>>,
+}
+
+#[derive(Clone)]
+struct ActiveScoutAssignment {
+    assignment: ScoutWorkAssignment,
+    profile: Option<StrategyProfile>,
+    assigned_at_ms: u64,
 }
 
 impl ScoutUpdateHub {
@@ -109,6 +244,7 @@ impl ScoutUpdateHub {
             sequence: AtomicU64::new(0),
             latest: std::sync::RwLock::new(BTreeMap::new()),
             assignments: AsyncMutex::new(BTreeMap::new()),
+            active_assignments: std::sync::RwLock::new(BTreeMap::new()),
             replays: AsyncMutex::new(BTreeMap::new()),
         })
     }
@@ -179,6 +315,57 @@ impl ScoutUpdateHub {
                 strategy.as_str().to_owned(),
                 format!("assignment:{assignment_id}"),
             ));
+        self.active_assignments
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(assignment_id);
+    }
+
+    fn register_active_assignment(
+        &self,
+        assignment: ScoutWorkAssignment,
+        profile: Option<StrategyProfile>,
+        assigned_at_ms: u64,
+    ) {
+        self.active_assignments
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                assignment.assignment_id.clone(),
+                ActiveScoutAssignment {
+                    assignment,
+                    profile,
+                    assigned_at_ms,
+                },
+            );
+    }
+
+    fn active_assignment_snapshot(&self, now_ms: u64) -> Vec<serde_json::Value> {
+        self.active_assignments
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .take(MAX_ACTIVE_SCOUT_ACTIVITY_ITEMS)
+            .map(|active| {
+                serde_json::json!({
+                    "assignment_id": active.assignment.assignment_id,
+                    "strategy": active.assignment.strategy.as_str(),
+                    "symbol": active.assignment.symbol,
+                    "mode": active.assignment.mode,
+                    "profile": active.profile.as_ref().map(|profile| serde_json::json!({
+                        "profile_id": profile.profile_id,
+                        "version": profile.version,
+                        "parameters": profile.parameters,
+                        "learning_samples": profile.learning_samples,
+                        "positive_samples": profile.positive_samples,
+                        "realized_pnl": profile.realized_pnl,
+                    })),
+                    "lifecycle_status": "assigned",
+                    "assigned_at_ms": active.assigned_at_ms,
+                    "elapsed_ms": now_ms.saturating_sub(active.assigned_at_ms),
+                })
+            })
+            .collect()
     }
 
     fn has_cached(&self, strategy: Strategy, key: &str) -> bool {
@@ -910,6 +1097,7 @@ impl ScoutCoordinator {
                             parameters: profile.parameters.clone(),
                             candidate,
                         },
+                        profile.clone(),
                         evidence,
                         evidence_request_id,
                         evidence_permit,
@@ -923,7 +1111,7 @@ impl ScoutCoordinator {
         drop(state);
 
         results.reserve(assignments.len());
-        for (assignment, evidence, evidence_request_id, _evidence_permit) in assignments {
+        for (assignment, profile, evidence, evidence_request_id, _evidence_permit) in assignments {
             let expected_id = assignment.assignment_id.clone();
             let expected_strategy = assignment.strategy;
             let (sender, receiver) = oneshot::channel();
@@ -932,6 +1120,11 @@ impl ScoutCoordinator {
                 .lock()
                 .await
                 .insert(expected_id.clone(), sender);
+            self.scout_updates.register_active_assignment(
+                assignment.clone(),
+                Some(profile),
+                crate::now_ms(),
+            );
             let sequence = self
                 .scout_updates
                 .publish(expected_strategy, ScoutDataUpdate::Assignment(assignment));
@@ -974,6 +1167,13 @@ impl ScoutCoordinator {
                 Ok(result)
             }
             .await;
+            self.scout_updates
+                .forget_assignment(expected_strategy, &expected_id);
+            self.scout_updates
+                .assignments
+                .lock()
+                .await
+                .remove(&expected_id);
             if let Some(id) = evidence_request_id.as_deref() {
                 let mut state = self.state.state.lock().await;
                 let finish = worker_result
@@ -2125,10 +2325,14 @@ impl ScoutCoordinator {
     ) -> anyhow::Result<ScoutCoordinatorRouteResult> {
         let path = command.path.split('?').next().unwrap_or(&command.path);
         if path == "/scout-activity" && command.method == ScoutWorkerHttpMethod::Get {
+            let items = self.recent_scout_activity.lock().await.clone();
+            let active_assignments = self
+                .scout_updates
+                .active_assignment_snapshot(crate::now_ms());
             return Ok(ScoutCoordinatorRouteResult {
                 request_id: command.request_id,
                 status: 200,
-                body: serde_json::json!({"items": self.recent_scout_activity.lock().await.clone()}),
+                body: serde_json::json!({"items": items, "active_assignments": active_assignments}),
             });
         }
         if path == "/scout-replay/paired-returns" && command.method == ScoutWorkerHttpMethod::Get {
@@ -2233,8 +2437,12 @@ impl ScoutCoordinator {
                 body: searches.body,
             });
         }
-        let replay =
-            crate::scout_replay::build_paired_return_stream(&outcomes.body, &searches.body);
+        let portfolio_intervals = fetch_position_manager_portfolio_intervals().await;
+        let replay = crate::scout_replay::build_paired_return_stream_with_portfolio_intervals(
+            &outcomes.body,
+            &searches.body,
+            &portfolio_intervals,
+        );
         self.persist_scout_replay_run(&replay).await?;
         Ok(ScoutCoordinatorRouteResult {
             request_id: request_id.to_owned(),
@@ -2751,12 +2959,10 @@ fn aggregate_outcomes(
                 "flats",
                 "unavailable",
             ] {
-                summaries[group][key] = serde_json::json!(
-                    summaries[group][key]
-                        .as_u64()
-                        .unwrap_or_default()
-                        .saturating_add(body["summary"][group][key].as_u64().unwrap_or_default())
-                );
+                summaries[group][key] = serde_json::json!(summaries[group][key]
+                    .as_u64()
+                    .unwrap_or_default()
+                    .saturating_add(body["summary"][group][key].as_u64().unwrap_or_default()));
             }
         }
     }
@@ -2947,11 +3153,9 @@ fn candidates_for_profile(
             Strategy::LiveTradeFlow => vec![components["trade_flow_imbalance"].as_f64()],
             Strategy::LiveOrderBook => vec![components["book_imbalance"].as_f64()],
             Strategy::LiveVwapDislocation => vec![components["mispricing_vs_vwap_bps"].as_f64()],
-            Strategy::LiveAbsorptionPressure => vec![
-                components["pressure_without_price_move"]
-                    .as_f64()
-                    .map(|value| -value),
-            ],
+            Strategy::LiveAbsorptionPressure => vec![components["pressure_without_price_move"]
+                .as_f64()
+                .map(|value| -value)],
             _ => Vec::new(),
         };
         let directions = values
@@ -3302,11 +3506,114 @@ impl RSocket for CoordinatorResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LearningState, RegisteredProfile, variant_key};
+    use crate::{variant_key, LearningState, RegisteredProfile};
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex as StdMutex};
     use strategy::StrategyProfile;
     use tokio::sync::Mutex;
+
+    fn active_assignment(id: &str) -> ScoutWorkAssignment {
+        ScoutWorkAssignment {
+            assignment_id: id.into(),
+            strategy: Strategy::LiveMomentum,
+            mode: ScoutWorkMode::Evaluate,
+            symbol: "BTC-USDT".into(),
+            parameters: BTreeMap::from([("minimum_momentum".into(), 0.5)]),
+            candidate: serde_json::json!({"direction":"bullish"}),
+        }
+    }
+
+    fn active_profile() -> StrategyProfile {
+        StrategyProfile {
+            profile_id: "profile-btc-v2".into(),
+            version: 2,
+            symbol: "BTC-USDT".into(),
+            strategy: "live-momentum".into(),
+            parameters: BTreeMap::from([("minimum_momentum".into(), 0.5)]),
+            learning_samples: 12,
+            positive_samples: 8,
+            realized_pnl: 1.25,
+        }
+    }
+
+    #[test]
+    fn active_scout_assignment_snapshot_reports_authoritative_fields_and_bounds_size() {
+        let hub = ScoutUpdateHub::new();
+        hub.register_active_assignment(
+            active_assignment("assignment-1"),
+            Some(active_profile()),
+            100,
+        );
+        let active = hub.active_assignment_snapshot(175);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0]["assignment_id"], "assignment-1");
+        assert_eq!(active[0]["strategy"], "live-momentum");
+        assert_eq!(active[0]["symbol"], "BTC-USDT");
+        assert_eq!(active[0]["lifecycle_status"], "assigned");
+        assert_eq!(active[0]["assigned_at_ms"], 100);
+        assert_eq!(active[0]["elapsed_ms"], 75);
+        assert_eq!(active[0]["profile"]["profile_id"], "profile-btc-v2");
+        assert_eq!(active[0]["profile"]["version"], 2);
+        assert_eq!(active[0]["profile"]["learning_samples"], 12);
+
+        hub.register_active_assignment(active_assignment("assignment-2"), None, 110);
+        let active = hub.active_assignment_snapshot(175);
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|row| row["profile"].is_null()));
+
+        let empty = ScoutUpdateHub::new();
+        assert!(empty.active_assignment_snapshot(175).is_empty());
+
+        for index in 0..(MAX_ACTIVE_SCOUT_ACTIVITY_ITEMS + 8) {
+            empty.register_active_assignment(
+                active_assignment(&format!("bounded-{index}")),
+                None,
+                100,
+            );
+        }
+        assert_eq!(
+            empty.active_assignment_snapshot(175).len(),
+            MAX_ACTIVE_SCOUT_ACTIVITY_ITEMS
+        );
+    }
+
+    #[tokio::test]
+    async fn scout_activity_route_preserves_completed_items_and_adds_active_assignments() {
+        let service = ServiceState {
+            state: Arc::new(Mutex::new(LearningState::default())),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        };
+        let coordinator =
+            ScoutCoordinator::new(service, "live-momentum=ws://127.0.0.1:1", Router::new())
+                .unwrap();
+        let completed = serde_json::json!([{"assignment_id":"done","decision":"no_action"}]);
+        *coordinator.recent_scout_activity.lock().await = completed.as_array().unwrap().clone();
+        coordinator.scout_updates.register_active_assignment(
+            active_assignment("assignment-1"),
+            Some(active_profile()),
+            crate::now_ms(),
+        );
+        let result = coordinator
+            .local_route(ScoutCoordinatorRouteCommand {
+                request_id: "activity-test".into(),
+                strategy: None,
+                method: ScoutWorkerHttpMethod::Get,
+                path: "/scout-activity".into(),
+                payload: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.body["items"], completed);
+        assert_eq!(
+            result.body["active_assignments"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            result.body["active_assignments"][0]["assignment_id"],
+            "assignment-1"
+        );
+    }
 
     #[test]
     fn replay_history_status_distinguishes_exhaustion_truncation_and_unavailability() {
@@ -3836,15 +4143,14 @@ mod tests {
         );
         assert_eq!(response.assignments[0].candidate["timestamp"], 123);
         assert_eq!(
-            response.assignments[0].candidate["strategy_decision"]["strategy_parameters"]["minimum_momentum"],
+            response.assignments[0].candidate["strategy_decision"]["strategy_parameters"]
+                ["minimum_momentum"],
             0.6
         );
-        assert!(
-            response.assignments[0]
-                .candidate
-                .get("components")
-                .is_none()
-        );
+        assert!(response.assignments[0]
+            .candidate
+            .get("components")
+            .is_none());
     }
 
     #[tokio::test]

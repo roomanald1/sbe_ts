@@ -1881,6 +1881,7 @@ dependencies = [
  "rsocket_rust_transport_websocket",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
