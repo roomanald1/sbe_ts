@@ -1,4 +1,59 @@
 use std::io::Write;
+use sha2::{Digest, Sha256};
+
+fn stable_signal_source_event_id(
+    symbol: &str,
+    event: &SignalFeedEvent,
+) -> String {
+    let timestamp = match event {
+        SignalFeedEvent::Price { timestamp, .. }
+        | SignalFeedEvent::Trade { timestamp, .. }
+        | SignalFeedEvent::Book { timestamp, .. } => *timestamp,
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"insights-signal-event:v1\0");
+    hasher.update((symbol.len() as u64).to_be_bytes());
+    hasher.update(symbol.as_bytes());
+    hasher.update(timestamp.to_be_bytes());
+    match event {
+        SignalFeedEvent::Price { price, .. } => {
+            hasher.update(b"price");
+            hasher.update(price.to_bits().to_be_bytes());
+        }
+        SignalFeedEvent::Trade {
+            price,
+            size,
+            is_buy,
+            ..
+        } => {
+            hasher.update(b"trade");
+            hasher.update(price.to_bits().to_be_bytes());
+            hasher.update(size.to_bits().to_be_bytes());
+            hasher.update([u8::from(*is_buy)]);
+        }
+        SignalFeedEvent::Book {
+            best_bid,
+            best_ask,
+            bid_sizes,
+            ask_sizes,
+            bid_levels,
+            ask_levels,
+            ..
+        } => {
+            hasher.update(b"book");
+            hasher.update(best_bid.to_bits().to_be_bytes());
+            hasher.update(best_ask.to_bits().to_be_bytes());
+            for value in bid_sizes.iter().chain(ask_sizes.iter()) {
+                hasher.update(value.to_bits().to_be_bytes());
+            }
+            for (price, size) in bid_levels.iter().chain(ask_levels.iter()) {
+                hasher.update(price.to_bits().to_be_bytes());
+                hasher.update(size.to_bits().to_be_bytes());
+            }
+        }
+    }
+    format!("insights-event:v1:sha256:{:x}", hasher.finalize())
+}
 
 fn compress_live_strategy_update(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
@@ -250,6 +305,7 @@ async fn update_scout_strategy_status(
 // generic JSON value and deserializing it again for every live feed update.
 fn strategy_signal_from_snapshot(
     snapshot: &SignalSnapshot,
+    event_identity: &strategy::LiveStrategyEventIdentity,
 ) -> strategy::StrategyMarketSignal {
     let components = &snapshot.components;
     strategy::StrategyMarketSignal {
@@ -331,7 +387,11 @@ fn strategy_signal_from_snapshot(
         },
         strategy_candidate: false,
         strategy: None,
-        strategy_decision: None,
+        strategy_decision: Some(serde_json::json!({
+            "live_worker_event_id": event_identity.event_id,
+            "live_worker_event_identity_version": event_identity.schema_version,
+            "live_worker_episode_id": event_identity.episode_id,
+        })),
         market_regime: None,
         market_state: None,
         news_attribution: snapshot
@@ -352,6 +412,8 @@ async fn ingest_signal_event(
     admit_runtime_symbol(&runtime, &request.symbol)
         .await
         .map_err(|()| (StatusCode::TOO_MANY_REQUESTS, "Insights active-symbol capacity reached".to_owned()))?;
+    let source_event_id = stable_signal_source_event_id(&request.symbol, &request.event);
+    let event_identity = strategy::LiveStrategyEventIdentity::from_source_event_id(&source_event_id);
     let event_kind = match &request.event {
         SignalFeedEvent::Price { .. } => "price",
         SignalFeedEvent::Trade { .. } => "trade",
@@ -682,9 +744,9 @@ async fn ingest_signal_event(
         let signal_encoding_started = Instant::now();
         let update = strategy::StrategyInsightUpdate {
             contract_version: strategy::STRATEGY_INSIGHT_UPDATE_VERSION,
-            event_id: format!("{}:{}", snapshot.symbol, snapshot.timestamp),
+            event_id: source_event_id,
             event_time_ms: snapshot.timestamp,
-            signal: Some(strategy_signal_from_snapshot(snapshot)),
+            signal: Some(strategy_signal_from_snapshot(snapshot, &event_identity)),
             market: market_value,
             taker_fee_rate: Some(insights::signals::configured_signal_taker_fee_rate()),
             daily_snapshot: None,
@@ -829,6 +891,47 @@ mod signal_ingestion_tests {
         bytes.extend_from_slice(&price.to_le_bytes());
         bytes.extend_from_slice(&timestamp_ms.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn source_event_identity_is_versioned_stable_and_content_addressed() {
+        let first = raw_price_event(42, 100.0);
+        let exact_retry = first.clone();
+        let same_time_different_payload = raw_price_event(42, 100.25);
+        let first_request = decode_signal_event(&first).unwrap();
+        let retry_request = decode_signal_event(&exact_retry).unwrap();
+        let changed_request = decode_signal_event(&same_time_different_payload).unwrap();
+
+        let first_id = stable_signal_source_event_id(&first_request.symbol, &first_request.event);
+        let retry_id = stable_signal_source_event_id(&retry_request.symbol, &retry_request.event);
+        let changed_id = stable_signal_source_event_id(
+            &changed_request.symbol,
+            &changed_request.event,
+        );
+
+        assert_eq!(first_id, retry_id);
+        assert_ne!(first_id, changed_id);
+        assert!(first_id.starts_with("insights-event:v1:sha256:"));
+        assert!(first_id.len() > "insights-event:v1:sha256:".len());
+    }
+
+    #[test]
+    fn normalized_event_identity_is_stable_and_a_new_event_time_resets_identity() {
+        let event = SignalFeedEvent::Price {
+            timestamp: 42,
+            price: 100.0,
+        };
+        let original = stable_signal_source_event_id("BTC-USDT", &event);
+        assert_ne!(
+            original,
+            stable_signal_source_event_id(
+                "BTC-USDT",
+                &SignalFeedEvent::Price {
+                    timestamp: 43,
+                    price: 100.0,
+                },
+            )
+        );
     }
 
     fn benchmark_input_hash() -> String {
@@ -980,7 +1083,24 @@ mod signal_ingestion_tests {
                 .expect("production signal publication should complete within one second")
                 .expect("accepted raw price event publishes a strategy signal update");
             let value: serde_json::Value = serde_json::from_slice(&update).unwrap();
-            assert_eq!(value["event_id"], format!("BTC-USDT:{timestamp}"));
+            assert!(value["event_id"]
+                .as_str()
+                .is_some_and(|event_id| event_id.starts_with("insights-event:v1:sha256:")));
+            let source_event_id = value["event_id"].as_str().unwrap();
+            let worker_identity =
+                strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
+            assert_eq!(
+                value["signal"]["strategy_decision"]["live_worker_event_id"],
+                worker_identity.event_id
+            );
+            assert_eq!(
+                value["signal"]["strategy_decision"]["live_worker_event_identity_version"],
+                worker_identity.schema_version
+            );
+            assert_eq!(
+                value["signal"]["strategy_decision"]["live_worker_episode_id"],
+                worker_identity.episode_id
+            );
             assert_eq!(value["signal"]["timestamp"], timestamp);
             assert!(!value["signal"].is_null());
             elapsed_ns.push(ingress_started.elapsed().as_nanos());

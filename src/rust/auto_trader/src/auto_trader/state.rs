@@ -449,6 +449,12 @@ struct RestingOrderRevalidationSnapshot {
     profile_id: Option<String>,
     profile_version: Option<u64>,
     parameter_hash: Option<String>,
+    #[serde(default)]
+    event_identity_version: Option<u16>,
+    #[serde(default)]
+    event_id: Option<String>,
+    #[serde(default)]
+    episode_id: Option<String>,
 }
 
 /// Versioned identities created atomically with an accepted AutoTrader

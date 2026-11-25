@@ -371,6 +371,50 @@ describe('AutoTraderOutcomesModel', () => {
     assert.equal(summary?.todayRealizedUsd, 8);
   });
 
+  it('keeps partially attributed closed fills visible without inventing P&L', () => {
+    const rows = buildLegacyLedgerOutcomes(
+      'BTC-USDT',
+      [
+        {
+          id: 'unattributed-entry',
+          symbol: 'BTC-USDT',
+          side: 'buy',
+          quantity: 1,
+          execution_price: 100,
+          timestamp: 1,
+          parent_order_id: 'entry-order',
+        },
+        {
+          id: 'unattributed-exit',
+          symbol: 'BTC-USDT',
+          side: 'sell',
+          quantity: 1,
+          execution_price: 110,
+          timestamp: 2,
+          parent_order_id: 'exit-order',
+        },
+      ],
+      'USDT',
+      1,
+      {},
+      {},
+      new Map(),
+    );
+    const summary = rows.find((row) => row.rowId.startsWith('ledger-summary:'));
+    assert.equal(summary?.status, 'Closed');
+    assert.equal(summary?.netPnlUsd, undefined);
+    assert.equal(summary?.todayRealizedUsd, undefined);
+    assert.equal(
+      rows.filter((row) => row.rowId.startsWith('ledger-trade:')).length,
+      2,
+    );
+    const exit = rows.find(
+      (row) => row.rowId === 'ledger-trade:unattributed-exit',
+    );
+    assert.equal(exit?.netPnlUsd, undefined);
+    assert.equal(exit?.pnl, 0);
+  });
+
   it('tracks close confirmation state', () => {
     const model = new AutoTraderOutcomesModel();
     assert.equal(model.state$.value.loading, true);

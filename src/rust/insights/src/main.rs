@@ -2,8 +2,6 @@
 mod binance_client;
 #[path = "network/feed_client.rs"]
 mod feed_client;
-#[path = "observability/latency.rs"]
-mod latency;
 #[path = "observability/logging.rs"]
 mod logging;
 #[path = "feeds/rolling_volatility.rs"]
@@ -14,7 +12,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use insights::{
-    daily_summary,
+    daily_summary, latency,
     signals::{
         ExternalMarketFeatures, NewsAttribution, NewsHeadlineAttribution, SignalEngine,
         SignalEvaluation, SignalSnapshot, SignalStore, StoredSignalRecord,

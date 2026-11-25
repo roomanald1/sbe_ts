@@ -43,7 +43,9 @@ struct SignalSettingsSnapshot {
 const MAX_RETAINED_EXPLORATORY_EVENT_RESERVATIONS: usize = 10_000;
 
 fn exploratory_event_key(
+    identity_version: u16,
     event_id: &str,
+    episode_id: &str,
     symbol: &str,
     strategy: &str,
     direction: &str,
@@ -51,6 +53,8 @@ fn exploratory_event_key(
 ) -> Option<String> {
     if event_id.trim().is_empty()
         || event_id.len() > 512
+        || episode_id.trim().is_empty()
+        || episode_id.len() > 512
         || symbol.trim().is_empty()
         || symbol.len() > 128
         || strategy.trim().is_empty()
@@ -63,8 +67,9 @@ fn exploratory_event_key(
         return None;
     }
     let encoded = serde_json::to_vec(&serde_json::json!({
-        "identity_version": 1,
+        "identity_version": identity_version,
         "event_id": event_id,
+        "episode_id": episode_id,
         "symbol": symbol,
         "strategy": strategy,
         "direction": direction,
@@ -76,13 +81,24 @@ fn exploratory_event_key(
 }
 
 fn exploratory_event_key_for_signal(signal: &Signal) -> Option<String> {
-    // AutoTrader has no local producer contract proving this ID's lifecycle.
-    // Dedup only repeats an explicitly supplied worker ID; never infer an
-    // episode from timestamps or market values when that ID is absent.
+    // Versioned worker identities provide explicit event and episode keys.
+    // Legacy IDs remain best-effort and never gain inferred continuity.
     let decision = signal.strategy_decision.as_ref()?;
     let event_id = decision
         .get("live_worker_event_id")
         .and_then(serde_json::Value::as_str)?;
+    let identity_version = decision
+        .get("live_worker_event_identity_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u16::try_from(version).ok())
+        .unwrap_or(0);
+    let episode_id = if identity_version == strategy::LIVE_STRATEGY_EVENT_ID_VERSION {
+        decision
+            .get("live_worker_episode_id")
+            .and_then(serde_json::Value::as_str)?
+    } else {
+        event_id
+    };
     let strategy = signal.strategy.as_deref()?;
     let supplied_profile = decision
         .get("learning_profile_id")
@@ -107,7 +123,9 @@ fn exploratory_event_key_for_signal(signal: &Signal) -> Option<String> {
             .then(|| strategy::profile_id(&signal.symbol, strategy, &parameters))
     })?;
     exploratory_event_key(
+        identity_version,
         event_id,
+        episode_id,
         &signal.symbol,
         strategy,
         &signal.direction,
@@ -170,6 +188,9 @@ async fn snapshot_signal_settings(
     }
     let quote_rate = quote_usd_rate(&settings, signal_key);
     let strategy_key = signal.strategy.as_deref().unwrap_or("unattributed");
+    if let Some(reason) = post_stop_reentry_block_reason(&settings, signal, now_ms) {
+        return Err(reason);
+    }
     let block_reason =
         signal_position_block_reason(&settings, signal, signal_key, strategy_key, now_ms);
     let ioc_fallback_for = match block_reason {
@@ -550,6 +571,9 @@ async fn submit_selected_signal(
                 "Exploratory source event already reserved for this profile",
             ));
         }
+        if let Some(reason) = post_stop_reentry_block_reason(&settings, signal, now_ms) {
+            return Ok(skipped_for_signal(signal, &reason));
+        }
         let strategy = signal.strategy.as_deref().and_then(Strategy::from_name);
         if !paper_learning_exploration_active(&settings, now) && !exploratory {
             if let Some(reason) = learned_pause_block_reason(
@@ -716,6 +740,7 @@ async fn submit_selected_signal(
                 "Canonical lifecycle identity sequence is exhausted",
             ));
         };
+        consume_post_stop_reentry_cooldown(&mut settings, signal, now_ms);
         stage_timings_ms.insert(
             "order_reservation_record_local".to_owned(),
             order_reservation_started.elapsed().as_secs_f64() * 1_000.0,
@@ -758,6 +783,21 @@ async fn submit_selected_signal(
                 // Live worker reports currently echo the canonical profile ID
                 // in `parameter_hash`; retain that exact contract value.
                 parameter_hash: profile_id.clone(),
+                event_identity_version: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision["live_worker_event_identity_version"].as_u64())
+                    .and_then(|version| u16::try_from(version).ok()),
+                event_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision["live_worker_event_id"].as_str())
+                    .map(str::to_owned),
+                episode_id: signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision["live_worker_episode_id"].as_str())
+                    .map(str::to_owned),
             }),
             strength: signal.strength,
             ioc_fallback_for,
@@ -1048,7 +1088,9 @@ mod selected_signal_order_fee_tests {
     #[test]
     fn exploration_event_identity_distinguishes_new_event_profile_and_direction() {
         let base = exploratory_event_key(
+            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
             "worker-event-7",
+            "episode-a",
             "BTC-USDT",
             "live-momentum",
             "bullish",
@@ -1057,7 +1099,9 @@ mod selected_signal_order_fee_tests {
         .unwrap();
         assert_eq!(
             exploratory_event_key(
+                strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
                 "worker-event-7",
+                "episode-a",
                 "BTC-USDT",
                 "live-momentum",
                 "bullish",
@@ -1065,23 +1109,42 @@ mod selected_signal_order_fee_tests {
             ),
             Some(base.clone())
         );
-        for (event_id, direction, profile) in [
-            ("worker-event-8", "bullish", "profile-a"),
-            ("worker-event-7", "bearish", "profile-a"),
-            ("worker-event-7", "bullish", "profile-b"),
+        for (event_id, episode_id, direction, profile) in [
+            ("worker-event-8", "episode-b", "bullish", "profile-a"),
+            ("worker-event-7", "episode-b", "bullish", "profile-a"),
+            ("worker-event-7", "episode-a", "bearish", "profile-a"),
+            ("worker-event-7", "episode-a", "bullish", "profile-b"),
         ] {
             assert_ne!(
-                exploratory_event_key(event_id, "BTC-USDT", "live-momentum", direction, profile,),
+                exploratory_event_key(
+                    strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+                    event_id,
+                    episode_id,
+                    "BTC-USDT",
+                    "live-momentum",
+                    direction,
+                    profile,
+                ),
                 Some(base.clone())
             );
         }
         assert_eq!(
-            exploratory_event_key("", "BTC-USDT", "live-momentum", "bullish", "profile-a"),
+            exploratory_event_key(
+                strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
+                "",
+                "episode-a",
+                "BTC-USDT",
+                "live-momentum",
+                "bullish",
+                "profile-a",
+            ),
             None
         );
         assert_eq!(
             exploratory_event_key(
+                strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
                 &"e".repeat(513),
+                "episode-a",
                 "BTC-USDT",
                 "live-momentum",
                 "bullish",
@@ -1105,7 +1168,9 @@ mod selected_signal_order_fee_tests {
     #[test]
     fn repeated_exploration_reservation_is_bounded_and_persists_across_restart() {
         let key = exploratory_event_key(
+            strategy::LIVE_STRATEGY_EVENT_ID_VERSION,
             "worker-event-7",
+            "episode-a",
             "BTC-USDT",
             "live-momentum",
             "bullish",

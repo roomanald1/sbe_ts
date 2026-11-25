@@ -10,6 +10,7 @@ type LegacyCycle = {
   direction: 'buy' | 'sell';
   realizedQuote: number;
   todayRealizedQuote: number;
+  realizedQuoteComplete: boolean;
 };
 
 export function buildLegacyLedgerOutcomes(
@@ -38,6 +39,7 @@ export function buildLegacyLedgerOutcomes(
       direction: signedQuantity > 0 ? 'buy' : 'sell',
       realizedQuote: 0,
       todayRealizedQuote: 0,
+      realizedQuoteComplete: true,
     };
   };
   const flushCycle = (closedAt?: number) => {
@@ -47,7 +49,9 @@ export function buildLegacyLedgerOutcomes(
     const remaining = Math.abs(cycle.positionQuantity);
     const status = remaining > 1e-12 ? 'Partially closed' : 'Closed';
     const todayRealizedUsd =
-      typeof quoteUsdRate === 'number' && Number.isFinite(quoteUsdRate)
+      cycle.realizedQuoteComplete &&
+      typeof quoteUsdRate === 'number' &&
+      Number.isFinite(quoteUsdRate)
         ? cycle.todayRealizedQuote * quoteUsdRate
         : undefined;
     rows.push({
@@ -98,8 +102,13 @@ export function buildLegacyLedgerOutcomes(
         pnl: 0,
         entryFees: trade.fee ?? 0,
         netPnlUsd:
-          typeof quoteUsdRate === 'number' && Number.isFinite(quoteUsdRate)
-            ? (todayRealizedByParent[parentId] ?? 0) * quoteUsdRate
+          Object.prototype.hasOwnProperty.call(
+            todayRealizedByParent,
+            parentId,
+          ) &&
+          typeof quoteUsdRate === 'number' &&
+          Number.isFinite(quoteUsdRate)
+            ? todayRealizedByParent[parentId] * quoteUsdRate
             : undefined,
         estimatedExitFeeRate: trade.fee_rate ?? 0,
         estimatedExitSlippageBps: 0,
@@ -119,11 +128,23 @@ export function buildLegacyLedgerOutcomes(
     if (!cycle) startCycle(trade, signed);
     const active = cycle!;
     const oldQuantity = active.positionQuantity;
+    const isExitFill =
+      oldQuantity !== 0 && Math.sign(oldQuantity) !== Math.sign(signed);
     if (trade.parent_order_id && !allocatedParents.has(trade.parent_order_id)) {
       allocatedParents.add(trade.parent_order_id);
       active.realizedQuote += realizedByParent[trade.parent_order_id] ?? 0;
       active.todayRealizedQuote +=
         todayRealizedByParent[trade.parent_order_id] ?? 0;
+    }
+    if (
+      isExitFill &&
+      (!trade.parent_order_id ||
+        !Object.prototype.hasOwnProperty.call(
+          realizedByParent,
+          trade.parent_order_id,
+        ))
+    ) {
+      active.realizedQuoteComplete = false;
     }
     active.trades.push(trade);
     if (oldQuantity === 0 || Math.sign(oldQuantity) === Math.sign(signed)) {

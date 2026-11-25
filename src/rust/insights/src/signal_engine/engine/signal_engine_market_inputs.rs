@@ -554,6 +554,67 @@ mod scout_tests {
     }
 
     #[test]
+    fn rejected_late_observation_only_outcome_increments_its_horizon_metric() {
+        let mut engine = SignalEngine::default();
+        engine.on_book(
+            1_000,
+            99.9,
+            100.1,
+            &[1.0],
+            &[1.0],
+            &[(99.9, 1.0)],
+            &[(100.1, 1.0)],
+        );
+        engine.on_price(1_000, 100.0, 0.0);
+        assert!(engine.track_scout(
+            "late-sample".into(),
+            "BTC-USDT".into(),
+            "live-momentum".into(),
+            1_000,
+            "bullish".into(),
+            100.0,
+            0.5,
+            0.8,
+            0.15,
+            0.1,
+            0.05,
+            None,
+            None,
+            None,
+            None,
+        ));
+        // Isolate the 1h observation so the metric's horizon label is tested
+        // independently of the shorter observations from this same scout.
+        engine
+            .pending
+            .retain(|pending| pending.scout_observation_only && pending.horizon_seconds == 3_600);
+
+        let before = crate::latency::snapshot();
+        let before_count = before["late_scout_observation_only_drops_by_horizon_seconds"]["3600"]
+            ["dropped"]
+            .as_u64()
+            .unwrap();
+        let before_total_lateness = before
+            ["late_scout_observation_only_drops_by_horizon_seconds"]["3600"]["total_lateness_ms"]
+            .as_u64()
+            .unwrap();
+
+        // The 1h observation is rejected just beyond its one-horizon lateness
+        // allowance. No outcome may be emitted or relabeled as a 2h result.
+        let outcomes = engine.on_price(7_201_001, 101.0, 0.0);
+        assert!(outcomes.is_empty());
+
+        let after = crate::latency::snapshot();
+        let one_hour_metric = &after["late_scout_observation_only_drops_by_horizon_seconds"]["3600"];
+        assert!(one_hour_metric["dropped"].as_u64().unwrap() >= before_count + 1);
+        assert!(
+            one_hour_metric["total_lateness_ms"].as_u64().unwrap()
+                >= before_total_lateness + 3_600_001
+        );
+        assert!(one_hour_metric["max_lateness_ms"].as_u64().unwrap() >= 3_600_001);
+    }
+
+    #[test]
     fn counterfactual_registration_creates_fixed_horizons_and_deduplicates() {
         let mut engine = SignalEngine::default();
         assert!(engine.track_counterfactual("BTC-USDT".into(), 1_000, "bullish".into(), 100.0,));

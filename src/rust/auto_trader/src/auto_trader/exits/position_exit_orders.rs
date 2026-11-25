@@ -1,3 +1,17 @@
+fn completed_stop_position_fill(
+    reason: &str,
+    filled_quantity: f64,
+    requested_quantity: f64,
+    position_fully_closed: bool,
+) -> bool {
+    reason == "stop-loss"
+        && filled_quantity.is_finite()
+        && requested_quantity.is_finite()
+        && requested_quantity > 0.0
+        && filled_quantity + 1e-12 >= requested_quantity
+        && position_fully_closed
+}
+
 async fn submit_position_exit_order(
     state: &AutoTraderState,
     symbol: String,
@@ -114,6 +128,7 @@ async fn submit_position_exit_order(
     };
     let mut strategy_realized_pnl = 0.0;
     let mut trade_feedback_enqueued = false;
+    let mut post_stop_cooldown_started = false;
     if filled > 0.0 {
         if let Some(price) = average_price {
             let Settings { strategy_positions, positions, .. } = &mut *settings;
@@ -141,6 +156,25 @@ async fn submit_position_exit_order(
     settings.realized_pnl += realized_pnl_usd;
     settings.daily_realized_pnl += realized_pnl_usd;
     if filled + 1e-12 >= quantity {
+        let strategy_position_closed = settings
+            .strategy_positions
+            .get(&symbol)
+            .and_then(|lots| lots.get(&strategy_key))
+            .is_none_or(|position| position.quantity.abs() <= 1e-12);
+        if completed_stop_position_fill(
+            reason,
+            filled,
+            quantity,
+            strategy_position_closed,
+        ) {
+            post_stop_cooldown_started = record_post_stop_reentry_cooldown(
+                &mut settings,
+                &symbol,
+                &strategy_key,
+                &position,
+                current_time_ms(),
+            );
+        }
         if !position.scout_entry && settings.positions.get(&symbol).is_none_or(|position| position.quantity.abs() <= 1e-12) {
             mark_symbol_entry_floor_lift(
                 &mut settings,
@@ -229,9 +263,9 @@ async fn submit_position_exit_order(
     }
     request_settings_persist(state)?;
     drop(settings);
-    if trade_feedback_enqueued {
+    if trade_feedback_enqueued || post_stop_cooldown_started {
         if let Err(error) = persist_settings_snapshot_durable(state).await {
-            crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
+            crate::service_log!("ERROR", "Could not durably persist closed-trade or post-stop state: {}", error.1);
         }
     }
     if let Some(decision_id) = entry_decision_id {

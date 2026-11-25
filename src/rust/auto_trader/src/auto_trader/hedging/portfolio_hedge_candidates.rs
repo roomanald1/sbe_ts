@@ -12,20 +12,43 @@ async fn portfolio_hedge_candidates() -> anyhow::Result<Value> {
         return Ok(value);
     }
 
-    let (ledger, market) = tokio::try_join!(
-        crate::service_rpc::position_get("/positions"),
-        crate::service_rpc::execution_get("/internal/market-histories"),
-    )?;
+    let ledger = crate::service_rpc::position_get("/positions").await?;
+    let positions = ledger
+        .get("positions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let held_symbols = positions
+        .iter()
+        .filter(|position| {
+            position["quantity"]
+                .as_f64()
+                .is_some_and(|quantity| quantity.is_finite() && quantity.abs() > 1e-12)
+        })
+        .filter_map(|position| position["symbol"].as_str())
+        .filter(|symbol| valid_market_history_symbol(symbol))
+        .collect::<Vec<_>>();
+    let invalid_held_symbols = positions
+        .iter()
+        .filter(|position| {
+            position["quantity"]
+                .as_f64()
+                .is_some_and(|quantity| quantity.is_finite() && quantity.abs() > 1e-12)
+        })
+        .filter_map(|position| position["symbol"].as_str())
+        .filter(|symbol| !valid_market_history_symbol(symbol))
+        .collect::<Vec<_>>();
+    let market = market_histories_for_held_symbols(&held_symbols).await?;
+    let market = with_invalid_held_symbol_failures(market, &invalid_held_symbols);
     let now_ms = current_time_ms();
     let timing_contract = market.get("timing_contract");
     let history_timing_contract_version = timing_contract
         .and_then(|contract| contract["version"].as_u64())
-        .filter(|version| *version == 1);
-    // Sampling cadence, retention and stream-idle timeout do not guarantee
-    // that each symbol's history was updated recently. Only consume freshness
-    // when the source publishes an explicit per-symbol bound.
+        .filter(|version| *version == 3);
+    // Sampling cadence and the global stream-idle timeout are not symbol-level
+    // guarantees. Version 3 publishes each symbol's active-book freshness.
     let per_symbol_freshness_limit_ms = timing_contract
-        .and_then(|contract| contract["per_symbol_freshness_limit_ms"].as_u64())
+        .and_then(|contract| contract["history_freshness_max_age_ms"].as_u64())
         .filter(|value| *value > 0)
         .unwrap_or(0);
     let market_mark_freshness_limit_ms = timing_contract
@@ -38,9 +61,9 @@ async fn portfolio_hedge_candidates() -> anyhow::Result<Value> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let positions = ledger
-        .get("positions")
-        .and_then(Value::as_array)
+    let history_freshness = market
+        .get("history_freshness")
+        .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
     let (open, unknown_position_records) = open_position_records(positions);
@@ -75,13 +98,12 @@ async fn portfolio_hedge_candidates() -> anyhow::Result<Value> {
             let latest_pair_sample_at_ms = latest_sample_at_ms
                 .zip(latest_candidate_sample_at_ms)
                 .map(|(left, right)| left.min(right));
-            let fresh = per_symbol_freshness_limit_ms > 0
-                && history_is_fresh(latest_sample_at_ms, now_ms, per_symbol_freshness_limit_ms)
-                && history_is_fresh(
-                    latest_candidate_sample_at_ms,
-                    now_ms,
-                    per_symbol_freshness_limit_ms,
-                );
+            let fresh = history_contract_is_fresh(
+                &history_freshness,
+                symbol,
+                candidate_symbol,
+                history_timing_contract_version,
+            );
             candidates.push(serde_json::json!({
                 "symbol": candidate_symbol,
                 "correlation": correlation,
@@ -130,9 +152,12 @@ async fn portfolio_hedge_candidates() -> anyhow::Result<Value> {
             let left_latest = latest_history_timestamp(&left);
             let right_latest = latest_history_timestamp(&right);
             let sampled_at_ms = left_latest.zip(right_latest).map(|(x, y)| x.min(y));
-            let fresh = per_symbol_freshness_limit_ms > 0
-                && history_is_fresh(left_latest, now_ms, per_symbol_freshness_limit_ms)
-                && history_is_fresh(right_latest, now_ms, per_symbol_freshness_limit_ms);
+            let fresh = history_contract_is_fresh(
+                &history_freshness,
+                a,
+                b,
+                history_timing_contract_version,
+            );
             correlations.push(serde_json::json!({
                 "symbol_a": a,
                 "symbol_b": b,
@@ -154,6 +179,103 @@ async fn portfolio_hedge_candidates() -> anyhow::Result<Value> {
     let result = Value::Object(result);
     *cache.lock().await = Some((Instant::now(), result.clone()));
     Ok(result)
+}
+
+fn valid_market_history_symbol(symbol: &str) -> bool {
+    symbol.len() <= 32
+        && symbol.split_once('-').is_some_and(|(base, quote)| {
+            !base.is_empty()
+                && !quote.is_empty()
+                && base.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && quote.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+fn with_invalid_held_symbol_failures(mut market: Value, symbols: &[&str]) -> Value {
+    for symbol in symbols {
+        market["history_freshness"][*symbol] = serde_json::json!({
+            "latest_observed_at_ms": null,
+            "observed_age_ms": null,
+            "state": "unavailable"
+        });
+        if let Some(subscriptions) = market["held_symbol_subscriptions"].as_array_mut() {
+            subscriptions.push(serde_json::json!({
+                "requested_symbol": symbol,
+                "symbol": null,
+                "subscription": null,
+                "status": "invalid_symbol",
+                "error": "Held position symbol is not a valid bounded market symbol",
+                "fresh_mark": null,
+                "history_freshness": {
+                    "latest_observed_at_ms": null,
+                    "observed_age_ms": null,
+                    "state": "unavailable"
+                }
+            }));
+        }
+    }
+    market
+}
+
+async fn market_histories_for_held_symbols(held_symbols: &[&str]) -> anyhow::Result<Value> {
+    const HELD_SYMBOLS_PER_REQUEST: usize = 32;
+    let mut combined = serde_json::json!({
+        "histories": {},
+        "market_marks": {},
+        "history_freshness": {},
+        "held_symbol_subscriptions": [],
+    });
+    let chunks: Vec<&[&str]> = if held_symbols.is_empty() {
+        vec![&[]]
+    } else {
+        held_symbols.chunks(HELD_SYMBOLS_PER_REQUEST).collect()
+    };
+    for chunk in chunks {
+        let path = if chunk.is_empty() {
+            "/internal/market-histories".to_owned()
+        } else {
+            format!(
+                "/internal/market-histories?held_symbols={}",
+                chunk.join(",")
+            )
+        };
+        let response = crate::service_rpc::execution_get(&path).await?;
+        for field in ["histories", "market_marks", "history_freshness"] {
+            if let (Some(target), Some(source)) = (
+                combined[field].as_object_mut(),
+                response.get(field).and_then(Value::as_object),
+            ) {
+                target.extend(source.iter().map(|(key, value)| (key.clone(), value.clone())));
+            }
+        }
+        if let (Some(target), Some(source)) = (
+            combined["held_symbol_subscriptions"].as_array_mut(),
+            response
+                .get("held_symbol_subscriptions")
+                .and_then(Value::as_array),
+        ) {
+            target.extend(source.iter().cloned());
+        }
+        combined["timing_contract"] = response
+            .get("timing_contract")
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
+    Ok(combined)
+}
+
+fn history_contract_is_fresh(
+    freshness: &Map<String, Value>,
+    left: &str,
+    right: &str,
+    contract_version: Option<u64>,
+) -> bool {
+    contract_version == Some(3)
+        && [left, right].into_iter().all(|symbol| {
+            freshness
+                .get(symbol)
+                .is_some_and(|status| status["state"].as_str() == Some("fresh"))
+        })
 }
 
 async fn get_portfolio_hedge_candidates(
@@ -254,7 +376,8 @@ fn return_correlation(a: &[(u64, f64)], b: &[(u64, f64)]) -> (Option<f64>, usize
 #[cfg(test)]
 mod portfolio_hedge_candidates_tests {
     use super::{
-        fresh_market_mark, history_is_fresh, open_position_records, return_correlation,
+        fresh_market_mark, history_contract_is_fresh, history_is_fresh, open_position_records,
+        return_correlation, valid_market_history_symbol, with_invalid_held_symbol_failures,
     };
 
     #[test]
@@ -263,6 +386,57 @@ mod portfolio_hedge_candidates_tests {
         assert!(!history_is_fresh(Some(899), 1_000, 100));
         assert!(history_is_fresh(Some(900), 1_000, 100));
         assert!(!history_is_fresh(Some(1_001), 1_000, 100));
+    }
+
+    #[test]
+    fn proxy_freshness_requires_v3_per_symbol_source_status_for_both_symbols() {
+        let freshness = serde_json::json!({
+            "BTC-USDT": { "state": "fresh" },
+            "ETH-USDT": { "state": "fresh" },
+            "SOL-USDT": { "state": "stale" },
+        });
+        let freshness = freshness.as_object().unwrap();
+        assert!(history_contract_is_fresh(
+            freshness,
+            "BTC-USDT",
+            "ETH-USDT",
+            Some(3)
+        ));
+        assert!(!history_contract_is_fresh(
+            freshness,
+            "BTC-USDT",
+            "SOL-USDT",
+            Some(3)
+        ));
+        assert!(!history_contract_is_fresh(
+            freshness,
+            "BTC-USDT",
+            "MISSING-USDT",
+            Some(3)
+        ));
+        assert!(!history_contract_is_fresh(
+            freshness,
+            "BTC-USDT",
+            "ETH-USDT",
+            Some(1)
+        ));
+    }
+
+    #[test]
+    fn invalid_held_symbol_is_reported_unavailable_without_a_query() {
+        assert!(valid_market_history_symbol("BTC-USDT"));
+        assert!(!valid_market_history_symbol("BTC/USDT"));
+        assert!(!valid_market_history_symbol("-USDT"));
+        assert!(!valid_market_history_symbol(&format!("{}-USDT", "A".repeat(28))));
+        let market = with_invalid_held_symbol_failures(
+            serde_json::json!({"history_freshness": {}, "held_symbol_subscriptions": []}),
+            &["BAD/PAIR"],
+        );
+        assert_eq!(market["history_freshness"]["BAD/PAIR"]["state"], "unavailable");
+        assert_eq!(
+            market["held_symbol_subscriptions"][0]["status"],
+            "invalid_symbol"
+        );
     }
 
     #[test]

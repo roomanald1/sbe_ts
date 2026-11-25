@@ -75,6 +75,13 @@ static UI_SNAPSHOT_PUSH: Histogram = Histogram::new();
 static STRATEGY_UPDATE_RAW_BYTES: AtomicU64 = AtomicU64::new(0);
 static STRATEGY_UPDATE_COMPRESSED_BYTES: AtomicU64 = AtomicU64::new(0);
 static DROPPED_RESEARCH_RECORDS: AtomicU64 = AtomicU64::new(0);
+const LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS: [u64; 4] = [60, 300, 900, 3_600];
+static LATE_SCOUT_OBSERVATION_DROPS: [AtomicU64; 4] =
+    [const { AtomicU64::new(0) }; LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS.len()];
+static LATE_SCOUT_OBSERVATION_TOTAL_LATENESS_MS: [AtomicU64; 4] =
+    [const { AtomicU64::new(0) }; LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS.len()];
+static LATE_SCOUT_OBSERVATION_MAX_LATENESS_MS: [AtomicU64; 4] =
+    [const { AtomicU64::new(0) }; LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS.len()];
 static SIGNAL_FEED_CONNECTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static SIGNAL_FEED_LAST_EVENT_AT_MS: AtomicU64 = AtomicU64::new(0);
@@ -177,7 +184,35 @@ pub fn record_dropped_research_records(count: usize) {
     DROPPED_RESEARCH_RECORDS.fetch_add(count as u64, Ordering::Relaxed);
 }
 
+/// Record an observation-only fixed-horizon result rejected for lateness.
+/// Counters are split by the originally requested horizon, not the elapsed time.
+pub fn record_late_scout_observation_drop(horizon_seconds: u64, lateness_ms: u64) {
+    let Some(index) = LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS
+        .iter()
+        .position(|horizon| *horizon == horizon_seconds)
+    else {
+        return;
+    };
+    LATE_SCOUT_OBSERVATION_DROPS[index].fetch_add(1, Ordering::Relaxed);
+    LATE_SCOUT_OBSERVATION_TOTAL_LATENESS_MS[index].fetch_add(lateness_ms, Ordering::Relaxed);
+    LATE_SCOUT_OBSERVATION_MAX_LATENESS_MS[index].fetch_max(lateness_ms, Ordering::Relaxed);
+}
+
 pub fn snapshot() -> Value {
+    let late_scout_observation_drops = LATE_SCOUT_OBSERVATION_HORIZONS_SECONDS
+        .iter()
+        .enumerate()
+        .map(|(index, horizon)| {
+            (
+                horizon.to_string(),
+                json!({
+                    "dropped": LATE_SCOUT_OBSERVATION_DROPS[index].load(Ordering::Relaxed),
+                    "total_lateness_ms": LATE_SCOUT_OBSERVATION_TOTAL_LATENESS_MS[index].load(Ordering::Relaxed),
+                    "max_lateness_ms": LATE_SCOUT_OBSERVATION_MAX_LATENESS_MS[index].load(Ordering::Relaxed),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
     json!({
         "event_queue_wait": EVENT_QUEUE_WAIT.snapshot(),
         "engine_lock_wait": ENGINE_LOCK_WAIT.snapshot(),
@@ -197,5 +232,6 @@ pub fn snapshot() -> Value {
         "strategy_update_compressed_bytes": STRATEGY_UPDATE_COMPRESSED_BYTES.load(Ordering::Relaxed),
         "ui_snapshot_push": UI_SNAPSHOT_PUSH.snapshot(),
         "dropped_research_records": DROPPED_RESEARCH_RECORDS.load(Ordering::Relaxed),
+        "late_scout_observation_only_drops_by_horizon_seconds": late_scout_observation_drops,
     })
 }

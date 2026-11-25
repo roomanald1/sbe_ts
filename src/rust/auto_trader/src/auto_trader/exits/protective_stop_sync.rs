@@ -101,6 +101,29 @@ async fn sync_protective_stops(
             let fully_closed = settings.strategy_positions.get(&symbol)
                 .and_then(|lots| lots.get(&strategy))
                 .is_none_or(|position| position.quantity.abs() <= 1e-12);
+            let stop_fully_filled = status == "filled"
+                && completed_stop_position_fill(
+                    "stop-loss",
+                    total_filled,
+                    stop.quantity,
+                    fully_closed,
+                );
+            let post_stop_cooldown_started = if stop_fully_filled {
+                let cooldown_position = TraderPosition {
+                    entry_decision_id: entry_decision_id.clone(),
+                    strategy_decision: strategy_decision.clone(),
+                    ..TraderPosition::default()
+                };
+                record_post_stop_reentry_cooldown(
+                    &mut settings,
+                    &symbol,
+                    &strategy,
+                    &cooldown_position,
+                    current_time_ms(),
+                )
+            } else {
+                false
+            };
             let trade_realized_pnl = prior_realized_pnl + strategy_realized_delta;
             let entry_notional = if initial_entry_notional > 0.0 {
                 initial_entry_notional
@@ -201,9 +224,9 @@ async fn sync_protective_stops(
                 .and_then(|order| order.strategy_realized_pnl)
                 .unwrap_or(strategy_realized_delta);
             drop(settings);
-            if trade_feedback_enqueued {
+            if trade_feedback_enqueued || post_stop_cooldown_started {
                 if let Err(error) = persist_settings_snapshot_durable(state).await {
-                    crate::service_log!("ERROR", "Could not durably persist closed-trade Learning outcome: {}", error.1);
+                    crate::service_log!("ERROR", "Could not durably persist closed-trade or post-stop state: {}", error.1);
                 }
             }
             if let Some(decision_id) = entry_decision_id {

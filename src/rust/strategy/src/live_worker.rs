@@ -426,6 +426,7 @@ impl LiveWorker {
         {
             return self.evaluate_dated_carry_update(update).await;
         }
+        let identity = crate::LiveStrategyEventIdentity::from_source_event_id(&update.event_id);
         if let Some(snapshot) = update.daily_snapshot.clone() {
             if !self.remember_insight_event("daily", &update.event_id).await
                 || update.event_time_ms != snapshot.as_of_ms
@@ -790,7 +791,9 @@ impl LiveWorker {
             };
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: update.event_id.clone(),
+                event_id: identity.event_id.clone(),
+                event_identity_version: identity.schema_version,
+                episode_id: identity.episode_id.clone(),
                 strategy: self.config.strategy,
                 symbol: signal.symbol.clone(),
                 profile_id: profile.profile_id.clone(),
@@ -877,6 +880,7 @@ impl LiveWorker {
         &self,
         update: crate::StrategyInsightUpdate,
     ) -> anyhow::Result<()> {
+        let identity = crate::LiveStrategyEventIdentity::from_source_event_id(&update.event_id);
         if self.config.strategy != Strategy::DatedCarry
             || live_worker_now_ms().saturating_sub(update.event_time_ms) > 120_000
             || !self
@@ -892,7 +896,9 @@ impl LiveWorker {
             let signal = carry_placeholder_signal("BTCUSDT", update.event_time_ms, None);
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: update.event_id,
+                event_id: identity.event_id.clone(),
+                event_identity_version: identity.schema_version,
+                episode_id: identity.episode_id.clone(),
                 strategy: Strategy::DatedCarry,
                 symbol: signal.symbol.clone(),
                 profile_id: String::new(),
@@ -947,7 +953,9 @@ impl LiveWorker {
             );
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: update.event_id,
+                event_id: identity.event_id.clone(),
+                event_identity_version: identity.schema_version,
+                episode_id: identity.episode_id.clone(),
                 strategy: Strategy::DatedCarry,
                 symbol: candidate.spot_symbol.clone(),
                 profile_id: profile.profile_id.clone(),
@@ -1010,7 +1018,9 @@ impl LiveWorker {
             );
             let report = crate::LiveStrategyDecisionReport {
                 contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                event_id: update.event_id,
+                event_id: identity.event_id.clone(),
+                event_identity_version: identity.schema_version,
+                episode_id: identity.episode_id.clone(),
                 strategy: Strategy::DatedCarry,
                 symbol: settlement.spot_symbol.clone(),
                 profile_id: profile.profile_id.clone(),
@@ -1229,7 +1239,9 @@ impl LiveWorker {
                 }
                 let report = crate::LiveStrategyDecisionReport {
                     contract_version: crate::LIVE_EVALUATION_CONTRACT_VERSION,
-                    event_id: update.event_id.clone(),
+                    event_id: identity.event_id.clone(),
+                    event_identity_version: identity.schema_version,
+                    episode_id: identity.episode_id.clone(),
                     strategy: self.config.strategy,
                     symbol: symbol.clone(),
                     profile_id: profile.profile_id.clone(),

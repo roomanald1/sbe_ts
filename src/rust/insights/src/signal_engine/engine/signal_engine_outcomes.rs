@@ -185,7 +185,12 @@ impl SignalEngine {
                     .timestamp
                     .saturating_add(pending.horizon_seconds.saturating_mul(1_000));
                 let maximum_delay_ms = pending.horizon_seconds.max(30).saturating_mul(1_000);
-                if timestamp.saturating_sub(due_at) > maximum_delay_ms {
+                let lateness_ms = timestamp.saturating_sub(due_at);
+                if lateness_ms > maximum_delay_ms {
+                    crate::latency::record_late_scout_observation_drop(
+                        pending.horizon_seconds,
+                        lateness_ms,
+                    );
                     continue;
                 }
             }

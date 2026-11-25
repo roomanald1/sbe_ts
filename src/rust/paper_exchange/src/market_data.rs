@@ -11,8 +11,11 @@ use rsocket_rust::{Client, prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::WebsocketClientTransport;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
@@ -28,6 +31,12 @@ const TICKER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TICKER_HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const TICKER_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MARKET_MARK_FRESHNESS: Duration = Duration::from_secs(5);
+const MAX_HELD_SYMBOLS_PER_REQUEST: usize = 64;
+const MAX_HELD_SYMBOLS_QUERY_BYTES: usize = 2_048;
+
+const SUBSCRIPTION_PENDING: u8 = 0;
+const SUBSCRIPTION_ACTIVE: u8 = 1;
+const SUBSCRIPTION_UNAVAILABLE: u8 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BookLevel {
@@ -47,10 +56,26 @@ struct Histories {
     by_symbol: HashMap<String, Vec<(u64, f64)>>,
 }
 
+struct BookSubscriptionState(AtomicU8);
+
+impl BookSubscriptionState {
+    fn new() -> Self {
+        Self(AtomicU8::new(SUBSCRIPTION_PENDING))
+    }
+
+    fn status(&self) -> &'static str {
+        match self.0.load(Ordering::Acquire) {
+            SUBSCRIPTION_ACTIVE => "active",
+            SUBSCRIPTION_UNAVAILABLE => "unavailable",
+            _ => "pending",
+        }
+    }
+}
+
 pub struct MarketData {
     books: RwLock<HashMap<String, Arc<BookSnapshot>>>,
     histories: Mutex<Histories>,
-    subscriptions: Mutex<HashMap<String, ()>>,
+    subscriptions: Mutex<HashMap<String, Arc<BookSubscriptionState>>>,
     feed_client: Mutex<Option<Arc<Client>>>,
 }
 
@@ -108,7 +133,8 @@ impl MarketData {
             subscriptions.len() < MAX_MARKET_BOOK_SUBSCRIPTIONS,
             "Paper Exchange market-book subscription limit reached"
         );
-        subscriptions.insert(symbol.clone(), ());
+        let subscription = Arc::new(BookSubscriptionState::new());
+        subscriptions.insert(symbol.clone(), Arc::clone(&subscription));
         drop(subscriptions);
         let data = Arc::clone(self);
         tokio::spawn(async move {
@@ -134,14 +160,30 @@ impl MarketData {
                                 .await
                             {
                                 Ok(Some(Ok(bytes))) => {
-                                    if let Some(book) = decode_book(&bytes) {
+                                    if book_symbol(&bytes) == Some(symbol.as_str())
+                                        && let Some(book) = decode_book(&bytes)
+                                    {
+                                        if let Some((timestamp, mid)) = book_history_sample(&book) {
+                                            data.record_history_sample(&symbol, timestamp, mid)
+                                                .await;
+                                        }
                                         data.books
                                             .write()
                                             .unwrap_or_else(|p| p.into_inner())
                                             .insert(symbol.clone(), Arc::new(book));
+                                        subscription
+                                            .0
+                                            .store(SUBSCRIPTION_ACTIVE, Ordering::Release);
                                     }
                                 }
                                 Ok(Some(Err(error))) => {
+                                    if error.to_string().contains(
+                                        "instrument is not available in the current OKX subscription",
+                                    ) {
+                                        subscription
+                                            .0
+                                            .store(SUBSCRIPTION_UNAVAILABLE, Ordering::Release);
+                                    }
                                     eprintln!(
                                         "Paper Exchange book stream failed for {symbol}: {error:#}"
                                     );
@@ -155,6 +197,11 @@ impl MarketData {
                                     break;
                                 }
                             }
+                        }
+                        if subscription.status() != "unavailable" {
+                            subscription
+                                .0
+                                .store(SUBSCRIPTION_PENDING, Ordering::Release);
                         }
                         data.invalidate_client(&client).await;
                     }
@@ -211,7 +258,6 @@ impl MarketData {
         let Ok(timestamp) = now_ms() else {
             return;
         };
-        let mut histories = self.histories.lock().await;
         for message in bytes.chunks_exact(TICKER_MESSAGE_LENGTH) {
             let symbol = String::from_utf8_lossy(&message[8..40])
                 .trim_end_matches([' ', '\0'])
@@ -220,25 +266,13 @@ impl MarketData {
             if !valid_symbol(&symbol) || !price.is_finite() || price <= 0.0 {
                 continue;
             }
-            if !histories.by_symbol.contains_key(&symbol)
-                && histories.by_symbol.len() >= MAX_TICKER_HISTORY_SYMBOLS
-            {
-                continue;
-            }
-            let samples = histories.by_symbol.entry(symbol).or_default();
-            if samples
-                .last()
-                .is_none_or(|(last, _)| {
-                    timestamp.saturating_sub(*last)
-                        >= TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64
-                })
-            {
-                samples.push((timestamp, price));
-                samples.retain(|(time, _)| {
-                    timestamp.saturating_sub(*time) <= TICKER_HISTORY_RETENTION.as_millis() as u64
-                });
-            }
+            self.record_history_sample(&symbol, timestamp, price).await;
         }
+    }
+
+    async fn record_history_sample(&self, symbol: &str, timestamp: u64, price: f64) {
+        let mut histories = self.histories.lock().await;
+        record_history_sample(&mut histories, symbol, timestamp, price);
     }
 
     pub fn book(&self, symbol: &str) -> Option<Arc<BookSnapshot>> {
@@ -296,8 +330,7 @@ async fn get_market_mark(
     let book = data
         .book(&symbol)
         .filter(|book| {
-            now.saturating_sub(book.updated_at_ms)
-                <= MARKET_MARK_FRESHNESS.as_millis() as u64
+            now.saturating_sub(book.updated_at_ms) <= MARKET_MARK_FRESHNESS.as_millis() as u64
         })
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -331,8 +364,7 @@ async fn get_market_book(
     let now = now_ms().map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
     data.book(&symbol)
         .filter(|book| {
-            now.saturating_sub(book.updated_at_ms)
-                <= MARKET_MARK_FRESHNESS.as_millis() as u64
+            now.saturating_sub(book.updated_at_ms) <= MARKET_MARK_FRESHNESS.as_millis() as u64
         })
         .map(|book| Json((*book).clone()))
         .ok_or((
@@ -413,6 +445,8 @@ async fn get_insights_inputs(
 struct MarketHistories {
     histories: HashMap<String, Vec<(u64, f64)>>,
     market_marks: HashMap<String, MarketMarkSnapshot>,
+    history_freshness: HashMap<String, SymbolHistoryFreshness>,
+    held_symbol_subscriptions: Vec<HeldSymbolSubscription>,
     timing_contract: MarketHistoryTimingContract,
 }
 
@@ -423,50 +457,277 @@ struct MarketMarkSnapshot {
 }
 
 #[derive(Serialize)]
+struct SymbolHistoryFreshness {
+    latest_observed_at_ms: Option<u64>,
+    observed_age_ms: Option<u64>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+struct HeldSymbolSubscription {
+    requested_symbol: String,
+    symbol: Option<String>,
+    subscription: Option<String>,
+    status: &'static str,
+    error: Option<String>,
+    fresh_mark: Option<MarketMarkSnapshot>,
+    history_freshness: SymbolHistoryFreshness,
+}
+
+#[derive(Deserialize, Default)]
+struct MarketHistoriesQuery {
+    held_symbols: Option<String>,
+}
+
+#[derive(Serialize)]
 struct MarketHistoryTimingContract {
     version: u16,
     sample_interval_ms: u64,
     retention_ms: u64,
     ticker_stream_idle_timeout_ms: u64,
     market_mark_freshness_ms: u64,
+    history_freshness_max_age_ms: u64,
+    history_freshness_basis: &'static str,
 }
 
 impl MarketHistoryTimingContract {
     fn current() -> Self {
         Self {
-            version: 1,
+            version: 3,
             sample_interval_ms: TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64,
             retention_ms: TICKER_HISTORY_RETENTION.as_millis() as u64,
             ticker_stream_idle_timeout_ms: TICKER_STREAM_IDLE_TIMEOUT.as_millis() as u64,
             market_mark_freshness_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
+            history_freshness_max_age_ms: history_freshness_max_age_ms(),
+            history_freshness_basis: "per-symbol active book subscription and current mark; history sample age bounded by sample spacing plus mark freshness",
         }
     }
 }
 
-async fn get_market_histories(State(data): State<Arc<MarketData>>) -> Json<MarketHistories> {
+async fn get_market_histories(
+    State(data): State<Arc<MarketData>>,
+    Query(query): Query<MarketHistoriesQuery>,
+) -> Result<Json<MarketHistories>, (StatusCode, String)> {
+    let requested_symbols = parse_held_symbols(query.held_symbols.as_deref())
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let mut held_symbol_subscriptions = Vec::with_capacity(requested_symbols.len());
+    for requested_symbol in requested_symbols {
+        let symbol = requested_symbol.trim().to_ascii_uppercase();
+        if !valid_symbol(&symbol) {
+            held_symbol_subscriptions.push(HeldSymbolSubscription {
+                requested_symbol,
+                symbol: None,
+                subscription: None,
+                status: "invalid_symbol",
+                error: Some("A valid market symbol is required".to_owned()),
+                fresh_mark: None,
+                history_freshness: history_freshness(
+                    &[],
+                    now_ms().unwrap_or_default(),
+                    false,
+                    false,
+                ),
+            });
+            continue;
+        }
+
+        if let Err(error) = data.ensure_book_subscription(&symbol).await {
+            held_symbol_subscriptions.push(HeldSymbolSubscription {
+                requested_symbol,
+                symbol: Some(symbol),
+                subscription: None,
+                status: "unavailable",
+                error: Some(error.to_string()),
+                fresh_mark: None,
+                history_freshness: history_freshness(
+                    &[],
+                    now_ms().unwrap_or_default(),
+                    false,
+                    false,
+                ),
+            });
+            continue;
+        }
+
+        let subscription = data.subscriptions.lock().await.get(&symbol).cloned();
+        let subscription_status = subscription.as_ref().map(|state| state.status());
+        let history_samples = data.history(&symbol).await;
+        let now = now_ms().unwrap_or_default();
+        let book = data.book(&symbol);
+        let fresh_mark = (subscription_status == Some("active"))
+            .then(|| book.as_ref())
+            .flatten()
+            .filter(|snapshot| market_mark_is_fresh(snapshot, now))
+            .map(|book| market_mark_snapshot(book));
+        let symbol_history_freshness = history_freshness(
+            &history_samples,
+            now,
+            subscription_status == Some("active"),
+            fresh_mark.is_some(),
+        );
+        let (status, error) = match subscription_status {
+            Some("unavailable") => (
+                "unavailable",
+                Some("FeedHandlers does not provide this symbol".to_owned()),
+            ),
+            Some("active") => ("subscribed", None),
+            _ => ("subscription_pending", None),
+        };
+        held_symbol_subscriptions.push(HeldSymbolSubscription {
+            requested_symbol,
+            symbol: Some(symbol),
+            subscription: subscription_status.map(str::to_owned),
+            status,
+            error,
+            fresh_mark,
+            history_freshness: symbol_history_freshness,
+        });
+    }
+
     let histories = data.histories().await;
+    let now = now_ms().unwrap_or_default();
+    let active_book_subscriptions = data
+        .subscriptions
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(symbol, state)| (state.status() == "active").then(|| symbol.clone()))
+        .collect::<HashSet<_>>();
+    let book_snapshots = data
+        .books
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|(symbol, book)| (symbol.clone(), Arc::clone(book)))
+        .collect::<HashMap<_, _>>();
+    let history_freshness = histories
+        .iter()
+        .map(|(symbol, samples)| {
+            let active = active_book_subscriptions.contains(symbol);
+            let book_is_fresh = book_snapshots
+                .get(symbol)
+                .is_some_and(|book| market_mark_is_fresh(book, now));
+            (
+                symbol.clone(),
+                history_freshness(samples, now, active, book_is_fresh),
+            )
+        })
+        .collect();
     let market_marks = data
         .books
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
-        .map(|(symbol, book)| {
-            let bid = book.bids.first().map(|level| level.price);
-            let ask = book.asks.first().map(|level| level.price);
-            (
-                symbol.clone(),
-                MarketMarkSnapshot {
-                    mid: bid.zip(ask).map(|(bid, ask)| (bid + ask) / 2.0),
-                    updated_at_ms: book.updated_at_ms,
-                },
-            )
+        .filter_map(|(symbol, book)| {
+            (active_book_subscriptions.contains(symbol) && market_mark_is_fresh(book, now))
+                .then(|| (symbol.clone(), market_mark_snapshot(book)))
         })
         .collect();
-    Json(MarketHistories {
+    Ok(Json(MarketHistories {
         histories,
         market_marks,
+        history_freshness,
+        held_symbol_subscriptions,
         timing_contract: MarketHistoryTimingContract::current(),
-    })
+    }))
+}
+
+fn market_mark_snapshot(book: &BookSnapshot) -> MarketMarkSnapshot {
+    MarketMarkSnapshot {
+        mid: market_mid(book),
+        updated_at_ms: book.updated_at_ms,
+    }
+}
+
+fn parse_held_symbols(input: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(input) = input else {
+        return Ok(Vec::new());
+    };
+    if input.len() > MAX_HELD_SYMBOLS_QUERY_BYTES {
+        return Err(format!(
+            "held_symbols exceeds the {MAX_HELD_SYMBOLS_QUERY_BYTES}-byte limit"
+        ));
+    }
+    if input.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let symbols = input.split(',').map(str::to_owned).collect::<Vec<_>>();
+    if symbols.len() > MAX_HELD_SYMBOLS_PER_REQUEST {
+        return Err(format!(
+            "held_symbols exceeds the {MAX_HELD_SYMBOLS_PER_REQUEST}-symbol limit"
+        ));
+    }
+    Ok(symbols)
+}
+
+fn record_history_sample(histories: &mut Histories, symbol: &str, timestamp: u64, price: f64) {
+    if !valid_symbol(symbol) || !price.is_finite() || price <= 0.0 {
+        return;
+    }
+    if !histories.by_symbol.contains_key(symbol)
+        && histories.by_symbol.len() >= MAX_TICKER_HISTORY_SYMBOLS
+    {
+        return;
+    }
+    let samples = histories.by_symbol.entry(symbol.to_owned()).or_default();
+    if samples.last().is_none_or(|(last, _)| {
+        timestamp.saturating_sub(*last) >= TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64
+    }) {
+        samples.push((timestamp, price));
+        samples.retain(|(time, _)| {
+            timestamp.saturating_sub(*time) <= TICKER_HISTORY_RETENTION.as_millis() as u64
+        });
+    }
+}
+
+fn history_freshness_max_age_ms() -> u64 {
+    TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64 + MARKET_MARK_FRESHNESS.as_millis() as u64
+}
+
+fn history_freshness(
+    samples: &[(u64, f64)],
+    now: u64,
+    active_subscription: bool,
+    fresh_book_mark: bool,
+) -> SymbolHistoryFreshness {
+    let latest_observed_at_ms = samples.last().map(|(timestamp, _)| *timestamp);
+    let observed_age_ms = latest_observed_at_ms.map(|timestamp| now.saturating_sub(timestamp));
+    let state = if !active_subscription || latest_observed_at_ms.is_none() {
+        "unavailable"
+    } else if !fresh_book_mark
+        || observed_age_ms.is_some_and(|age| age > history_freshness_max_age_ms())
+    {
+        "stale"
+    } else {
+        "fresh"
+    };
+    SymbolHistoryFreshness {
+        latest_observed_at_ms,
+        observed_age_ms,
+        state,
+    }
+}
+
+fn market_mid(book: &BookSnapshot) -> Option<f64> {
+    book.bids
+        .first()
+        .zip(book.asks.first())
+        .map(|(bid, ask)| (bid.price + ask.price) / 2.0)
+        .filter(|mid| mid.is_finite() && *mid > 0.0)
+}
+
+fn market_mark_is_fresh(book: &BookSnapshot, now: u64) -> bool {
+    market_mid(book).is_some()
+        && now.saturating_sub(book.updated_at_ms) <= MARKET_MARK_FRESHNESS.as_millis() as u64
+}
+
+fn book_history_sample(book: &BookSnapshot) -> Option<(u64, f64)> {
+    market_mid(book).map(|mid| (book.updated_at_ms, mid))
+}
+
+fn book_symbol(bytes: &[u8]) -> Option<&str> {
+    let symbol = std::str::from_utf8(bytes.get(8..40)?).ok()?.trim();
+    valid_symbol(symbol).then_some(symbol)
 }
 
 pub fn router(data: Arc<MarketData>) -> Router {
@@ -589,6 +850,11 @@ mod tests {
                     updated_at_ms: 1_100,
                 },
             )]),
+            history_freshness: HashMap::from([(
+                "BTC-USDT".to_owned(),
+                history_freshness(&[(1_000, 42.5)], 1_100, true, true),
+            )]),
+            held_symbol_subscriptions: vec![],
             timing_contract: MarketHistoryTimingContract::current(),
         };
 
@@ -598,12 +864,22 @@ mod tests {
             serde_json::json!({
                 "histories": { "BTC-USDT": [[1000, 42.5]] },
                 "market_marks": { "BTC-USDT": { "mid": 42.5, "updated_at_ms": 1100 } },
+                "history_freshness": {
+                    "BTC-USDT": {
+                        "latest_observed_at_ms": 1000,
+                        "observed_age_ms": 100,
+                        "state": "fresh"
+                    }
+                },
+                "held_symbol_subscriptions": [],
                 "timing_contract": {
-                    "version": 1,
+                    "version": 3,
                     "sample_interval_ms": 10_000,
                     "retention_ms": 1_800_000,
                     "ticker_stream_idle_timeout_ms": 60_000,
-                    "market_mark_freshness_ms": 5_000
+                    "market_mark_freshness_ms": 5_000,
+                    "history_freshness_max_age_ms": 15_000,
+                    "history_freshness_basis": "per-symbol active book subscription and current mark; history sample age bounded by sample spacing plus mark freshness"
                 }
             })
         );
@@ -615,7 +891,148 @@ mod tests {
         data.subscriptions
             .lock()
             .await
-            .extend((0..MAX_MARKET_BOOK_SUBSCRIPTIONS).map(|index| (format!("S{index}-USDT"), ())));
+            .extend((0..MAX_MARKET_BOOK_SUBSCRIPTIONS).map(|index| {
+                (
+                    format!("S{index}-USDT"),
+                    Arc::new(BookSubscriptionState::new()),
+                )
+            }));
         assert!(data.ensure_book_subscription("BTC-USDT").await.is_err());
+    }
+
+    #[test]
+    fn held_symbol_request_is_bounded_and_validates_each_symbol_separately() {
+        assert_eq!(parse_held_symbols(None).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            parse_held_symbols(Some("BTC-USDT,not-valid,ETH-USDT")).unwrap(),
+            vec!["BTC-USDT", "not-valid", "ETH-USDT"]
+        );
+        assert!(parse_held_symbols(Some(&"x".repeat(MAX_HELD_SYMBOLS_QUERY_BYTES + 1))).is_err());
+        let too_many = (0..=MAX_HELD_SYMBOLS_PER_REQUEST)
+            .map(|index| format!("S{index}-USDT"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_held_symbols(Some(&too_many)).is_err());
+    }
+
+    #[test]
+    fn per_symbol_history_marks_one_symbol_stale_while_another_continues() {
+        let observed_at = 1_000_000;
+        let old_symbol = history_freshness(&[(observed_at, 1.0)], observed_at + 16_000, true, true);
+        let continuing_symbol = history_freshness(
+            &[(observed_at + 14_000, 2.0)],
+            observed_at + 15_000,
+            true,
+            true,
+        );
+        assert_eq!(old_symbol.observed_age_ms, Some(16_000));
+        assert_eq!(continuing_symbol.observed_age_ms, Some(1_000));
+        assert_eq!(old_symbol.state, "stale");
+        assert_eq!(continuing_symbol.state, "fresh");
+        assert_eq!(
+            MarketHistoryTimingContract::current().history_freshness_max_age_ms,
+            15_000,
+        );
+    }
+
+    #[tokio::test]
+    async fn book_midpoints_are_added_to_history_at_the_existing_sample_spacing() {
+        let mut histories = Histories::default();
+        let first_book = BookSnapshot {
+            bids: vec![BookLevel {
+                price: 99.0,
+                size: 1.0,
+            }],
+            asks: vec![BookLevel {
+                price: 101.0,
+                size: 1.0,
+            }],
+            updated_at_ms: 10_000,
+        };
+        let too_soon_book = BookSnapshot {
+            updated_at_ms: 19_999,
+            ..first_book.clone()
+        };
+        let next_sample_book = BookSnapshot {
+            updated_at_ms: 20_000,
+            ..first_book.clone()
+        };
+        for book in [&first_book, &too_soon_book, &next_sample_book] {
+            let (timestamp, mid) = book_history_sample(book).unwrap();
+            record_history_sample(&mut histories, "BTC-USDT", timestamp, mid);
+        }
+        assert_eq!(
+            histories.by_symbol.get("BTC-USDT").unwrap(),
+            &vec![(10_000, 100.0), (20_000, 100.0)]
+        );
+    }
+
+    #[test]
+    fn history_freshness_requires_active_subscription_and_fresh_book_mark() {
+        let timestamp = 10_000;
+        let no_subscription = history_freshness(&[(timestamp, 100.0)], 11_000, false, true);
+        let stale_mark = history_freshness(&[(timestamp, 100.0)], 11_000, true, false);
+        let no_history = history_freshness(&[], 11_000, true, true);
+        assert_eq!(no_subscription.state, "unavailable");
+        assert_eq!(stale_mark.state, "stale");
+        assert_eq!(no_history.state, "unavailable");
+    }
+
+    #[tokio::test]
+    async fn held_symbols_are_subscribed_before_fresh_marks_are_included_and_failures_are_explicit()
+    {
+        let data = Arc::new(empty_data());
+        data.subscriptions.lock().await.insert(
+            "BTC-USDT".to_owned(),
+            Arc::new(BookSubscriptionState(AtomicU8::new(SUBSCRIPTION_ACTIVE))),
+        );
+        data.subscriptions.lock().await.insert(
+            "MISSING-USDT".to_owned(),
+            Arc::new(BookSubscriptionState(AtomicU8::new(
+                SUBSCRIPTION_UNAVAILABLE,
+            ))),
+        );
+        data.books.write().unwrap().insert(
+            "BTC-USDT".to_owned(),
+            Arc::new(BookSnapshot {
+                bids: vec![BookLevel {
+                    price: 99.0,
+                    size: 1.0,
+                }],
+                asks: vec![BookLevel {
+                    price: 101.0,
+                    size: 1.0,
+                }],
+                updated_at_ms: now_ms().unwrap(),
+            }),
+        );
+
+        let Json(response) = get_market_histories(
+            State(Arc::clone(&data)),
+            Query(MarketHistoriesQuery {
+                held_symbols: Some("BTC-USDT,MISSING-USDT,bad".to_owned()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.held_symbol_subscriptions[0].status, "subscribed");
+        assert!(response.held_symbol_subscriptions[0].fresh_mark.is_some());
+        assert_eq!(response.held_symbol_subscriptions[1].status, "unavailable");
+        assert!(response.held_symbol_subscriptions[1].error.is_some());
+        assert!(response.held_symbol_subscriptions[1].fresh_mark.is_none());
+        assert_eq!(
+            response.held_symbol_subscriptions[2].status,
+            "invalid_symbol"
+        );
+        assert!(response.held_symbol_subscriptions[2].fresh_mark.is_none());
+    }
+
+    #[tokio::test]
+    async fn requested_held_symbol_starts_a_book_subscription_before_returning() {
+        let data = Arc::new(empty_data());
+        data.ensure_book_subscription("BTC-USDT").await.unwrap();
+        let subscriptions = data.subscriptions.lock().await;
+        assert_eq!(subscriptions.get("BTC-USDT").unwrap().status(), "pending");
+        assert!(data.book("BTC-USDT").is_none());
     }
 }

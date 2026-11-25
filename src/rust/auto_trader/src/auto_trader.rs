@@ -522,6 +522,8 @@ mod strategy_cleanup_integration_tests {
             .report_decision(strategy::LiveStrategyDecisionReport {
                 contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
                 event_id: "socket-decision-test".into(),
+                event_identity_version: 0,
+                episode_id: String::new(),
                 strategy,
                 symbol: "BTC-USDT".into(),
                 profile_id: profile.profile_id.clone(),
@@ -553,6 +555,8 @@ mod strategy_cleanup_integration_tests {
             .report_decision(strategy::LiveStrategyDecisionReport {
                 contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
                 event_id: "socket-decision-test".into(),
+                event_identity_version: 0,
+                episode_id: String::new(),
                 strategy,
                 symbol: "BTC-USDT".into(),
                 profile_id: second_profile.profile_id.clone(),

@@ -104,6 +104,9 @@ struct Settings {
     /// Missing entries from older settings and signals without source IDs stay unknown.
     #[serde(default)]
     exploratory_event_reservations: BTreeMap<String, u64>,
+    /// Persisted stop-fill re-entry gates keyed by symbol and strategy.
+    #[serde(default)]
+    post_stop_reentry_cooldowns: BTreeMap<String, PostStopReentryCooldown>,
     #[serde(default)]
     positions: BTreeMap<String, TraderPosition>,
     #[serde(default)]
@@ -194,6 +197,16 @@ struct Settings {
 }
 
 const UNATTRIBUTED_POSITION_MANAGER_CONTEXT: &str = "unattributed:position-manager-reconciliation";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PostStopReentryCooldown {
+    stopped_at_ms: u64,
+    cooldown_until_ms: u64,
+    profile_id: Option<String>,
+    event_identity_version: u16,
+    stopped_event_id: Option<String>,
+    stopped_episode_id: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -387,6 +400,7 @@ impl Default for Settings {
             canonical_lifecycle_sequence: 0,
             canonical_lifecycle_epoch: new_canonical_lifecycle_epoch(),
             exploratory_event_reservations: BTreeMap::new(),
+            post_stop_reentry_cooldowns: BTreeMap::new(),
             positions: BTreeMap::new(),
             strategy_positions: BTreeMap::new(),
             learning: BTreeMap::new(),

@@ -126,6 +126,21 @@ fn resting_order_invalidation_reason(
     let snapshot = order.revalidation_snapshot.as_ref()?;
     let strategy = Strategy::from_name(order.strategy.as_deref()?)?;
     let max_age = RESTING_SIGNAL_REVALIDATION_MAX_AGE_MS;
+    let worker_identity_is_fresh = snapshot.event_identity_version
+        == Some(strategy::LIVE_STRATEGY_EVENT_ID_VERSION)
+        && snapshot
+            .event_id
+            .as_deref()
+            .is_some_and(|event_id| !event_id.trim().is_empty())
+        && snapshot
+            .episode_id
+            .as_deref()
+            .is_some_and(|episode_id| !episode_id.trim().is_empty())
+        && report.event_identity_version == strategy::LIVE_STRATEGY_EVENT_ID_VERSION
+        && !report.event_id.trim().is_empty()
+        && !report.episode_id.trim().is_empty()
+        && snapshot.event_id.as_deref() != Some(report.event_id.as_str())
+        && snapshot.episode_id.as_deref() != Some(report.episode_id.as_str());
     if report.symbol != order.symbol
         || report.strategy.as_str() != strategy.as_str()
         || snapshot.profile_id.as_deref() != Some(report.profile_id.as_str())
@@ -138,6 +153,7 @@ fn resting_order_invalidation_reason(
         || report.signal.stale
         || report.signal.symbol != snapshot.symbol
         || report.signal.strategy.as_deref() != Some(snapshot.strategy.as_str())
+        || !worker_identity_is_fresh
     {
         return None;
     }
@@ -644,7 +660,8 @@ mod inactive_execution_order_tests {
             json!({
                 "symbol": "BTC-USDT", "strategy": "live-momentum",
                 "direction": "bullish", "signal_timestamp_ms": 1_000,
-                "profile_id": "profile-a", "profile_version": 3, "parameter_hash": "profile-a"
+                "profile_id": "profile-a", "profile_version": 3, "parameter_hash": "profile-a",
+                "event_identity_version": 1, "event_id": "event-1", "episode_id": "episode-1"
             })
         });
         serde_json::from_value(json!({
@@ -661,7 +678,8 @@ mod inactive_execution_order_tests {
         signal_time: u64,
     ) -> strategy::LiveStrategyDecisionReport {
         serde_json::from_value(json!({
-            "contract_version": 1, "event_id": "event-2", "strategy": "live-momentum",
+            "contract_version": 1, "event_id": "event-2", "event_identity_version": 1,
+            "episode_id": "episode-2", "strategy": "live-momentum",
             "symbol": "BTC-USDT", "profile_id": "profile-a", "profile_version": 3,
             "parameter_hash": "profile-a", "event_time_ms": event_time,
             "decision": decision, "reason": "fresh evaluator rejection", "walk_forward_evidence": null,
@@ -704,6 +722,17 @@ mod inactive_execution_order_tests {
             .as_deref(),
             Some("fresh evaluator rejection")
         );
+        let mut same_event_retry =
+            report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400);
+        same_event_retry.event_id = "event-1".to_owned();
+        same_event_retry.episode_id = "episode-1".to_owned();
+        assert!(
+            resting_order_invalidation_reason(&candidate, &same_event_retry, now).is_none(),
+            "an exact source-event retry is not fresh revalidation evidence"
+        );
+        let mut legacy_identity = report(strategy::LiveStrategyDecision::Reject, 4_500, 4_400);
+        legacy_identity.event_identity_version = 0;
+        assert!(resting_order_invalidation_reason(&candidate, &legacy_identity, now).is_none());
         assert!(
             resting_order_invalidation_reason(
                 &candidate,

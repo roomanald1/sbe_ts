@@ -54,6 +54,38 @@ use crate::{
 
 pub const LIVE_EVALUATION_CONTRACT_VERSION: u16 = 1;
 pub const STRATEGY_INSIGHT_UPDATE_VERSION: u16 = 1;
+pub const LIVE_STRATEGY_EVENT_ID_VERSION: u16 = 1;
+
+/// Deterministic identity assigned to one upstream strategy insight update.
+/// The upstream source key is retained verbatim after a versioned namespace so
+/// retries and worker restarts produce the same identity.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LiveStrategyEventIdentity {
+    pub schema_version: u16,
+    pub event_id: String,
+    /// Current feed contract has no continuity/episode key. Each distinct
+    /// source update is therefore its own atomic episode; a reset must arrive
+    /// as a distinct source event key. This does not infer continuity between
+    /// snapshots.
+    pub episode_id: String,
+}
+
+impl LiveStrategyEventIdentity {
+    pub fn from_source_event_id(source_event_id: &str) -> Self {
+        let key = format!(
+            "strategy-insight:v{}:{source_event_id}",
+            LIVE_STRATEGY_EVENT_ID_VERSION
+        );
+        Self {
+            schema_version: LIVE_STRATEGY_EVENT_ID_VERSION,
+            event_id: key.clone(),
+            episode_id: format!(
+                "strategy-episode:v{}:{source_event_id}",
+                LIVE_STRATEGY_EVENT_ID_VERSION
+            ),
+        }
+    }
+}
 
 /// A derived, bounded Insights update delivered to strategy workers.
 /// The event timestamp is the deduplication key within a symbol stream.
@@ -120,6 +152,14 @@ pub struct LiveStrategyOpenPosition {
 pub struct LiveStrategyDecisionReport {
     pub contract_version: u16,
     pub event_id: String,
+    /// Version of the deterministic event/episode key encoding. Missing on
+    /// legacy reports, where consumers should treat identity as unversioned.
+    #[serde(default)]
+    pub event_identity_version: u16,
+    /// One source update is one atomic episode until Insights supplies a
+    /// durable continuity/reset identity.
+    #[serde(default)]
+    pub episode_id: String,
     pub strategy: Strategy,
     pub symbol: String,
     pub profile_id: String,
@@ -352,6 +392,8 @@ mod socket_contract_tests {
             LiveStrategySocketRequest::ReportDecision(LiveStrategyDecisionReport {
                 contract_version: LIVE_EVALUATION_CONTRACT_VERSION,
                 event_id: "event-1".into(),
+                event_identity_version: LIVE_STRATEGY_EVENT_ID_VERSION,
+                episode_id: "episode-1".into(),
                 strategy: Strategy::LiveMomentum,
                 symbol: "BTC-USDT".into(),
                 profile_id: "profile-1".into(),
@@ -376,5 +418,18 @@ mod socket_contract_tests {
             .unwrap(),
             serde_json::to_value(decision_request).unwrap()
         );
+    }
+
+    #[test]
+    fn worker_event_identity_is_versioned_deterministic_and_starts_a_new_episode_per_source_key() {
+        let retry = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:123");
+        let replay = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:123");
+        let reset = LiveStrategyEventIdentity::from_source_event_id("BTC-USDT:124");
+
+        assert_eq!(retry, replay);
+        assert_eq!(retry.schema_version, LIVE_STRATEGY_EVENT_ID_VERSION);
+        assert!(retry.event_id.starts_with("strategy-insight:v1:"));
+        assert_ne!(retry.episode_id, reset.episode_id);
+        assert!(retry.episode_id.starts_with("strategy-episode:v1:"));
     }
 }

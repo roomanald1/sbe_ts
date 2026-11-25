@@ -30,6 +30,19 @@ pub struct RpcResponse {
 }
 
 pub async fn request(endpoint: &str, request: &RpcRequest) -> anyhow::Result<RpcResponse> {
+    if request.method.eq_ignore_ascii_case("GET")
+        && request.path.split('?').next() == Some("/internal/monitoring-metrics")
+    {
+        return request_with_recovery(
+            endpoint,
+            request,
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+            2,
+        )
+        .await
+        .context("AutoTrader monitoring metrics RSocket request failed");
+    }
     request_with_timeouts(
         endpoint,
         request,
@@ -37,6 +50,42 @@ pub async fn request(endpoint: &str, request: &RpcRequest) -> anyhow::Result<Rpc
         Duration::from_secs(10),
     )
     .await
+}
+
+async fn request_with_recovery(
+    endpoint: &str,
+    request: &RpcRequest,
+    connect_timeout: Duration,
+    response_timeout: Duration,
+    attempts: usize,
+) -> anyhow::Result<RpcResponse> {
+    anyhow::ensure!(
+        attempts > 0,
+        "RSocket request must allow at least one attempt"
+    );
+    let mut last_error = None;
+    for attempt in 1..=attempts {
+        match request_with_timeouts(endpoint, request, connect_timeout, response_timeout).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if attempt == attempts {
+                    crate::service_log!(
+                        "ERROR",
+                        "AutoTrader monitoring metrics RSocket request failed after {attempt} attempts: {error:#}"
+                    );
+                    return Err(error).with_context(|| {
+                        format!("monitoring metrics request failed after {attempt} attempts")
+                    });
+                }
+                crate::service_log!(
+                    "WARN",
+                    "AutoTrader monitoring metrics RSocket attempt {attempt}/{attempts} failed; retrying with a fresh pooled connection: {error:#}"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.expect("attempts is nonzero"))
 }
 
 async fn request_with_timeouts(
@@ -498,7 +547,7 @@ mod tests {
                 &self,
                 _request: Payload,
             ) -> rsocket_rust::Result<Option<Payload>> {
-                if self.connection == 1 {
+                if self.connection <= 2 {
                     return std::future::pending().await;
                 }
                 let response = RpcResponse {
@@ -542,19 +591,22 @@ mod tests {
 
         let endpoint = format!("ws://{address}");
         let request = RpcRequest {
-            method: "POST".into(),
-            path: "/signals/auto-trader-audit".into(),
-            body: Some(serde_json::json!({ "decision_id": "audit-timeout-test" })),
+            method: "GET".into(),
+            path: "/internal/monitoring-metrics".into(),
+            body: None,
         };
-        let timed_out = request_with_timeouts(
+        let failed = request_with_recovery(
             &endpoint,
             &request,
             Duration::from_secs(1),
             Duration::from_millis(50),
+            2,
         )
         .await
         .unwrap_err();
-        assert!(timed_out.to_string().contains("timed out"));
+        assert!(failed.to_string().contains("failed after 2 attempts"));
+        assert!(format!("{failed:#}").contains("timed out"));
+        assert_eq!(connections.load(Ordering::Relaxed), 2);
 
         let recovered = request_with_timeouts(
             &endpoint,
@@ -565,7 +617,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(recovered.status, 204);
-        assert_eq!(connections.load(Ordering::Relaxed), 2);
+        assert_eq!(connections.load(Ordering::Relaxed), 3);
         server_task.abort();
     }
 }

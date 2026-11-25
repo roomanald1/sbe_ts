@@ -196,6 +196,23 @@ fn unique_path(label: &str) -> PathBuf {
     ))
 }
 
+fn versioned_lifecycle_dashboard(fixture_index: usize, source_key: &str) -> Dashboard {
+    let mut dashboard = benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT");
+    let signal = dashboard
+        .best
+        .first_mut()
+        .expect("benchmark dashboard contains one selected signal");
+    let decision = signal
+        .strategy_decision
+        .get_or_insert_with(|| serde_json::json!({}));
+    let source_event_id = format!("insights-event:v1:sha256:{source_key}");
+    let identity = strategy::LiveStrategyEventIdentity::from_source_event_id(&source_event_id);
+    decision["live_worker_event_id"] = serde_json::json!(identity.event_id);
+    decision["live_worker_event_identity_version"] = serde_json::json!(identity.schema_version);
+    decision["live_worker_episode_id"] = serde_json::json!(identity.episode_id);
+    dashboard
+}
+
 fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
     // SAFETY: this fixture serializes its own environment mutations and restores
     // each variable before returning. The test harness is single-process.
@@ -291,8 +308,20 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     }
 
     let fixture_index = 700_001;
+    let source_event_id = "insights-event:v1:sha256:source-700001";
+    let replay_identity =
+        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
+    let exact_retry_identity =
+        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
+    let reset_identity = strategy::LiveStrategyEventIdentity::from_source_event_id(
+        "insights-event:v1:sha256:source-700002",
+    );
+    assert_eq!(replay_identity, exact_retry_identity);
+    assert_ne!(replay_identity.event_id, reset_identity.event_id);
+    assert_ne!(replay_identity.episode_id, reset_identity.episode_id);
+
     let mut state = benchmark_precomputed_ingress_state("lifecycle");
-    let dashboard = benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT");
+    let dashboard = versioned_lifecycle_dashboard(fixture_index, "source-700001");
     state.settings_path = unique_path("state");
     state.dated_carry_path = unique_path("dated-carry");
     // persist_settings_snapshot writes SQLite directly at settings_path; the
@@ -362,7 +391,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     // Replaying a fresh production cycle for the same stable worker event must
     // stop at the durable exploratory reservation check, before the existing
     // position could mask a missing dedup check.
-    let first_signal = benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT")
+    let first_signal = versioned_lifecycle_dashboard(fixture_index, "source-700001")
         .best
         .into_iter()
         .next()
@@ -382,7 +411,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     };
     let duplicate = run_cycle_inner(
         &state,
-        benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT"),
+        versioned_lifecycle_dashboard(fixture_index, "source-700001"),
     )
     .await
     .unwrap();
@@ -395,9 +424,11 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
         let settings = state.settings.lock().await;
         assert_eq!(settings.orders.len(), order_count_before_replay);
         assert_eq!(settings.exploratory_event_reservations.len(), 1);
-        assert!(settings
-            .exploratory_event_reservations
-            .contains_key(&event_key));
+        assert!(
+            settings
+                .exploratory_event_reservations
+                .contains_key(&event_key)
+        );
     }
     {
         let mut settings = state.settings.lock().await;
@@ -422,7 +453,7 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     let restored_order_count = restored_state.settings.lock().await.orders.len();
     let duplicate_after_restart = run_cycle_inner(
         &restored_state,
-        benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT"),
+        versioned_lifecycle_dashboard(fixture_index, "source-700001"),
     )
     .await
     .unwrap();
@@ -710,12 +741,17 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
             "exploratory-event-eligibility",
             case_index,
         );
-        let mut dashboard = benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT");
+        let mut dashboard = versioned_lifecycle_dashboard(fixture_index, "source-700001");
         let signal = &mut dashboard.best[0];
         let decision = signal.strategy_decision.as_mut().unwrap();
         match case {
             "new_event" => {
-                decision["live_worker_event_id"] = serde_json::json!("different-worker-event");
+                decision["live_worker_event_id"] = serde_json::json!(
+                    "strategy-insight:v1:insights-event:v1:sha256:different-worker-event"
+                );
+                decision["live_worker_episode_id"] = serde_json::json!(
+                    "strategy-episode:v1:insights-event:v1:sha256:different-worker-event"
+                );
             }
             "new_profile" => {
                 decision["learning_profile_id"] = serde_json::json!("different-profile");
@@ -726,12 +762,26 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
                 } else {
                     "bullish".to_owned()
                 };
+                decision["live_worker_event_id"] = serde_json::json!(
+                    "strategy-insight:v1:insights-event:v1:sha256:direction-reset"
+                );
+                decision["live_worker_episode_id"] = serde_json::json!(
+                    "strategy-episode:v1:insights-event:v1:sha256:direction-reset"
+                );
             }
             "no_stable_id" => {
                 decision
                     .as_object_mut()
                     .unwrap()
                     .remove("live_worker_event_id");
+                decision
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("live_worker_event_identity_version");
+                decision
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("live_worker_episode_id");
             }
             _ => unreachable!("case list is exhaustive"),
         }
@@ -876,7 +926,10 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     state.settings_path = unique_path("real-pm-auto-trader");
     state.dated_carry_path = unique_path("real-pm-carry");
     let sqlite_path = state.settings_path.clone();
-    let dashboard = benchmark_precomputed_ingress_dashboard(fixture_index, "BTC-USDT");
+    let source_event_id = "insights-event:v1:sha256:real-pm-source-700101";
+    let worker_identity =
+        strategy::LiveStrategyEventIdentity::from_source_event_id(source_event_id);
+    let dashboard = versioned_lifecycle_dashboard(fixture_index, "real-pm-source-700101");
     let entry_result = run_cycle_inner(&state, dashboard).await.unwrap();
     assert_eq!(
         entry_result.status, "order_submitting",
@@ -903,6 +956,22 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
     }
     let entry_order = entry_order.expect("production entry should be recorded");
     assert_eq!(entry_order.status, "filled");
+    let revalidation_identity = entry_order
+        .revalidation_snapshot
+        .as_ref()
+        .expect("production entry captures worker identity for fresh revalidation");
+    assert_eq!(
+        revalidation_identity.event_identity_version,
+        Some(worker_identity.schema_version)
+    );
+    assert_eq!(
+        revalidation_identity.event_id.as_deref(),
+        Some(worker_identity.event_id.as_str())
+    );
+    assert_eq!(
+        revalidation_identity.episode_id.as_deref(),
+        Some(worker_identity.episode_id.as_str())
+    );
     let decision_id = entry_order
         .decision_id
         .clone()
@@ -1086,6 +1155,17 @@ async fn production_entry_exit_persist_in_real_position_management_ledger_across
         .expect("restarted PM service should reopen its same SQLite ledger"),
     );
     tokio::time::sleep(Duration::from_millis(20)).await;
+    let duplicate_worker_event = run_cycle_inner(
+        &state,
+        versioned_lifecycle_dashboard(fixture_index, "real-pm-source-700101"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(duplicate_worker_event.status, "skipped");
+    assert_eq!(
+        duplicate_worker_event.reason.as_deref(),
+        Some("Exploratory source event already reserved for this profile")
+    );
     let before_duplicate = crate::service_rpc::position_request("GET", "/positions/trades", None)
         .await
         .unwrap();
