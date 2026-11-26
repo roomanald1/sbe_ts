@@ -14,7 +14,7 @@ use rsocket_rust::prelude::*;
 use rsocket_rust_transport_websocket::WebsocketServerTransport;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -263,7 +263,10 @@ mod coverage_tests {
         assert_status(
             top_up_account(
                 State(Arc::clone(&store)),
-                Json(TopupRequest { amount: 0.0 }),
+                Json(TopupRequest {
+                    amount: 0.0,
+                    contribution_id: "invalid-test-contribution".to_owned(),
+                }),
             )
             .await,
             StatusCode::BAD_REQUEST,

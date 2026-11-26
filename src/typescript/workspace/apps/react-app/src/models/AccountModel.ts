@@ -175,10 +175,11 @@ export class AccountModel {
       error: undefined,
     });
     try {
+      const contribution_id = globalThis.crypto.randomUUID();
       const response = await positionFetch('/positions/account/topups', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ amount }),
+        body: JSON.stringify({ amount, contribution_id }),
       });
       if (!response.ok) {
         const message = await response.text();

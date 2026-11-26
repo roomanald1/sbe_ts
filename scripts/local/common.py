@@ -63,16 +63,18 @@ def emit(data):
             "preview": raw[:2000]
         }, indent=2))
 
-def api(service, endpoint):
+def api(service, endpoint, params=None, max_bytes=4_000_000):
     allowed = {
         "learning": {"summary", "profiles"},
-        "autotrader": {"feedback-queues", "open-position-counts"},
+        "autotrader": {"status", "feedback-queues", "open-position-counts"},
         "insights": {"dashboard", "best"},
         "positions": {
             "positions", "account", "realized-pnl",
             "fee-summary", "fee-rates", "usd-rates",
-            "financial-snapshot", "barriers", "persistence-timing"
-        }
+            "financial-snapshot", "barriers", "persistence-timing", "trades",
+            "portfolio-evidence-intervals"
+        },
+        "paper_exchange": {"financial-evidence"},
     }
     if endpoint not in allowed.get(service, set()):
         raise RuntimeError("Endpoint excluded from routine diagnostics")
@@ -82,11 +84,13 @@ def api(service, endpoint):
         "import sys,json;"
         "sys.path.insert(0,sys.argv[1]);"
         "from common import query;"
-        "print(json.dumps(query(sys.argv[2],sys.argv[3])))"
+        "params=json.loads(sys.argv[4]) if len(sys.argv)>4 and sys.argv[4] else None;"
+        "print(json.dumps(query(sys.argv[2],sys.argv[3],int(sys.argv[5]),params=params)))"
     )
     result = subprocess.run(
         [sys.executable, "-c", code,
-         str(ROOT/"scripts/api"), service, endpoint],
+         str(ROOT/"scripts/api"), service, endpoint,
+         json.dumps(params) if params else "", str(max_bytes)],
         cwd=ROOT, capture_output=True,
         text=True, timeout=20
     )
@@ -97,9 +101,9 @@ def api(service, endpoint):
         raise RuntimeError("Unverified application status")
     return data
 
-def collect(service, endpoint):
+def collect(service, endpoint, params=None):
     try:
-        data = api(service, endpoint)
+        data = api(service, endpoint, params)
         body = data["body"]
         return {
             "status": "COLLECTED",

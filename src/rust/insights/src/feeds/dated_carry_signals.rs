@@ -247,6 +247,49 @@ async fn carry_settlement_price(
     Ok((sum / 30.0, "index_1m_estimate"))
 }
 
+async fn persist_official_carry_settlement_evidence(
+    future_symbol: &str,
+    spot_pair: &str,
+    expiry_ms: u64,
+    settlement_price: f64,
+) -> anyhow::Result<()> {
+    if !settlement_price.is_finite() || settlement_price <= 0.0 || expiry_ms == 0 {
+        anyhow::bail!("official carry settlement evidence is invalid");
+    }
+    let url = std::env::var("PAPER_EXCHANGE_RSOCKET_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:10006".to_owned());
+    let source_record_id = format!("delivery-price:{spot_pair}:{expiry_ms}");
+    let response = strategy::request_scout_service_route(
+        &url,
+        &strategy::ScoutCoordinatorRouteCommand {
+            request_id: format!("carry-settlement:{future_symbol}:{expiry_ms}"),
+            strategy: None,
+            method: strategy::ScoutWorkerHttpMethod::Post,
+            path: "/internal/financial/evidence".into(),
+            payload: serde_json::json!({
+                "schema_version": "paper_exchange_financial_evidence:v1",
+                "event_id": format!("binance-delivery-settlement:{future_symbol}:{expiry_ms}"),
+                "source_system": "binance_futures_delivery_price",
+                "source_epoch": "binance-futures-delivery-price:v1",
+                "source_cursor": expiry_ms,
+                "source_record_id": source_record_id,
+                "source_timestamp_utc_ms": expiry_ms,
+                "event_type": "derivative_settlement_mark",
+                "portfolio_id": "paper-default",
+                "instrument": future_symbol,
+                "expiry_utc_ms": expiry_ms,
+                "settlement_price": settlement_price,
+                "settlement_kind": "official_delivery_price",
+            }),
+        },
+    )
+    .await?;
+    if response.status >= 400 {
+        anyhow::bail!("Paper Exchange rejected official delivery evidence: {}", response.status);
+    }
+    Ok(())
+}
+
 async fn carry_publish(
     signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
     legacy_signal_events: &tokio::sync::broadcast::Sender<bytes::Bytes>,
@@ -378,6 +421,21 @@ async fn run_dated_carry_signal_worker(
                 "settlement_price": settlement_price,
                 "settlement_source": settlement_source,
             });
+            if settlement_source == "official" {
+                if let Err(error) = persist_official_carry_settlement_evidence(
+                    &future,
+                    &spot,
+                    expiry_ms,
+                    settlement_price,
+                )
+                .await
+                {
+                    crate::service_log!(
+                        "WARN",
+                        "Could not persist independent official carry settlement for {future}: {error:#}"
+                    );
+                }
+            }
             match carry_publish(&signal_events, &legacy_signal_events, &latest, &signal).await {
                 Ok(()) => {
                     let audit = serde_json::json!({

@@ -208,6 +208,8 @@ struct SettingsRequest {
     exploration_percent: f64,
     #[serde(default)]
     risk_appetite: Option<f64>,
+    #[serde(default)]
+    take_profit_percent: Option<f64>,
     max_open_positions: usize,
     #[serde(default)]
     max_intraday_open_positions: Option<usize>,

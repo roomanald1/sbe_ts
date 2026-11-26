@@ -114,6 +114,9 @@ pub struct UsdRateSnapshot {
     pub rates: BTreeMap<String, f64>,
     pub updated_at: u64,
     pub updated_at_by_currency: BTreeMap<String, u64>,
+    /// Stable provider-record identity derived from OKX's native instrument ID and timestamp.
+    #[serde(default)]
+    pub source_record_id_by_currency: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]

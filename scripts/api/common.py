@@ -29,8 +29,12 @@ def query(service, endpoint, max_bytes=4000000, since=None, params=None):
         **({"since": since} if since is not None else {})
     }
     if params:
-        if (service, endpoint) != ("positions", "trades"):
-            raise RuntimeError("Query parameters are only supported for positions.trades")
+        if (service, endpoint) not in {
+            ("positions", "trades"),
+            ("positions", "portfolio-evidence-intervals"),
+            ("paper_exchange", "financial-evidence"),
+        }:
+            raise RuntimeError("Query parameters are unsupported for this read-only route")
         request["params"] = params
 
     result = subprocess.run(

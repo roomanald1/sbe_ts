@@ -25,7 +25,10 @@ const EXPLORATION_NOTIONAL_FRACTION: f64 = 0.02;
 const LEARNING_RESET_PAPER_EXPLORATION_DURATION_MS: u64 = 3 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StrategyCategory { Intraday, Daily }
+enum StrategyCategory {
+    Intraday,
+    Daily,
+}
 
 fn strategy_category(strategy_name: Option<&str>) -> StrategyCategory {
     match strategy_name.and_then(Strategy::from_name) {
@@ -36,13 +39,24 @@ fn strategy_category(strategy_name: Option<&str>) -> StrategyCategory {
 }
 
 fn strategy_category_key(category: StrategyCategory) -> &'static str {
-    match category { StrategyCategory::Intraday => "intraday", StrategyCategory::Daily => "daily" }
+    match category {
+        StrategyCategory::Intraday => "intraday",
+        StrategyCategory::Daily => "daily",
+    }
 }
 
 fn position_entries_for_category(position: &TraderPosition, category: StrategyCategory) -> u32 {
-    position.entries_by_category.get(strategy_category_key(category)).copied().unwrap_or_else(|| {
-        if strategy_category(position.strategy.as_deref()) == category { position.entries } else { 0 }
-    })
+    position
+        .entries_by_category
+        .get(strategy_category_key(category))
+        .copied()
+        .unwrap_or_else(|| {
+            if strategy_category(position.strategy.as_deref()) == category {
+                position.entries
+            } else {
+                0
+            }
+        })
 }
 
 const STRATEGY_BASE_ORDER_FRACTION: f64 = 0.80;
@@ -55,7 +69,7 @@ const PARAMETER_PROFILE_COUNT: usize = 3;
 const DEFAULT_DAILY_REALIZED_LOSS_LIMIT: f64 = 10.0;
 const MIN_DAILY_REALIZED_LOSS_LIMIT: f64 = 5.0;
 const DEFAULT_STOP_LOSS_PERCENT: f64 = 0.50;
-const DEFAULT_TAKE_PROFIT_PERCENT: f64 = 0.80;
+const DEFAULT_TAKE_PROFIT_PERCENT: f64 = 0.75;
 const DEFAULT_PROFIT_PROTECTION_ACTIVATION_PERCENT: f64 = 0.15;
 const DEFAULT_PROFIT_PROTECTION_GIVEBACK_PERCENT: f64 = 0.10;
 const DEFAULT_PROFIT_PROTECTION_MINIMUM_LOCK_PERCENT: f64 = 0.05;
@@ -145,6 +159,16 @@ const STRATEGY_SIZING_RECENT_TRADES: usize = 5_000;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum AutoOrderType {
-    Market, Ioc, Fok, Limit, Gtd, PostOnlyLimit, Barrier, StopMarket, StopLimit,
-    TrailingStop, Vwap, Twap,
+    Market,
+    Ioc,
+    Fok,
+    Limit,
+    Gtd,
+    PostOnlyLimit,
+    Barrier,
+    StopMarket,
+    StopLimit,
+    TrailingStop,
+    Vwap,
+    Twap,
 }

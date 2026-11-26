@@ -91,7 +91,7 @@ services:
       POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005
       AUTO_TRADER_RSOCKET_URL: ws://auto-trader:10006
       LEARNING_RSOCKET_URL: ws://learning:10010
-      SQLITE_DB_PATHS: /data/insights/signals.sqlite:/data/position_management/auto_trader_state.sqlite:/data/learning/learning_state.sqlite
+      SQLITE_DB_PATHS: /data/insights/signals.sqlite:/data/position_management/auto_trader_state.sqlite:/data/learning/learning_state.sqlite:/data/paper_exchange/paper_exchange_matches.sqlite:/data/scouts/workers/dated-futures-carry.sqlite:/data/scouts/workers/donchian-10-btc200.sqlite:/data/scouts/workers/donchian-20-btc200.sqlite:/data/scouts/workers/donchian-20-btc200-hold3.sqlite:/data/scouts/workers/donchian-20-sma200.sqlite:/data/scouts/workers/donchian-55-btc200.sqlite:/data/scouts/workers/live-absorption-pressure.sqlite:/data/scouts/workers/live-momentum.sqlite:/data/scouts/workers/live-order-book.sqlite:/data/scouts/workers/live-range-mean-reversion.sqlite:/data/scouts/workers/live-trade-flow.sqlite:/data/scouts/workers/live-vwap-dislocation.sqlite:/data/scouts/workers/relative-strength-90-sma200.sqlite:/data/scouts/workers/risk-adjusted-monthly-momentum.sqlite:/data/scouts/workers/risk-adjusted-trend-portfolio.sqlite:/data/scouts/workers/rsi2-oversold-rebound.sqlite:/data/scouts/workers/trend-50-200.sqlite:/data/scouts/workers/trend-sleeves-btc200.sqlite
       PERSISTENT_STORE_PATHS: /data/position_management/positions.sqlite
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -99,6 +99,8 @@ services:
       - insights-data:/data/insights:ro
       - position-management-data:/data/position_management:ro
       - learning-data:/data/learning:ro
+      - paper-exchange-data:/data/paper_exchange:ro
+      - scouts-data:/data/scouts:ro
     networks:
       - default
       - system-services
@@ -125,13 +127,19 @@ services:
 volumes:
   insights-data:
     external: true
-    name: sbe-insights-data
+    name: sbe-v35-insights-data
   position-management-data:
     external: true
-    name: sbe-position-management-data
+    name: sbe-v35-position-management-data
   learning-data:
     external: true
-    name: sbe-learning-data
+    name: sbe-v35-learning-data
+  paper-exchange-data:
+    external: true
+    name: sbe-v35-paper-exchange-data
+  scouts-data:
+    external: true
+    name: sbe-v35-scouts-state
   grafana-data:
   prometheus-data:
   loki-data:

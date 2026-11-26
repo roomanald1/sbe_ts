@@ -32,6 +32,7 @@ pub async fn router() -> anyhow::Result<Router> {
         store.ensure_market_mark_polling(&symbol);
     }
     let barrier_store = Arc::clone(&store);
+    let fx_evidence_store = Arc::clone(&store);
     tokio::spawn(async move {
         barrier_order_loop(barrier_store).await;
     });
@@ -54,6 +55,8 @@ pub async fn router() -> anyhow::Result<Router> {
                                     .values()
                                     .any(|rate| rate.is_finite() && *rate > 0.0) =>
                             {
+                                persist_feedhandlers_fx_evidence(&snapshot, &fx_evidence_store)
+                                    .await;
                                 let cache =
                                     USD_RATE_STREAM_CACHE.get_or_init(|| StdRwLock::new(None));
                                 if let Ok(mut current) = cache.write() {
@@ -102,6 +105,41 @@ pub async fn router() -> anyhow::Result<Router> {
         format!("0.0.0.0:{port}"),
     );
     Ok(router)
+}
+
+async fn persist_feedhandlers_fx_evidence(snapshot: &UsdRatesResponse, store: &PositionStore) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    let ledger = store.ledger.lock().await;
+    let mut required_currencies = std::collections::BTreeSet::from(["USD".to_owned()]);
+    for trade in &ledger.trades {
+        if let Some((_, quote)) = trade.symbol.split_once('-') {
+            if !quote.is_empty() {
+                required_currencies.insert(quote.to_owned());
+            }
+        }
+        if trade.fee_known && !trade.fee_currency.trim().is_empty() {
+            required_currencies.insert(trade.fee_currency.clone());
+        }
+    }
+    drop(ledger);
+    for event in paper_exchange_fx_evidence_events(snapshot, now_ms, &required_currencies) {
+        let currency = event
+            .get("currency")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        if let Err(error) =
+            paper_exchange_client::paper_exchange_post("/internal/financial/evidence", event).await
+        {
+            crate::service_log!(
+                "WARN",
+                "Could not persist independent OKX FX evidence for {currency}: {error:#}"
+            );
+        }
+    }
 }
 
 fn position_router(store: Arc<PositionStore>) -> Router {
@@ -807,7 +845,7 @@ mod position_rsocket_contract_tests {
     #[test]
     fn rpc_request_contract_carries_method_path_query_and_body() {
         let request: PositionRpcRequest = serde_json::from_str(
-            r#"{"method":"POST","path":"/positions/account/topups?dry_run=false","body":{"amount":25.0}}"#,
+            r#"{"method":"POST","path":"/positions/account/topups?dry_run=false","body":{"amount":25.0,"contribution_id":"topup-fixture-1"}}"#,
         ).unwrap();
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/positions/account/topups?dry_run=false");

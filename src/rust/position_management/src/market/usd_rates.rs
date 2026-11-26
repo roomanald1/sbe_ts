@@ -5,6 +5,8 @@ struct UsdRatesResponse {
     updated_at: u64,
     #[serde(default)]
     updated_at_by_currency: BTreeMap<String, u64>,
+    #[serde(default)]
+    source_record_id_by_currency: BTreeMap<String, String>,
 }
 
 fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
@@ -20,6 +22,7 @@ fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
     let max_age_ms = USD_RATE_STREAM_MAX_AGE.as_millis() as u64;
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
     let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
+    let mut source_record_id_by_currency = BTreeMap::new();
     let mut updated_at = 0;
     for (currency, rate) in snapshot.rates {
         if currency == "USD" {
@@ -38,13 +41,17 @@ fn latest_stream_usd_rates() -> Option<UsdRatesResponse> {
             continue;
         }
         rates.insert(currency.clone(), rate);
-        updated_at_by_currency.insert(currency, timestamp);
+        updated_at_by_currency.insert(currency.clone(), timestamp);
+        if let Some(source_record_id) = snapshot.source_record_id_by_currency.get(&currency) {
+            source_record_id_by_currency.insert(currency, source_record_id.clone());
+        }
         updated_at = updated_at.max(timestamp);
     }
     (rates.len() > 1).then_some(UsdRatesResponse {
         rates,
         updated_at,
         updated_at_by_currency,
+        source_record_id_by_currency,
     })
 }
 
@@ -57,6 +64,9 @@ fn merge_usd_rate_snapshots(
     merged
         .updated_at_by_currency
         .extend(fresh.updated_at_by_currency.clone());
+    merged
+        .source_record_id_by_currency
+        .extend(fresh.source_record_id_by_currency.clone());
     merged.updated_at = merged.updated_at.max(fresh.updated_at);
     merged.rates.insert("USD".to_owned(), 1.0);
     merged
@@ -70,6 +80,52 @@ fn cached_usd_rates_with_stream(
         || cached.clone(),
         |fresh| merge_usd_rate_snapshots(fresh, cached),
     )
+}
+
+fn paper_exchange_fx_evidence_events(
+    snapshot: &UsdRatesResponse,
+    now_ms: u64,
+    required_currencies: &BTreeSet<String>,
+) -> Vec<serde_json::Value> {
+    snapshot
+        .rates
+        .iter()
+        .filter_map(|(currency, rate)| {
+            if currency == "USD"
+                || !required_currencies.contains(currency)
+                || !rate.is_finite()
+                || *rate <= 0.0
+            {
+                return None;
+            }
+            let timestamp = snapshot
+                .updated_at_by_currency
+                .get(currency)
+                .copied()
+                .unwrap_or(snapshot.updated_at);
+            let source_record_id = snapshot.source_record_id_by_currency.get(currency)?;
+            if timestamp == 0
+                || timestamp > now_ms
+                || now_ms.saturating_sub(timestamp) > USD_RATE_STREAM_MAX_AGE.as_millis() as u64
+                || source_record_id != &format!("{currency}-USD:{timestamp}")
+            {
+                return None;
+            }
+            Some(serde_json::json!({
+                "schema_version": "paper_exchange_financial_evidence:v1",
+                "event_id": format!("okx-usd-fx:{source_record_id}"),
+                "source_system": "OKX",
+                "source_epoch": "okx-index-tickers:v1",
+                "source_cursor": timestamp,
+                "source_record_id": source_record_id,
+                "source_timestamp_utc_ms": timestamp,
+                "event_type": "fx_mark",
+                "portfolio_id": "paper-default",
+                "currency": currency,
+                "rate_usd": rate,
+            }))
+        })
+        .collect()
 }
 
 fn refresh_order_usd_rate_snapshot() {
@@ -166,6 +222,7 @@ pub fn set_test_usd_rates(rates: BTreeMap<String, f64>) {
             rates,
             updated_at: now_ms,
             updated_at_by_currency,
+            source_record_id_by_currency: BTreeMap::new(),
         })));
 }
 
@@ -213,6 +270,7 @@ async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
         })?;
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
     let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
+    let mut source_record_id_by_currency = BTreeMap::new();
     let mut updated_at = 0;
     for item in data {
         let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) else {
@@ -241,6 +299,10 @@ async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
             .and_then(|value| value.parse::<u64>().ok())
         {
             updated_at_by_currency.insert(currency.to_owned(), timestamp);
+            if let Some(instrument) = item.get("instId").and_then(serde_json::Value::as_str) {
+                source_record_id_by_currency
+                    .insert(currency.to_owned(), format!("{instrument}:{timestamp}"));
+            }
             updated_at = updated_at.max(timestamp);
         }
     }
@@ -254,29 +316,71 @@ async fn fetch_usd_rates() -> Result<UsdRatesResponse, (StatusCode, String)> {
         rates,
         updated_at,
         updated_at_by_currency,
+        source_record_id_by_currency,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ArcSwapOption, UsdRatesResponse, cached_usd_rates_with_stream};
+    use super::{
+        ArcSwapOption, UsdRatesResponse, cached_usd_rates_with_stream,
+        paper_exchange_fx_evidence_events,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn rates(
         values: &[(&str, f64)],
         updated_at: u64,
         currency_times: &[(&str, u64)],
     ) -> UsdRatesResponse {
+        let updated_at_by_currency = currency_times
+            .iter()
+            .map(|(currency, timestamp)| ((*currency).to_owned(), *timestamp))
+            .collect::<BTreeMap<_, _>>();
         UsdRatesResponse {
             rates: values
                 .iter()
                 .map(|(currency, rate)| ((*currency).to_owned(), *rate))
                 .collect(),
             updated_at,
-            updated_at_by_currency: currency_times
+            source_record_id_by_currency: currency_times
                 .iter()
-                .map(|(currency, timestamp)| ((*currency).to_owned(), *timestamp))
+                .map(|(currency, timestamp)| {
+                    (
+                        (*currency).to_owned(),
+                        format!("{currency}-USD:{timestamp}"),
+                    )
+                })
                 .collect(),
+            updated_at_by_currency,
         }
+    }
+
+    #[test]
+    fn independent_fx_evidence_keeps_okx_record_identity_and_excludes_stale_or_unattributed_marks()
+    {
+        let snapshot = rates(
+            &[
+                ("USD", 1.0),
+                ("USDT", 0.999),
+                ("BTC", 68_000.0),
+                ("EUR", 1.08),
+            ],
+            200_000,
+            &[("USDT", 200_000), ("BTC", 200_000), ("EUR", 1)],
+        );
+        let mut snapshot = snapshot;
+        snapshot.source_record_id_by_currency.remove("BTC");
+        let required = BTreeSet::from(["USDT".to_owned(), "BTC".to_owned(), "EUR".to_owned()]);
+        let events = paper_exchange_fx_evidence_events(&snapshot, 250_000, &required);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["source_system"], "OKX");
+        assert_eq!(events[0]["source_epoch"], "okx-index-tickers:v1");
+        assert_eq!(events[0]["source_cursor"], 200_000);
+        assert_eq!(events[0]["source_record_id"], "USDT-USD:200000");
+        assert_eq!(events[0]["source_timestamp_utc_ms"], 200_000);
+        assert_eq!(events[0]["event_type"], "fx_mark");
+        assert_eq!(events[0]["rate_usd"], 0.999);
     }
 
     #[test]

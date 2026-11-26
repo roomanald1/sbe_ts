@@ -101,6 +101,57 @@ def reconcile_independent_execution_fills(
         return result
     result["independent_execution_source_complete"] = True
 
+    fee_schedules = execution_ledger.get("fee_schedules")
+    if not isinstance(fee_schedules, list) or not fee_schedules:
+        result["blockers"].append("Independent versioned fee schedule evidence is unavailable")
+        return result
+    fee_schedule_by_identity = {}
+    for schedule in fee_schedules:
+        if not isinstance(schedule, dict):
+            result["blockers"].append("Independent fee schedule row is invalid")
+            return result
+        schedule_id, schedule_version = schedule.get("fee_schedule_id"), schedule.get("fee_schedule_version")
+        symbol, source = schedule.get("symbol"), schedule.get("source_system")
+        source_record_id = schedule.get("source_record_id")
+        effective_from, effective_to = schedule.get("effective_from_utc_ms"), schedule.get("effective_to_utc_ms")
+        if (
+            not isinstance(schedule_id, str) or not schedule_id
+            or not isinstance(schedule_version, str) or not schedule_version
+            or not isinstance(symbol, str) or not symbol
+            or not isinstance(source, str) or not source
+            or not isinstance(source_record_id, str) or not source_record_id
+            or isinstance(effective_from, bool) or not isinstance(effective_from, int)
+            or (effective_to is not None and (
+                isinstance(effective_to, bool) or not isinstance(effective_to, int)
+                or effective_to <= effective_from
+            ))
+            or "maker_rate" not in schedule
+            or "taker_rate" not in schedule
+        ):
+            result["blockers"].append("Independent fee schedule identity, source or effective range is incomplete")
+            return result
+        normalized_source = source.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized_source in {
+            "pm", "position_management", "position_manager",
+            "position_manager_account_topup_ledger", "auto_trader",
+        }:
+            result["blockers"].append("Independent fee schedule was copied from Position Management or AutoTrader")
+            return result
+        try:
+            maker_rate = dec(schedule["maker_rate"])
+            taker_rate = dec(schedule["taker_rate"])
+        except (ValueError, TypeError):
+            result["blockers"].append("Independent fee schedule rates are missing or invalid")
+            return result
+        if maker_rate < 0 or taker_rate < 0 or maker_rate > Decimal("0.1") or taker_rate > Decimal("0.1"):
+            result["blockers"].append("Independent fee schedule rates are outside simulator bounds")
+            return result
+        identity = (schedule_id, schedule_version, symbol)
+        if identity in fee_schedule_by_identity:
+            result["blockers"].append("Independent fee schedule identity is duplicated")
+            return result
+        fee_schedule_by_identity[identity] = schedule
+
     def aggregate(rows, source, id_field):
         by_order = defaultdict(lambda: {
             "symbol": None, "side": None, "quantity": ZERO, "notional": ZERO,
@@ -129,6 +180,52 @@ def reconcile_independent_execution_fills(
             fee_currency = row.get("fee_currency")
             if not isinstance(fee_currency, str) or not fee_currency.strip():
                 raise ValueError(f"{source} row has missing fee currency")
+            if source == "Paper Exchange":
+                schedule_id = row.get("fee_schedule_id")
+                schedule_version = row.get("fee_schedule_version")
+                timestamp = row.get("timestamp_utc_ms")
+                if (
+                    not isinstance(schedule_id, str) or not schedule_id
+                    or not isinstance(schedule_version, str) or not schedule_version
+                    or isinstance(timestamp, bool) or not isinstance(timestamp, int)
+                ):
+                    raise ValueError("Paper Exchange row lacks versioned fee schedule or source timestamp")
+                fill_source = row.get("source_system")
+                source_epoch = row.get("source_epoch")
+                source_cursor = row.get("source_cursor")
+                source_record_id = row.get("source_record_id")
+                if (
+                    not isinstance(fill_source, str) or not fill_source.strip()
+                    or not isinstance(source_epoch, str) or not source_epoch
+                    or isinstance(source_cursor, bool) or not isinstance(source_cursor, int)
+                    or source_cursor <= 0
+                    or not isinstance(source_record_id, str) or not source_record_id
+                ):
+                    raise ValueError("Paper Exchange execution lacks source epoch, cursor or record identity")
+                normalized_fill_source = fill_source.strip().lower().replace("-", "_").replace(" ", "_")
+                if normalized_fill_source in {
+                    "pm", "position_management", "position_manager",
+                    "position_manager_account_topup_ledger", "auto_trader",
+                }:
+                    raise ValueError("Paper Exchange execution row was copied from Position Management or AutoTrader")
+                schedule = fee_schedule_by_identity.get((schedule_id, schedule_version, symbol))
+                if schedule is None:
+                    raise ValueError("Paper Exchange fill references a missing or mismatched fee schedule")
+                if timestamp < schedule["effective_from_utc_ms"] or (
+                    schedule["effective_to_utc_ms"] is not None
+                    and timestamp >= schedule["effective_to_utc_ms"]
+                ):
+                    raise ValueError("Paper Exchange fee schedule was not effective at fill time")
+                pair = symbol.rsplit("-", 1)
+                if len(pair) != 2 or not pair[1] or fee_currency != pair[1]:
+                    raise ValueError("Paper Exchange fee currency must match the instrument quote currency")
+                origin = row.get("execution_origin")
+                if origin not in {"market_match", "resting_limit", "protective_barrier", "vwap", "twap"}:
+                    raise ValueError("Paper Exchange execution origin is unsupported for fee reconciliation")
+                rate = dec(schedule["maker_rate"] if origin == "resting_limit" else schedule["taker_rate"])
+                expected_fee = -(quantity * price * rate)
+                if abs(fee - expected_fee) > EXECUTION_RECONCILIATION_TOLERANCE:
+                    raise ValueError("Paper Exchange signed fee differs from the versioned simulator fee schedule")
             aggregate = by_order[order_id]
             if aggregate["symbol"] not in (None, symbol) or aggregate["side"] not in (None, side):
                 raise ValueError(f"{source} order identity crosses symbol or side")
@@ -553,6 +650,377 @@ def compare_paper_exchange_match_evidence(
     return result
 
 
+def project_paper_exchange_financial_evidence_page(page):
+    """Project the durable Paper Exchange event page into existing fill reconciliation.
+
+    This is a schema adapter only. It copies source identities and values; it
+    does not calculate balances, PnL, fees, or returns. Incomplete page history
+    stays incomplete and cannot pass ``reconcile_independent_execution_fills``.
+    """
+    if not isinstance(page, dict):
+        return None
+    events = page.get("events")
+    page_epoch = page.get("source_epoch")
+    if (
+        page.get("schema_version") != "paper_exchange_financial_evidence:v1"
+        or page.get("evidence_kind") != "paper_exchange_source_attributed_account_evidence"
+        or page.get("cursor_kind") != "financial_event"
+        or not isinstance(page_epoch, str) or not page_epoch
+        or page.get("after_cursor") != 0
+        or page.get("page_complete") is not True
+        or not isinstance(page.get("history_complete"), bool)
+        or not isinstance(events, list)
+        or page.get("page_size") != len(events)
+    ):
+        return None
+    local_cursors = []
+    fills = []
+    fee_schedules = []
+    opening_capital_events = []
+    contributions = []
+    fx_marks = []
+    for stored in events:
+        if not isinstance(stored, dict):
+            return None
+        cursor = stored.get("source_cursor")
+        event = stored.get("event")
+        if (
+            isinstance(cursor, bool) or not isinstance(cursor, int) or cursor <= 0
+            or not isinstance(event, dict)
+            or event.get("schema_version") != "paper_exchange_financial_evidence:v1"
+            or not isinstance(event.get("event_id"), str) or not event["event_id"]
+            or not isinstance(event.get("source_system"), str) or not event["source_system"]
+            or not isinstance(event.get("source_epoch"), str) or not event["source_epoch"]
+            or isinstance(event.get("source_cursor"), bool)
+            or not isinstance(event.get("source_cursor"), int)
+            or event["source_cursor"] <= 0
+            or not isinstance(event.get("source_record_id"), str) or not event["source_record_id"]
+            or isinstance(event.get("source_timestamp_utc_ms"), bool)
+            or not isinstance(event.get("source_timestamp_utc_ms"), int)
+            or event["source_timestamp_utc_ms"] <= 0
+            or stored.get("source_epoch") != event.get("source_epoch")
+            or stored.get("source_system") != event.get("source_system")
+            or stored.get("source_record_id") != event.get("source_record_id")
+            or stored.get("source_timestamp_utc_ms") != event.get("source_timestamp_utc_ms")
+        ):
+            return None
+        local_cursors.append(cursor)
+        kind = event.get("event_type")
+        if kind == "fee_schedule":
+            fee_schedules.append({
+                "fee_schedule_id": event.get("fee_schedule_id"),
+                "fee_schedule_version": event.get("fee_schedule_version"),
+                "symbol": event.get("symbol"),
+                "source_system": event["source_system"],
+                "source_record_id": event["source_record_id"],
+                "effective_from_utc_ms": event.get("effective_from_utc_ms"),
+                "effective_to_utc_ms": event.get("effective_to_utc_ms"),
+                "maker_rate": event.get("maker_rate"),
+                "taker_rate": event.get("taker_rate"),
+            })
+        elif kind == "settled_execution":
+            fills.append({
+                "execution_id": event.get("execution_id"),
+                "order_id": event.get("order_id"),
+                "symbol": event.get("symbol"),
+                "side": event.get("side"),
+                "quantity": event.get("quantity"),
+                "price": event.get("price"),
+                "fee": event.get("fee"),
+                "fee_known": True,
+                "fee_currency": event.get("fee_currency"),
+                "fee_schedule_id": event.get("fee_schedule_id"),
+                "fee_schedule_version": event.get("fee_schedule_version"),
+                "timestamp_utc_ms": event["source_timestamp_utc_ms"],
+                "source_system": event["source_system"],
+                "source_epoch": event["source_epoch"],
+                "source_cursor": event["source_cursor"],
+                "financial_evidence_cursor": cursor,
+                "source_record_id": event["source_record_id"],
+                "execution_origin": event.get("execution_origin"),
+            })
+        elif kind == "account_balance":
+            if event.get("boundary") == "opening":
+                opening_capital_events.append((stored, event))
+        elif kind == "cash_movement":
+            contributions.append((stored, event))
+        elif kind == "fx_mark":
+            fx_marks.append((stored, event))
+    max_cursor = page.get("max_cursor")
+    if (
+        isinstance(max_cursor, bool) or not isinstance(max_cursor, int)
+        or max_cursor < 0
+        or local_cursors != list(range(1, max_cursor + 1))
+    ):
+        return None
+    return {
+        "schema_version": 1,
+        "contract": "paper_exchange_execution_ledger_v1",
+        "source_system": "paper_exchange",
+        "execution_mode": "paper",
+        "independent_source": True,
+        "complete": page.get("history_complete") is True,
+        "snapshot_id": f"paper-exchange-financial:v1:{page_epoch}:{max_cursor}",
+        "source_epoch": page_epoch,
+        "source_attribution_status": page.get("source_attribution_status"),
+        "opening_capital_status": page.get("opening_capital_status"),
+        "fee_schedule_status": page.get("fee_schedule_status"),
+        "uncovered_execution_flow_types": page.get("uncovered_execution_flow_types"),
+        "fills": fills,
+        "fee_schedules": fee_schedules,
+        "opening_capital_events": opening_capital_events,
+        "contribution_events": contributions,
+        "fx_marks": fx_marks,
+    }
+
+
+def reconstruct_portfolio_intervals_from_paper_exchange(page, pm_intervals, pm_trades):
+    """Reconstruct cash boundaries from Paper Exchange opening capital and durable events.
+
+    Closing balances are derived from opening cash plus signed executions and
+    sourced contributions. They are explicitly marked as reconstructed, never
+    represented as a provider balance snapshot.
+    """
+    projected = project_paper_exchange_financial_evidence_page(page)
+    if projected is None or projected.get("complete") is not True:
+        return None
+    if not isinstance(pm_intervals, list) or not pm_intervals or not isinstance(pm_trades, list):
+        return None
+    opening_events = projected["opening_capital_events"]
+    if len(opening_events) != 1:
+        return None
+    opening_stored, opening_event = opening_events[0]
+    opening_payload = opening_event.get("balances_by_currency")
+    opening_portfolio_id = opening_event.get("portfolio_id")
+    if (opening_event.get("boundary") != "opening"
+            or not isinstance(opening_portfolio_id, str) or not opening_portfolio_id
+            or not isinstance(opening_payload, dict) or not opening_payload):
+        return None
+    try:
+        balances = {currency: dec(amount) for currency, amount in opening_payload.items()}
+    except (ValueError, TypeError):
+        return None
+
+    all_fills = projected["fills"]
+    all_contribution_events = projected["contribution_events"]
+    raw_fx = projected["fx_marks"]
+    page_epoch = page.get("source_epoch")
+    if not isinstance(page_epoch, str) or not page_epoch:
+        return None
+    trade_by_execution = {}
+    for trade in pm_trades:
+        if not isinstance(trade, dict):
+            return None
+        execution_id = trade.get("paper_exchange_execution_id")
+        if isinstance(execution_id, str) and execution_id:
+            if execution_id in trade_by_execution:
+                return None
+            trade_by_execution[execution_id] = trade
+
+    def fill_cursor(trade):
+        fill_id = trade.get("fill_id")
+        # Existing PM rows carry the cursor epoch in fill_id, not a redundant JSON field.
+        if not isinstance(fill_id, str) or not fill_id.startswith("pm-fill:v1:"):
+            return None
+        try:
+            return int(fill_id.rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            return None
+
+    intervals = []
+    ordered_pm = sorted(pm_intervals, key=lambda row: row.get("interval_end_utc_ms", -1))
+    event_movements = []
+    for event in all_fills:
+        quote_pair = event.get("symbol", "").rsplit("-", 1)
+        if len(quote_pair) != 2 or not quote_pair[1]:
+            return None
+        quote = quote_pair[1]
+        quantity, price = dec(event.get("quantity")), dec(event.get("price"))
+        side = event.get("side")
+        if quantity <= 0 or price <= 0 or side not in ("buy", "sell"):
+            return None
+        amount = (-quantity * price if side == "buy" else quantity * price) + dec(event.get("fee"))
+        event_movements.append((event["timestamp_utc_ms"], event["financial_evidence_cursor"], quote, amount))
+    contribution_rows = []
+    for stored, event in all_contribution_events:
+        if (event.get("movement_kind") not in ("contribution", "deposit", "top_up", "topup")
+                or event.get("portfolio_id") != opening_portfolio_id):
+            return None
+        contribution_rows.append((stored, event))
+    event_movements.sort(key=lambda row: (row[0], row[1]))
+    contribution_rows.sort(key=lambda row: (row[0]["source_timestamp_utc_ms"], row[0]["source_cursor"]))
+
+    first_boundary = ordered_pm[0].get("interval_start_utc_ms")
+    if not isinstance(first_boundary, int) or opening_stored["source_timestamp_utc_ms"] > first_boundary:
+        return None
+    # Event history before the first reported PM interval must be fully represented;
+    # otherwise its opening cash cannot be reconstructed from this epoch.
+    applied_fill_cursors = set()
+    applied_contribution_ids = set()
+
+    def apply_until(timestamp):
+        for row in event_movements:
+            event_time, cursor, currency, amount = row
+            if event_time < timestamp and cursor not in applied_fill_cursors:
+                balances[currency] = balances.get(currency, ZERO) + amount
+                applied_fill_cursors.add(cursor)
+        for stored, event in contribution_rows:
+            if stored["source_timestamp_utc_ms"] < timestamp and event["event_id"] not in applied_contribution_ids:
+                currency = event.get("currency")
+                if not isinstance(currency, str) or not currency:
+                    raise ValueError("Invalid contribution currency")
+                balances[currency] = balances.get(currency, ZERO) + dec(event.get("amount"))
+                applied_contribution_ids.add(event["event_id"])
+
+    try:
+        for pm in ordered_pm:
+            start, end = pm.get("interval_start_utc_ms"), pm.get("interval_end_utc_ms")
+            if (not isinstance(start, int) or not isinstance(end, int) or end <= start
+                    or pm.get("portfolio_id") != opening_portfolio_id):
+                return None
+            apply_until(start)
+            opening_balances = dict(balances)
+            interval_fills = []
+            cash_movements = defaultdict(lambda: ZERO)
+            for event in all_fills:
+                timestamp = event["timestamp_utc_ms"]
+                if not start <= timestamp < end:
+                    continue
+                trade = trade_by_execution.get(event.get("execution_id"))
+                sequence = fill_cursor(trade) if trade else None
+                if sequence is None or sequence <= pm.get("fill_cursor_start", -1) or sequence > pm.get("fill_cursor_end", -1):
+                    return None
+                quote = event["symbol"].rsplit("-", 1)[1]
+                signed_notional = (-dec(event["quantity"]) * dec(event["price"])
+                                   if event["side"] == "buy" else dec(event["quantity"]) * dec(event["price"]))
+                signed_notional += dec(event["fee"])
+                balances[quote] = balances.get(quote, ZERO) + signed_notional
+                cash_movements[quote] += signed_notional
+                interval_fills.append({**event, "fill_cursor": sequence})
+                applied_fill_cursors.add(event["financial_evidence_cursor"])
+            independent_contributions = []
+            for stored, event in contribution_rows:
+                timestamp = stored["source_timestamp_utc_ms"]
+                if not start <= timestamp < end:
+                    continue
+                pm_contribution = next((row for row in pm.get("external_contribution_events", [])
+                                        if row.get("independent_source_record_id") == stored["source_record_id"]
+                                        and row.get("independent_source_epoch") == page_epoch
+                                        and row.get("independent_source_cursor") == stored["source_cursor"]), None)
+                if pm_contribution is None:
+                    return None
+                amount = dec(event.get("amount"))
+                currency = event.get("currency")
+                balances[currency] = balances.get(currency, ZERO) + amount
+                cash_movements[currency] += amount
+                applied_contribution_ids.add(event["event_id"])
+                independent_contributions.append({
+                    "contribution_id": event.get("movement_id"),
+                    "pm_contribution_id": pm_contribution.get("contribution_id"),
+                    "source": stored.get("source_system"),
+                    "source_record_id": stored.get("source_record_id"),
+                    "provider_source_epoch": page_epoch,
+                    "provider_source_cursor": stored.get("source_cursor"),
+                    "source_cursor": pm_contribution.get("source_cursor"),
+                    "timestamp_utc_ms": timestamp,
+                    "currency": currency,
+                    "amount": event.get("amount"),
+                    "value_usd": pm_contribution.get("value_usd"),
+                })
+            closing_balances = dict(balances)
+            fx_marks = []
+            boundary_maps = {}
+            for boundary, boundary_time, rates_key, times_key, balances_at_boundary in (
+                ("opening", start, "opening_fx_rates_usd_by_currency", "opening_fx_rates_updated_at_by_currency", opening_balances),
+                ("closing", end, "closing_fx_rates_usd_by_currency", "closing_fx_rates_updated_at_by_currency", closing_balances),
+            ):
+                pm_rates = pm.get(rates_key)
+                pm_times = pm.get(times_key)
+                if not isinstance(pm_rates, dict) or not isinstance(pm_times, dict):
+                    return None
+                marks_for_boundary = {}
+                for currency in balances_at_boundary:
+                    timestamp = pm_times.get(currency)
+                    rate = pm_rates.get(currency)
+                    if currency == "USD" and timestamp == 0 and rate == 1.0:
+                        source_record_id = f"fixed-usd-parity:{boundary_time}"
+                        source_cursor = 1
+                        source_epoch = "usd-parity:v1"
+                        source_system = "fixed_usd_parity"
+                    else:
+                        candidate = next((row for stored, row in raw_fx
+                                          if row.get("currency") == currency
+                                          and row.get("portfolio_id") == opening_portfolio_id
+                                          and row.get("rate_usd") == rate
+                                          and stored.get("source_timestamp_utc_ms") == timestamp), None)
+                        if candidate is None:
+                            return None
+                        stored = next(stored for stored, row in raw_fx if row is candidate)
+                        source_record_id = stored.get("source_record_id")
+                        source_cursor = stored.get("source_cursor")
+                        source_epoch = stored.get("source_epoch")
+                        source_system = stored.get("source_system")
+                    marks_for_boundary[currency] = (rate, timestamp)
+                    fx_marks.append({"boundary": boundary, "currency": currency,
+                                     "rate_usd": rate, "updated_at_utc_ms": timestamp,
+                                     "schema_version": 1, "source_system": source_system,
+                                     "source_record_id": source_record_id,
+                                     "source_epoch": source_epoch, "source_cursor": source_cursor})
+                boundary_maps[boundary] = marks_for_boundary
+            opening_values = {currency: float(amount) * float(boundary_maps["opening"][currency][0])
+                              for currency, amount in opening_balances.items()}
+            closing_values = {currency: float(amount) * float(boundary_maps["closing"][currency][0])
+                              for currency, amount in closing_balances.items()}
+            interval_cash_movements = dict(cash_movements)
+            contribution_totals = defaultdict(lambda: ZERO)
+            for row in independent_contributions:
+                contribution_totals[row["currency"]] += dec(row["amount"])
+            contributions_usd = sum((dec(row["value_usd"]) for row in independent_contributions), ZERO)
+            intervals.append({
+                "interval_id": f"paper_exchange_reconstruction:{page_epoch}:{pm.get('evidence_id')}",
+                "complete": True,
+                **{key: pm.get(key) for key in ("portfolio_id", "execution_mode", "ledger_epoch",
+                    "interval_start_utc_ms", "interval_end_utc_ms", "fill_cursor_start",
+                    "fill_cursor_end", "trade_row_cursor_end", "topup_cursor_start", "topup_cursor_end")},
+                "opening_cash_balances_by_currency": {k: float(v) for k, v in opening_balances.items()},
+                "closing_cash_balances_by_currency": {k: float(v) for k, v in closing_balances.items()},
+                "opening_balance_evidence": {"schema_version": 1, "source_system": "paper_exchange_event_reconstruction",
+                    "source_record_id": f"opening:{opening_stored['source_record_id']}", "source_epoch": page_epoch,
+                    "source_cursor": opening_stored["source_cursor"], "source_timestamp_utc_ms": start,
+                    "balances_by_currency": {k: float(v) for k, v in opening_balances.items()}},
+                "closing_balance_evidence": {"schema_version": 1, "source_system": "paper_exchange_event_reconstruction",
+                    "source_record_id": f"derived-close:{page_epoch}:{pm.get('evidence_id')}", "source_epoch": page_epoch,
+                    "source_cursor": page.get("max_cursor"), "source_timestamp_utc_ms": end,
+                    "balances_by_currency": {k: float(v) for k, v in closing_balances.items()}},
+                "opening_cash_value_usd_by_currency": opening_values,
+                "closing_cash_value_usd_by_currency": closing_values,
+                "opening_cash_total_usd": sum(opening_values.values()),
+                "closing_cash_total_usd": sum(closing_values.values()),
+                "cash_movements_by_currency": {k: float(v) for k, v in interval_cash_movements.items()},
+                "external_contributions_by_currency": {k: float(v) for k, v in contribution_totals.items()},
+                "external_contribution_events": independent_contributions,
+                "known_fee_fills": len(interval_fills), "unknown_fee_fills": 0,
+                "fee_schedules": projected["fee_schedules"], "fills": interval_fills,
+                "fx_marks": fx_marks,
+            })
+    except (ValueError, TypeError, KeyError, StopIteration):
+        return None
+
+    return {
+        "schema_version": 1,
+        "contract": "paper_exchange_portfolio_interval_v1",
+        "source_system": "paper_exchange",
+        "execution_mode": "paper",
+        "independent_source": True,
+        "complete": True,
+        "snapshot_id": f"paper-exchange-reconstructed:{page_epoch}:{page.get('max_cursor')}",
+        "baseline_evidence_id": ordered_pm[0].get("baseline_evidence_id"),
+        "fixture_only": False,
+        "intervals": intervals,
+        "source_attribution_status": page.get("source_attribution_status"),
+    }
+
+
 def reconcile_independent_portfolio_intervals(
     position_intervals,
     independent_contract,
@@ -625,6 +1093,16 @@ def reconcile_independent_portfolio_intervals(
             if abs(left[currency] - right[currency]) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
                 raise ValueError(f"{label} amount mismatch for {currency}")
 
+    def require_independent_source(source, source_record_id, label):
+        if not isinstance(source, str) or not source.strip() or not isinstance(source_record_id, str) or not source_record_id.strip():
+            raise ValueError(f"{label} lacks independent source and source-record identity")
+        normalized_source = source.strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized_source in {
+            "pm", "position_management", "position_manager",
+            "position_manager_account_topup_ledger", "auto_trader",
+        }:
+            raise ValueError(f"{label} is copied from the Position Management or AutoTrader source")
+
     def interval_identity(interval):
         fields = (
             "portfolio_id",
@@ -671,6 +1149,7 @@ def reconcile_independent_portfolio_intervals(
             raise ValueError(f"{label} contribution events are unavailable")
         _, _, _, interval_start, interval_end, _, _, _, topup_start, topup_end = identity
         projected = {}
+        seen_ids = set()
         by_currency = defaultdict(lambda: ZERO)
         for row in rows:
             if not isinstance(row, dict):
@@ -693,12 +1172,40 @@ def reconcile_independent_portfolio_intervals(
                 or not currency
             ):
                 raise ValueError(f"{label} contribution identity is incomplete")
-            if contribution_id in projected:
+            if contribution_id in seen_ids:
                 raise ValueError(f"{label} contribution ID is duplicated")
+            seen_ids.add(contribution_id)
             amount = number(row.get("amount"), f"{label} contribution amount")
             value_usd = number(row.get("value_usd"), f"{label} contribution USD value")
-            projected[contribution_id] = {
+            if label == "PM":
+                projection_id = contribution_id
+                if source != "position_manager_account_topup_ledger":
+                    raise ValueError("PM contribution row has an unexpected source")
+                independent_record_id = row.get("independent_source_record_id")
+                independent_source_epoch = row.get("independent_source_epoch")
+                independent_source_cursor = row.get("independent_source_cursor")
+            else:
+                require_independent_source(source, row.get("source_record_id"), "Independent contribution")
+                projection_id = row.get("pm_contribution_id")
+                provider_cursor = row.get("provider_source_cursor")
+                provider_epoch = row.get("provider_source_epoch")
+                if (
+                    not isinstance(projection_id, str) or not projection_id
+                    or not is_integer(provider_cursor) or provider_cursor <= 0
+                    or not isinstance(provider_epoch, str) or not provider_epoch
+                ):
+                    raise ValueError("Independent contribution lacks provider epoch/cursor or PM linkage")
+                independent_record_id = row.get("source_record_id")
+                independent_source_epoch = provider_epoch
+                independent_source_cursor = provider_cursor
+            if projection_id in projected:
+                raise ValueError(f"{label} contribution PM link is duplicated")
+            projected[projection_id] = {
+                "contribution_id": contribution_id,
                 "source": source,
+                "source_record_id": independent_record_id,
+                "independent_source_epoch": independent_source_epoch,
+                "independent_source_cursor": independent_source_cursor,
                 "source_cursor": source_cursor,
                 "timestamp_utc_ms": timestamp,
                 "currency": currency,
@@ -766,6 +1273,32 @@ def reconcile_independent_portfolio_intervals(
         external_closing = money_map(external.get("closing_cash_balances_by_currency"), "Independent closing cash")
         equal_money_maps(opening, external_opening, "Opening cash")
         equal_money_maps(closing, external_closing, "Closing cash")
+        for boundary, balances, boundary_ms in (
+            ("opening", external_opening, interval_start),
+            ("closing", external_closing, interval_end),
+        ):
+            balance_source = external.get(f"{boundary}_balance_evidence")
+            if not isinstance(balance_source, dict):
+                raise ValueError(f"Independent {boundary} account balance source evidence is unavailable")
+            require_independent_source(
+                balance_source.get("source_system"),
+                balance_source.get("source_record_id"),
+                f"Independent {boundary} account balance",
+            )
+            if (
+                balance_source.get("schema_version") != 1
+                or not isinstance(balance_source.get("source_epoch"), str)
+                or not balance_source.get("source_epoch")
+                or not is_integer(balance_source.get("source_cursor"))
+                or balance_source.get("source_cursor") <= 0
+                or balance_source.get("source_timestamp_utc_ms") != boundary_ms
+            ):
+                raise ValueError(f"Independent {boundary} account balance provenance is incomplete or misaligned")
+            equal_money_maps(
+                balances,
+                money_map(balance_source.get("balances_by_currency"), f"Independent {boundary} source balances"),
+                f"Independent {boundary} source balances",
+            )
 
         marks = external.get("fx_marks")
         if not isinstance(marks, list):
@@ -777,6 +1310,17 @@ def reconcile_independent_portfolio_intervals(
             boundary, currency = mark.get("boundary"), mark.get("currency")
             if boundary not in ("opening", "closing") or not isinstance(currency, str) or not currency:
                 raise ValueError("Independent FX mark identity is invalid")
+            require_independent_source(
+                mark.get("source_system"), mark.get("source_record_id"), "Independent FX mark"
+            )
+            if (
+                mark.get("schema_version") != 1
+                or not isinstance(mark.get("source_epoch"), str)
+                or not mark.get("source_epoch")
+                or not is_integer(mark.get("source_cursor"))
+                or mark.get("source_cursor") <= 0
+            ):
+                raise ValueError("Independent FX mark provenance is incomplete")
             key = (boundary, currency)
             if key in mark_map:
                 raise ValueError("Independent FX mark is duplicated")
@@ -829,8 +1373,17 @@ def reconcile_independent_portfolio_intervals(
         external_contributions, external_contributions_by_currency = contribution_projection(
             external.get("external_contribution_events"), identity, "Independent"
         )
-        if pm_contributions != external_contributions:
-            raise ValueError("Separately identified external contribution events mismatch")
+        if set(pm_contributions) != set(external_contributions):
+            raise ValueError("Independent contribution rows do not link to every PM contribution")
+        for contribution_id in pm_contributions:
+            pm_contribution = pm_contributions[contribution_id]
+            independent_contribution = external_contributions[contribution_id]
+            for field in (
+                "source_record_id", "independent_source_epoch", "independent_source_cursor",
+                "source_cursor", "timestamp_utc_ms", "currency", "amount", "value_usd",
+            ):
+                if pm_contribution[field] != independent_contribution[field]:
+                    raise ValueError("Independently sourced contribution does not match PM-linked event")
         pm_contribution_map = money_map(pm.get("external_contributions_by_currency"), "PM contributions by currency") if pm.get("external_contributions_by_currency") else {}
         external_contribution_map = money_map(external.get("external_contributions_by_currency"), "Independent contributions by currency") if external.get("external_contributions_by_currency") else {}
         if pm_contributions_by_currency != pm_contribution_map or pm_contributions_by_currency != external_contributions_by_currency or pm_contributions_by_currency != external_contribution_map:
@@ -882,10 +1435,22 @@ def reconcile_independent_portfolio_intervals(
             "returned_records": len(pm_interval_fills),
         }
         fill_result = reconcile_independent_execution_fills(
-            pm_interval_fills, {"schema_version": 1, "source_system": "paper_exchange", "execution_mode": "paper", "independent_source": True, "complete": True, "snapshot_id": independent_contract["snapshot_id"], "fills": external_fills}, interval_position_coverage
+            pm_interval_fills, {
+                "schema_version": 1,
+                "source_system": "paper_exchange",
+                "execution_mode": "paper",
+                "independent_source": True,
+                "complete": True,
+                "snapshot_id": independent_contract["snapshot_id"],
+                "fee_schedules": external.get("fee_schedules"),
+                "fills": external_fills,
+            }, interval_position_coverage
         )
         if not fill_result["independent_execution_ledger_reconciled"]:
-            raise ValueError("Interval fill and known fee rows do not reconcile")
+            raise ValueError(
+                "Interval fill and known fee rows do not reconcile: "
+                + "; ".join(fill_result["blockers"])
+            )
 
         fill_cash_movements = defaultdict(lambda: ZERO)
         for fill in external_fills:
@@ -1291,11 +1856,13 @@ def load_execution_reconciliation_inputs(sources, cache):
     contracts = {
         ("positions", "trades"): ("positions-trades-", "/positions/trades"),
         ("positions", "portfolio-evidence-intervals"):
-            ("positions-portfolio-evidence-intervals-", "/positions/portfolio-evidence-intervals"),
+            ("positions-portfolio-evidence-intervals-", "/positions/portfolio-evidence/intervals"),
         ("paper_exchange", "execution-ledger"):
             ("paper_exchange-execution-ledger-", "/internal/executions/ledger"),
         ("paper_exchange", "match-evidence-ledger"):
             ("paper_exchange-match-evidence-ledger-", "/internal/orders/match/ledger"),
+        ("paper_exchange", "financial-evidence"):
+            ("paper_exchange-financial-evidence-complete-", "/internal/financial/evidence"),
     }
     bodies = {}
     for item in sources:
@@ -1326,6 +1893,7 @@ def load_execution_reconciliation_inputs(sources, cache):
     pm_body = bodies.get(("positions", "trades"))
     exchange_body = bodies.get(("paper_exchange", "execution-ledger"))
     match_evidence_body = bodies.get(("paper_exchange", "match-evidence-ledger"))
+    financial_evidence_body = bodies.get(("paper_exchange", "financial-evidence"))
     interval_body = bodies.get(("positions", "portfolio-evidence-intervals"))
     if (
         not isinstance(pm_body, dict)
@@ -1335,6 +1903,7 @@ def load_execution_reconciliation_inputs(sources, cache):
         or not isinstance(pm_body.get("total"), int)
         or pm_body.get("total") != len(pm_body["trades"])
         or not isinstance(exchange_body, dict) and not isinstance(match_evidence_body, dict)
+            and not isinstance(financial_evidence_body, dict)
         or ("positions", "portfolio-evidence-intervals") in bodies
         and not isinstance(interval_body, dict)
     ):
@@ -1347,14 +1916,32 @@ def load_execution_reconciliation_inputs(sources, cache):
             row for row in raw_intervals
             if isinstance(row, dict) and row.get("is_baseline") is True
         ] if isinstance(raw_intervals, list) else []
-        period_rows = [
+        all_period_rows = [
             row for row in raw_intervals
             if isinstance(row, dict) and row.get("is_baseline") is not True
         ] if isinstance(raw_intervals, list) else []
+        latest_baseline = max(
+            baseline_rows,
+            key=lambda row: row.get("interval_end_utc_ms", -1)
+            if isinstance(row.get("interval_end_utc_ms"), int) else -1,
+            default=None,
+        )
+        baseline_end = (
+            latest_baseline.get("interval_end_utc_ms")
+            if isinstance(latest_baseline, dict) else None
+        )
+        # Keep earlier incomplete observations as history, but start this
+        # reconciliation epoch at the explicit clean baseline boundary.
+        period_rows = [
+            row for row in all_period_rows
+            if isinstance(baseline_end, int)
+            and isinstance(row.get("interval_end_utc_ms"), int)
+            and row["interval_end_utc_ms"] > baseline_end
+        ]
         baseline_verified = False
         baseline_evidence_id = None
-        if len(baseline_rows) == 1 and period_rows:
-            baseline = baseline_rows[0]
+        if isinstance(latest_baseline, dict) and period_rows:
+            baseline = latest_baseline
             baseline_evidence_id = baseline.get("evidence_id")
             baseline_verified = (
                 isinstance(baseline_evidence_id, str)
@@ -1395,7 +1982,13 @@ def load_execution_reconciliation_inputs(sources, cache):
                 previous = row
         interval_coverage = {
             "schema_version": interval_body.get("schema_version"),
-            "coverage": interval_body.get("coverage"),
+            "coverage": (
+                "pm_internal_complete"
+                if baseline_verified and period_rows
+                and all(row.get("complete") is True for row in period_rows)
+                and interval_body.get("truncated") is False
+                else interval_body.get("coverage")
+            ),
             "truncated": interval_body.get("truncated"),
             "returned_intervals": len(period_rows),
             "next_cursor": interval_body.get("next_cursor"),
@@ -1408,6 +2001,18 @@ def load_execution_reconciliation_inputs(sources, cache):
         exchange_body.get("portfolio_interval_contract")
         if isinstance(exchange_body, dict) else None
     )
+    if isinstance(financial_evidence_body, dict):
+        projected = project_paper_exchange_financial_evidence_page(financial_evidence_body)
+    else:
+        projected = None
+    if projected is not None:
+        execution_ledger = projected
+        if pm_portfolio_intervals is not None:
+            independent_interval_contract = reconstruct_portfolio_intervals_from_paper_exchange(
+                financial_evidence_body, pm_portfolio_intervals, pm_body["trades"]
+            )
+    else:
+        execution_ledger = exchange_body
     if (
         not isinstance(independent_interval_contract, dict)
         or independent_interval_contract.get("fixture_only") is True
@@ -1420,7 +2025,8 @@ def load_execution_reconciliation_inputs(sources, cache):
             "total_records": pm_body["total"],
             "returned_records": len(pm_body["trades"]),
         },
-        "execution_ledger": exchange_body,
+        "execution_ledger": execution_ledger,
+        "paper_exchange_financial_evidence": financial_evidence_body,
         "match_evidence_ledger": match_evidence_body,
         "pm_portfolio_intervals": pm_portfolio_intervals,
         "portfolio_interval_source_coverage": interval_coverage,

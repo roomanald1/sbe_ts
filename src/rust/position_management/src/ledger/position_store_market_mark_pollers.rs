@@ -107,12 +107,24 @@ impl PositionStore {
                 }
                 continue;
             }
+            let book_timestamp = self
+                .market_mark(&order.symbol)
+                .map(|mark| mark.updated_at_ms)
+                .unwrap_or(now);
+            let attempt_order_id = format!("{}:resting:{book_timestamp}", order.id);
+            let parent_order_id = order
+                .parent_order_id
+                .as_deref()
+                .or(order.client_order_id.as_deref());
             let mut response = paper_exchange_match(
                 &order.symbol,
                 &order.side,
                 match_quantity,
                 Some(order.limit_price),
-                order.client_order_id.as_deref(),
+                Some(&attempt_order_id),
+                parent_order_id,
+                "resting_limit",
+                Some(order.limit_price),
             )
             .await
             .map_err(|(status, message)| {
@@ -178,7 +190,7 @@ impl PositionStore {
                 };
                 let source_evidence = paper_exchange_fill_evidence(
                     &result,
-                    order.client_order_id.as_deref(),
+                    result.order_id.as_deref(),
                     requested_quantity,
                 );
                 fills.extend(

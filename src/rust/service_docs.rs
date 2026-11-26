@@ -1,6 +1,6 @@
 // Shared Axum routes used by each HTTP service to expose its OpenAPI document
 // and a Swagger UI backed by that document.
-use axum::{response::Html, routing::get, Router};
+use axum::{Router, response::Html, routing::get};
 
 pub fn routes(
     service: &'static str,

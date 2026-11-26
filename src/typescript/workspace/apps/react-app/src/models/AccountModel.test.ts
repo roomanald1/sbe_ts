@@ -96,7 +96,10 @@ describe('AccountModel', () => {
     };
     const model = new AccountModel();
     await model.topUp(50);
-    assert.equal(JSON.parse(String(calls[0].init?.body)).amount, 50);
+    const topUpRequest = JSON.parse(String(calls[0].init?.body));
+    assert.equal(topUpRequest.amount, 50);
+    assert.equal(typeof topUpRequest.contribution_id, 'string');
+    assert.ok(topUpRequest.contribution_id.length > 0);
     assert.equal(model.state$.value.cash, 150);
     assert.equal(model.state$.value.submitting, false);
   });

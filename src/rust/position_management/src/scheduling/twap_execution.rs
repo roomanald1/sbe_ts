@@ -63,8 +63,9 @@ async fn run_twap(
             qty,
             &request.source,
             &run_id,
-            request.client_order_id.as_deref(),
             request.lifecycle.as_ref(),
+            "twap",
+            slice as u64,
         )
         .await
         {

@@ -34,8 +34,8 @@ fn enrich_raw_price(raw: &Bytes, volatility_1m: f64, volatility_5m: f64) -> Opti
     let timestamp = u64::from_le_bytes(raw.get(48..56)?.try_into().ok()?);
     let header_length = message_header_codec::ENCODED_LENGTH;
     let mut enriched = vec![0; header_length + ENRICHED_PRICE_BLOCK_LENGTH as usize];
-    let mut encoder = EnrichedSymbolPriceEncoder::default()
-        .wrap(WriteBuf::new(&mut enriched), header_length);
+    let mut encoder =
+        EnrichedSymbolPriceEncoder::default().wrap(WriteBuf::new(&mut enriched), header_length);
     encoder.symbol(symbol);
     encoder.price(price);
     encoder.timestamp(timestamp);
@@ -73,7 +73,9 @@ impl RSocket for InsightsMarketEventResponder {
         request: Payload,
     ) -> Pin<
         Box<
-            dyn futures_util::Future<Output = anyhow::Result<Option<Payload>>> + Send + 'async_trait,
+            dyn futures_util::Future<Output = anyhow::Result<Option<Payload>>>
+                + Send
+                + 'async_trait,
         >,
     >
     where
@@ -85,7 +87,9 @@ impl RSocket for InsightsMarketEventResponder {
                 .scout_router
                 .as_ref()
                 .context("Insights Scout RSocket route is not configured")?;
-            let bytes = request.data().context("empty Scout service route request")?;
+            let bytes = request
+                .data()
+                .context("empty Scout service route request")?;
             let request: strategy::ScoutCoordinatorRequest =
                 serde_json::from_slice(bytes).context("invalid Scout service route request")?;
             let strategy::ScoutCoordinatorRequest::WorkerRoute(command) = request else {
@@ -100,6 +104,7 @@ impl RSocket for InsightsMarketEventResponder {
             };
             let allowed = match (method.clone(), path) {
                 (http::Method::GET, "/internal/live-news-context") => true,
+                (http::Method::GET, "/internal/process-epoch") => true,
                 (http::Method::GET, "/internal/research-features/history") => true,
                 (http::Method::GET, "/internal/strategy-snapshot-history") => true,
                 (http::Method::POST, "/internal/scouts/register")
@@ -149,11 +154,8 @@ impl RSocket for InsightsMarketEventResponder {
     fn request_stream(
         &self,
         payload: Payload,
-    ) -> Pin<
-        Box<
-            dyn futures_util::Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static,
-        >,
-    > {
+    ) -> Pin<Box<dyn futures_util::Stream<Item = Result<Payload, anyhow::Error>> + Send + 'static>>
+    {
         let request = payload
             .data()
             .and_then(|data| std::str::from_utf8(data.as_ref()).ok());
@@ -161,22 +163,18 @@ impl RSocket for InsightsMarketEventResponder {
             Some("signal-events:*") => (self.events.subscribe(), false, 0),
             Some("tickers:*") => (self.events.subscribe(), true, 0),
             Some("strategy-signals:live") => (self.strategy_signals.subscribe(), false, 1),
-            Some("strategy-signals:live:zlib-v1") => (
-                self.compressed_strategy_signal_events.subscribe(),
-                false,
-                4,
-            ),
-            Some("strategy-signals:maintenance") => (
-                self.strategy_maintenance_events.subscribe(),
-                false,
-                2,
-            ),
-            Some("strategy-signals:*") => {
-                (self.legacy_strategy_signals.subscribe(), false, 3)
+            Some("strategy-signals:live:zlib-v1") => {
+                (self.compressed_strategy_signal_events.subscribe(), false, 4)
             }
+            Some("strategy-signals:maintenance") => {
+                (self.strategy_maintenance_events.subscribe(), false, 2)
+            }
+            Some("strategy-signals:*") => (self.legacy_strategy_signals.subscribe(), false, 3),
             _ => {
                 return Box::pin(futures_util::stream::once(async {
-                    Err(anyhow::anyhow!("unsupported Insights RSocket stream request"))
+                    Err(anyhow::anyhow!(
+                        "unsupported Insights RSocket stream request"
+                    ))
                 }));
             }
         };
@@ -214,7 +212,10 @@ impl RSocket for InsightsMarketEventResponder {
                     return None;
                 }
                 if let Some(data) = initial.get(index).cloned() {
-                    return Some((Ok(Payload::new(Some(data), None)), (events, only_prices, initial, index + 1, false)));
+                    return Some((
+                        Ok(Payload::new(Some(data), None)),
+                        (events, only_prices, initial, index + 1, false),
+                    ));
                 }
                 loop {
                     match events.recv().await {
@@ -225,12 +226,23 @@ impl RSocket for InsightsMarketEventResponder {
                             if only_prices && !is_price {
                                 continue;
                             }
-                            break Some((Ok(Payload::new(Some(data), None)), (events, only_prices, initial, index, false)));
+                            break Some((
+                                Ok(Payload::new(Some(data), None)),
+                                (events, only_prices, initial, index, false),
+                            ));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             if !only_prices {
-                                crate::service_log!("WARN", "Insights strategy subscriber lagged; skipped {skipped} updates; reconnecting clients receive the latest snapshots");
-                                break Some((Err(anyhow::anyhow!("Insights strategy stream lagged by {skipped} updates; resubscribe for a current snapshot")), (events, only_prices, initial, index, true)));
+                                crate::service_log!(
+                                    "WARN",
+                                    "Insights strategy subscriber lagged; skipped {skipped} updates; reconnecting clients receive the latest snapshots"
+                                );
+                                break Some((
+                                    Err(anyhow::anyhow!(
+                                        "Insights strategy stream lagged by {skipped} updates; resubscribe for a current snapshot"
+                                    )),
+                                    (events, only_prices, initial, index, true),
+                                ));
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => break None,
@@ -260,7 +272,10 @@ async fn run_insights_market_event_server(
 ) -> anyhow::Result<()> {
     let port = std::env::var("INSIGHTS_RSOCKET_PORT").unwrap_or_else(|_| "10004".to_owned());
     let address = format!("0.0.0.0:{port}");
-    crate::service_log!("INFO", "Insights RSocket market-event server listening on ws://{address}");
+    crate::service_log!(
+        "INFO",
+        "Insights RSocket market-event server listening on ws://{address}"
+    );
     RSocketFactory::receive()
         .transport(WebsocketServerTransport::from(address))
         .acceptor(Box::new(move |setup, _socket| {
@@ -272,9 +287,7 @@ async fn run_insights_market_event_server(
                 strategy_maintenance_events: strategy_maintenance_events.clone(),
                 legacy_strategy_signals: legacy_strategy_signals.clone(),
                 latest_strategy_signals: Arc::clone(&latest_strategy_signals),
-                latest_compressed_strategy_signals: Arc::clone(
-                    &latest_compressed_strategy_signals,
-                ),
+                latest_compressed_strategy_signals: Arc::clone(&latest_compressed_strategy_signals),
                 latest_daily_strategy: Arc::clone(&latest_daily_strategy),
                 scout_router: None,
             }))
@@ -287,10 +300,7 @@ async fn run_insights_market_event_server(
 /// Starts the service-owned RSocket request-response endpoint for durable
 /// Scout registration callbacks. `router` is the already configured local
 /// Insights router; handlers run in-process and no HTTP network call is used.
-pub async fn run_insights_scout_rpc_server(
-    router: Router,
-    address: String,
-) -> anyhow::Result<()> {
+pub async fn run_insights_scout_rpc_server(router: Router, address: String) -> anyhow::Result<()> {
     RSocketFactory::receive()
         .transport(WebsocketServerTransport::from(address.clone()))
         .acceptor(Box::new(move |_setup, _socket| {
@@ -315,13 +325,16 @@ pub async fn run_insights_scout_rpc_server(
 #[cfg(test)]
 mod market_event_rsocket_tests {
     use super::*;
-    use axum::{Json, Router, routing::{get, post}};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
     use bytes::Bytes;
+    use futures_util::StreamExt;
     use sbe_schema::{
         ReadBuf, enriched_symbol_price_codec::EnrichedSymbolPriceDecoder,
         message_header_codec::MessageHeaderDecoder,
     };
-    use futures_util::StreamExt;
 
     #[tokio::test]
     async fn strategy_stream_replays_the_latest_signal_to_new_subscribers() {
@@ -344,7 +357,10 @@ mod market_event_rsocket_tests {
             dated_carry_candidate: None,
             dated_carry_settlement: None,
         };
-        latest.insert("BTC-USDT".into(), Bytes::from(serde_json::to_vec(&update).unwrap()));
+        latest.insert(
+            "BTC-USDT".into(),
+            Bytes::from(serde_json::to_vec(&update).unwrap()),
+        );
         let responder = InsightsMarketEventResponder {
             events,
             strategy_signals,
@@ -439,14 +455,20 @@ mod market_event_rsocket_tests {
         for _ in 0..2 {
             let payload = stream.next().await.unwrap().unwrap();
             replayed.push(
-                serde_json::from_slice::<strategy::StrategyInsightUpdate>(
-                    payload.data().unwrap(),
-                )
-                .unwrap(),
+                serde_json::from_slice::<strategy::StrategyInsightUpdate>(payload.data().unwrap())
+                    .unwrap(),
             );
         }
-        assert!(replayed.iter().any(|update| update.daily_snapshot.is_some()));
-        assert!(replayed.iter().any(|update| update.dated_carry_scan.is_some()));
+        assert!(
+            replayed
+                .iter()
+                .any(|update| update.daily_snapshot.is_some())
+        );
+        assert!(
+            replayed
+                .iter()
+                .any(|update| update.dated_carry_scan.is_some())
+        );
         assert!(replayed.iter().all(|update| update.signal.is_none()));
     }
 
@@ -497,14 +519,11 @@ mod market_event_rsocket_tests {
             &latest_daily_strategy,
         );
 
-        let payload = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            stream.next(),
-        )
-        .await
-        .expect("daily snapshot should reach an already subscribed maintenance stream")
-        .expect("maintenance stream should remain open")
-        .expect("maintenance stream item should be valid");
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("daily snapshot should reach an already subscribed maintenance stream")
+            .expect("maintenance stream should remain open")
+            .expect("maintenance stream item should be valid");
         let received: strategy::StrategyInsightUpdate =
             serde_json::from_slice(payload.data().unwrap()).unwrap();
         assert_eq!(received.event_id, "daily:new-snapshot");
@@ -599,7 +618,8 @@ mod market_event_rsocket_tests {
                 request_id: "research-history-1".into(),
                 strategy: None,
                 method: strategy::ScoutWorkerHttpMethod::Get,
-                path: "/internal/research-features/history?symbol=BTC-USDT&fromMs=1&throughMs=2".into(),
+                path: "/internal/research-features/history?symbol=BTC-USDT&fromMs=1&throughMs=2"
+                    .into(),
                 payload: serde_json::Value::Null,
             },
         )
@@ -613,12 +633,49 @@ mod market_event_rsocket_tests {
                 request_id: "snapshot-history-1".into(),
                 strategy: None,
                 method: strategy::ScoutWorkerHttpMethod::Get,
-                path: "/internal/strategy-snapshot-history?symbol=BTC-USDT&fromMs=1&throughMs=2".into(),
+                path: "/internal/strategy-snapshot-history?symbol=BTC-USDT&fromMs=1&throughMs=2"
+                    .into(),
                 payload: serde_json::Value::Null,
             },
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot_response.status, 200);
-        assert_eq!(snapshot_response.body["records"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            snapshot_response.body["records"].as_array().unwrap().len(),
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn process_epoch_route_is_available_over_rsocket() {
+        let app = Router::new().route(
+            "/internal/process-epoch",
+            get(|| async { Json(serde_json::json!({"process_epoch": "insights-epoch-v2"})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = tokio::spawn(run_insights_scout_rpc_server(app, address.to_string()));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        for poll in 0..3 {
+            let response = strategy::request_scout_service_route(
+                &format!("ws://{address}"),
+                &strategy::ScoutCoordinatorRouteCommand {
+                    request_id: format!("insights-process-epoch-{poll}"),
+                    strategy: None,
+                    method: strategy::ScoutWorkerHttpMethod::Get,
+                    path: "/internal/process-epoch".into(),
+                    payload: serde_json::Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body["process_epoch"], "insights-epoch-v2");
+        }
         server.abort();
     }
 }

@@ -34,6 +34,8 @@ struct MatcherResponse {
     #[serde(default)]
     order_id: Option<String>,
     #[serde(default)]
+    parent_order_id: Option<String>,
+    #[serde(default)]
     request_fingerprint: Option<String>,
     #[serde(default)]
     recorded_at_utc_ms: Option<u64>,
@@ -69,14 +71,21 @@ struct PaperExchangeFillEvidence {
     complete: Option<bool>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct AccountTopup {
     amount: f64,
     timestamp: u64,
+    #[serde(default)]
+    contribution_id: Option<String>,
+    #[serde(default)]
+    financial_evidence_epoch: Option<String>,
+    #[serde(default)]
+    financial_evidence_cursor: Option<u64>,
 }
 #[derive(Deserialize)]
 struct TopupRequest {
     amount: f64,
+    contribution_id: String,
 }
 #[derive(Deserialize)]
 struct LeverageRequest {
@@ -157,6 +166,14 @@ struct Ledger {
     #[serde(default)]
     fill_id_sequence: u64,
     #[serde(default)]
+    portfolio_baseline_source_system: Option<String>,
+    #[serde(default)]
+    portfolio_baseline_source_record_id: Option<String>,
+    #[serde(default)]
+    portfolio_baseline_source_epoch: Option<String>,
+    #[serde(default)]
+    portfolio_baseline_source_cursor: Option<u64>,
+    #[serde(default)]
     dated_carry_positions: Vec<DatedCarryLedgerPosition>,
     #[serde(default = "default_account_cash")]
     initial_cash: f64,
@@ -178,20 +195,24 @@ struct Ledger {
 }
 
 fn allocate_fill_id(ledger: &mut Ledger, timestamp_ms: u64) -> String {
-    static EPOCH_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let epoch = ledger.fill_id_epoch.get_or_insert_with(|| {
-        let nonce = EPOCH_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        format!("{timestamp_ms}-{}-{nanos}-{nonce}", std::process::id())
-    });
+    let epoch = ledger
+        .fill_id_epoch
+        .get_or_insert_with(|| create_fill_id_epoch(timestamp_ms));
     ledger.fill_id_sequence = ledger
         .fill_id_sequence
         .checked_add(1)
         .expect("canonical fill ID sequence exhausted");
     format!("pm-fill:v1:{epoch}:{}", ledger.fill_id_sequence)
+}
+
+fn create_fill_id_epoch(timestamp_ms: u64) -> String {
+    static EPOCH_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = EPOCH_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("{timestamp_ms}-{}-{nanos}-{nonce}", std::process::id())
 }
 
 const NO_FILL_IDEMPOTENCY_CAPACITY: usize = 4_096;

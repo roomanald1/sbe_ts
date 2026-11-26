@@ -3,17 +3,140 @@ import copy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from financial import (
     compare_paper_exchange_match_evidence,
     reconcile_independent_execution_fills,
     reconcile_independent_portfolio_intervals,
     load_execution_reconciliation_inputs,
+    project_paper_exchange_financial_evidence_page,
+    reconstruct_portfolio_intervals_from_paper_exchange,
 )
-from financial_snapshot import valid_financial_snapshot_body
+from financial_snapshot import collect_paged_source, valid_financial_snapshot_body
 
 
 class FinancialSnapshotContractTests(unittest.TestCase):
+    def test_paged_trade_collector_persists_complete_source_bundle(self):
+        response = {"service": "positions", "route": "/positions/trades?limit=500&offset=0",
+                    "application_status": 200, "bytes": 2,
+                    "body": {"trades": [], "total": 0, "has_older": False,
+                             "next_offset": None}}
+        with patch("financial_snapshot.api", return_value=response), \
+                patch("financial_snapshot.save", side_effect=["/tmp/page.json", "/tmp/bundle.json"]), \
+                patch("financial_snapshot.now", return_value="2026-11-26T00:00:00+00:00"):
+            collected = collect_paged_source("positions", "trades", "offset")
+        self.assertEqual(collected["status"], "COLLECTED")
+        self.assertTrue(collected["collector_bundle"])
+        self.assertEqual(collected["body"]["total"], 0)
+        self.assertEqual(len(collected["page_evidence"]), 1)
+
+    def test_paper_exchange_event_projection_requires_complete_monotonic_source_pages(self):
+        events = []
+        payloads = [
+            {"event_type": "fee_schedule", "fee_schedule_id": "sim", "fee_schedule_version": "v1",
+             "symbol": "BTC-USDT", "maker_rate": 0.001, "taker_rate": 0.002,
+             "effective_from_utc_ms": 100, "effective_to_utc_ms": None},
+            {"event_type": "settled_execution", "execution_id": "exec-1", "order_id": "order-1",
+             "symbol": "BTC-USDT", "side": "buy", "quantity": 1.0, "price": 100.0,
+             "fee": -0.2, "fee_currency": "USDT", "fee_schedule_id": "sim",
+             "fee_schedule_version": "v1", "execution_origin": "market_match"},
+        ]
+        for cursor, payload in enumerate(payloads, start=1):
+            events.append({"source_cursor": cursor, "source_system": "paper_exchange_simulator",
+                           "source_epoch": "epoch-1", "source_record_id": f"record-{cursor}",
+                           "source_timestamp_utc_ms": 100 + cursor,
+                           "event": {"schema_version": "paper_exchange_financial_evidence:v1",
+                                     "event_id": f"event-{cursor}", "source_system": "paper_exchange_simulator",
+                                     "source_epoch": "epoch-1", "source_cursor": cursor,
+                                     "source_record_id": f"record-{cursor}",
+                                     "source_timestamp_utc_ms": 100 + cursor, **payload}})
+        page = {"schema_version": "paper_exchange_financial_evidence:v1",
+                "evidence_kind": "paper_exchange_source_attributed_account_evidence",
+                "source_epoch": "ledger-epoch-1", "cursor_kind": "financial_event",
+                "after_cursor": 0, "next_cursor": None, "max_cursor": 2, "page_size": 2,
+                "page_complete": True, "history_complete": True,
+                "source_attribution_status": "source_attributed_not_cryptographically_verified",
+                "opening_capital_status": "explicit_simulator_opening_capital_captured",
+                "fee_schedule_status": "versioned_simulator_fee_schedule_captured",
+                "uncovered_execution_flow_types": [], "events": events}
+        projected = project_paper_exchange_financial_evidence_page(page)
+        self.assertTrue(projected["complete"])
+        self.assertEqual(projected["fee_schedules"][0]["taker_rate"], 0.002)
+        self.assertEqual(projected["fills"][0]["execution_origin"], "market_match")
+        broken = copy.deepcopy(page)
+        broken["events"][1]["source_cursor"] = 3
+        self.assertIsNone(project_paper_exchange_financial_evidence_page(broken))
+
+    def test_paper_exchange_cash_reconstruction_uses_opening_events_fills_contributions_and_fx(self):
+        pm_intervals, _contract, coverage, trades, trade_coverage = self.synthetic_portfolio_interval_inputs()
+        trades[1]["paper_exchange_execution_id"] = "exchange-fill-2"
+        trades[2]["paper_exchange_execution_id"] = "exchange-fill-3"
+        pm_intervals[0]["external_contribution_events"][0].update({
+            "independent_source_epoch": "ledger-source-epoch",
+            "independent_source_cursor": 5,
+            "independent_source_record_id": "deposit-1",
+        })
+        source_events = []
+        def add(event_id, source_system, source_epoch, source_record_id, source_time,
+                source_cursor, payload):
+            event = {"schema_version": "paper_exchange_financial_evidence:v1",
+                     "event_id": event_id, "source_system": source_system,
+                     "source_epoch": source_epoch, "source_cursor": source_cursor,
+                     "source_record_id": source_record_id,
+                     "source_timestamp_utc_ms": source_time, **payload}
+            local_cursor = len(source_events) + 1
+            source_events.append({"source_cursor": local_cursor, "source_system": source_system,
+                                 "source_epoch": source_epoch, "source_record_id": source_record_id,
+                                 "source_timestamp_utc_ms": source_time, "event": event})
+
+        add("opening-1", "paper_exchange_simulator_account_configuration", "ledger-source-epoch",
+            "opening-record", 500, 1, {"event_type": "account_balance", "portfolio_id": "paper-default",
+            "boundary": "opening", "balances_by_currency": {"USD": 10_000.0, "USDT": 1_000.0}})
+        add("fees-1", "paper_exchange_simulator_configuration", "ledger-source-epoch",
+            "fee-schedule-record", 500, 2, {"event_type": "fee_schedule", "fee_schedule_id": "synthetic-fees-btc",
+            "fee_schedule_version": "fixture-v1", "symbol": "BTC-USDT", "effective_from_utc_ms": 500,
+            "effective_to_utc_ms": None, "maker_rate": 0.0001, "taker_rate": 0.0001})
+        add("exchange-fill-2", "paper_exchange_simulator", "ledger-source-epoch", "exchange-fill-2", 1_500, 2,
+            {"event_type": "settled_execution", "execution_id": "exchange-fill-2", "order_id": "order-buy",
+             "symbol": "BTC-USDT", "side": "buy", "quantity": 1.0, "price": 10_000.0,
+             "fee": -1.0, "fee_currency": "USDT", "fee_schedule_id": "synthetic-fees-btc",
+             "fee_schedule_version": "fixture-v1", "execution_origin": "market_match"})
+        add("exchange-fill-3", "paper_exchange_simulator", "ledger-source-epoch", "exchange-fill-3", 2_500, 3,
+            {"event_type": "settled_execution", "execution_id": "exchange-fill-3", "order_id": "order-sell",
+             "symbol": "BTC-USDT", "side": "sell", "quantity": 1.0, "price": 10_100.0,
+             "fee": -1.01, "fee_currency": "USDT", "fee_schedule_id": "synthetic-fees-btc",
+             "fee_schedule_version": "fixture-v1", "execution_origin": "market_match"})
+        add("deposit-event", "paper_operator", "paper-operator-contributions:v1", "deposit-1", 1_500, 1,
+            {"event_type": "cash_movement", "movement_id": "provider-deposit-1", "portfolio_id": "paper-default",
+             "movement_kind": "contribution", "currency": "USD", "amount": 100.0})
+        for boundary, timestamp in (("opening", 1_000), ("closing", 3_000)):
+            for currency in ("USD", "USDT"):
+                add(f"fx-{boundary}-{currency}", "fixed_financial_fixture", "fx-v1",
+                    f"fx-{boundary}-{currency}", timestamp, 1 if boundary == "opening" else 2,
+                    {"event_type": "fx_mark", "portfolio_id": "paper-default", "currency": currency,
+                     "rate_usd": 1.0})
+        page = {"schema_version": "paper_exchange_financial_evidence:v1",
+                "evidence_kind": "paper_exchange_source_attributed_account_evidence",
+                "source_epoch": "ledger-source-epoch", "cursor_kind": "financial_event",
+                "after_cursor": 0, "next_cursor": None, "max_cursor": len(source_events),
+                "page_size": len(source_events), "page_complete": True, "history_complete": True,
+                "source_attribution_status": "source_attributed_not_cryptographically_verified",
+                "opening_capital_status": "explicit_simulator_opening_capital_captured",
+                "fee_schedule_status": "versioned_simulator_fee_schedule_captured",
+                "uncovered_execution_flow_types": [], "events": source_events}
+        independent = reconstruct_portfolio_intervals_from_paper_exchange(page, pm_intervals, trades)
+        self.assertIsNotNone(independent)
+        wrong_portfolio = copy.deepcopy(page)
+        wrong_portfolio["events"][0]["event"]["portfolio_id"] = "other-paper-account"
+        self.assertIsNone(reconstruct_portfolio_intervals_from_paper_exchange(
+            wrong_portfolio, pm_intervals, trades
+        ))
+        result = reconcile_independent_portfolio_intervals(
+            pm_intervals, independent, coverage, trades, trade_coverage
+        )
+        self.assertEqual(result["status"], "RECONCILED", result)
+
     def body(self):
         return {
             "snapshot_id": "pm-paper-v1:123:456:1",
@@ -45,6 +168,42 @@ class FinancialSnapshotContractTests(unittest.TestCase):
             "returned_records": len(rows),
             **overrides,
         }
+
+    def attach_fee_schedule_evidence(self, ledger):
+        """Attach explicitly synthetic fee schedule provenance to a test fixture."""
+        schedules = {}
+        inferred_rates = {}
+        for row in ledger["fills"]:
+            notional = float(row.get("quantity", 0)) * float(row.get("price", 0))
+            if notional > 0:
+                inferred_rates.setdefault(row["symbol"], abs(float(row.get("fee", 0))) / notional)
+        for index, row in enumerate(ledger["fills"], start=1):
+            symbol = row["symbol"]
+            schedule_id = f"fixture-fees-{symbol}"
+            schedule_version = "fixture-v1"
+            row.update({
+                "fee_schedule_id": schedule_id,
+                "fee_schedule_version": schedule_version,
+                "timestamp_utc_ms": 1_500 + index,
+                "source_system": "synthetic_test_fixture_only",
+                "source_epoch": "fixture-execution-epoch",
+                "source_cursor": index,
+                "source_record_id": f"fixture-execution-{index}",
+                "execution_origin": "market_match",
+            })
+            schedules[(schedule_id, schedule_version, symbol)] = {
+                "fee_schedule_id": schedule_id,
+                "fee_schedule_version": schedule_version,
+                "symbol": symbol,
+                "source_system": "synthetic_test_fixture_only",
+                "source_record_id": f"fixture-schedule-{symbol}",
+                "effective_from_utc_ms": 1_000,
+                "effective_to_utc_ms": 10_000,
+                "maker_rate": inferred_rates[symbol],
+                "taker_rate": inferred_rates[symbol],
+            }
+        ledger["fee_schedules"] = list(schedules.values())
+        return ledger
 
     def match_evidence_inputs(self):
         pm_trades = [{
@@ -180,6 +339,9 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                 "currency": "USD",
                 "amount": 100.0,
                 "value_usd": 100.0,
+                "independent_source_record_id": "provider-deposit-record-1",
+                "independent_source_epoch": "paper-exchange-fixture-epoch",
+                "independent_source_cursor": 91,
             }],
             "flat_cash_period_net_pnl_usd": 97.99,
             "flat_cash_period_return_pct": 97.99 / 11_000.0 * 100.0,
@@ -195,30 +357,81 @@ class FinancialSnapshotContractTests(unittest.TestCase):
             )},
             "opening_cash_balances_by_currency": {"USD": 10_000.0, "USDT": 1_000.0},
             "closing_cash_balances_by_currency": {"USD": 10_100.0, "USDT": 1_097.99},
+            "opening_balance_evidence": {
+                "schema_version": 1, "source_system": "synthetic_test_fixture_only",
+                "source_record_id": "account-snapshot-opening", "source_epoch": "account-fixture-epoch",
+                "source_cursor": 1, "source_timestamp_utc_ms": 1_000,
+                "balances_by_currency": {"USD": 10_000.0, "USDT": 1_000.0},
+            },
+            "closing_balance_evidence": {
+                "schema_version": 1, "source_system": "synthetic_test_fixture_only",
+                "source_record_id": "account-snapshot-closing", "source_epoch": "account-fixture-epoch",
+                "source_cursor": 8, "source_timestamp_utc_ms": 3_000,
+                "balances_by_currency": {"USD": 10_100.0, "USDT": 1_097.99},
+            },
             "opening_cash_value_usd_by_currency": {"USD": 10_000.0, "USDT": 1_000.0},
             "closing_cash_value_usd_by_currency": {"USD": 10_100.0, "USDT": 1_097.99},
             "opening_cash_total_usd": 11_000.0,
             "closing_cash_total_usd": 11_197.99,
             "cash_movements_by_currency": {"USD": 100.0, "USDT": 97.99},
             "external_contributions_by_currency": {"USD": 100.0},
-            "external_contribution_events": copy.deepcopy(pm_interval["external_contribution_events"]),
+            "external_contribution_events": [{
+                "contribution_id": "provider-deposit-1",
+                "pm_contribution_id": "pm-topup:v1:0",
+                "source": "synthetic_test_fixture_only",
+                "source_record_id": "provider-deposit-record-1",
+                "provider_source_epoch": "paper-exchange-fixture-epoch",
+                "provider_source_cursor": 91,
+                "source_cursor": 0,
+                "timestamp_utc_ms": 1_500,
+                "currency": "USD",
+                "amount": 100.0,
+                "value_usd": 100.0,
+            }],
             "known_fee_fills": 2,
             "unknown_fee_fills": 0,
+            "fee_schedules": [{
+                "fee_schedule_id": "synthetic-fees-btc",
+                "fee_schedule_version": "fixture-v1",
+                "symbol": "BTC-USDT",
+                "source_system": "synthetic_test_fixture_only",
+                "source_record_id": "synthetic-fee-schedule-only",
+                "effective_from_utc_ms": 1_000,
+                "effective_to_utc_ms": 3_000,
+                "maker_rate": 0.0001,
+                "taker_rate": 0.0001,
+            }],
             "fills": [
                 {"execution_id": "exchange-fill-2", "fill_cursor": 2,
                  "order_id": "order-buy", "symbol": "BTC-USDT", "side": "buy",
                  "quantity": 1.0, "price": 10_000.0, "fee": -1.0,
-                 "fee_known": True, "fee_currency": "USDT"},
+                 "fee_known": True, "fee_currency": "USDT",
+                 "fee_schedule_id": "synthetic-fees-btc",
+                 "fee_schedule_version": "fixture-v1", "timestamp_utc_ms": 1_500,
+                 "source_system": "synthetic_test_fixture_only", "source_epoch": "exchange-fixture-epoch",
+                 "source_cursor": 2, "source_record_id": "exchange-fill-record-2", "execution_origin": "market_match"},
                 {"execution_id": "exchange-fill-3", "fill_cursor": 3,
                  "order_id": "order-sell", "symbol": "BTC-USDT", "side": "sell",
                  "quantity": 1.0, "price": 10_100.0, "fee": -1.01,
-                 "fee_known": True, "fee_currency": "USDT"},
+                 "fee_known": True, "fee_currency": "USDT",
+                 "fee_schedule_id": "synthetic-fees-btc",
+                 "fee_schedule_version": "fixture-v1", "timestamp_utc_ms": 2_500,
+                 "source_system": "synthetic_test_fixture_only", "source_epoch": "exchange-fixture-epoch",
+                 "source_cursor": 3, "source_record_id": "exchange-fill-record-3", "execution_origin": "market_match"},
             ],
             "fx_marks": [
-                {"boundary": "opening", "currency": "USD", "rate_usd": 1.0, "updated_at_utc_ms": 1_000},
-                {"boundary": "opening", "currency": "USDT", "rate_usd": 1.0, "updated_at_utc_ms": 1_000},
-                {"boundary": "closing", "currency": "USD", "rate_usd": 1.0, "updated_at_utc_ms": 3_000},
-                {"boundary": "closing", "currency": "USDT", "rate_usd": 1.0, "updated_at_utc_ms": 3_000},
+                {"boundary": "opening", "currency": "USD", "rate_usd": 1.0, "updated_at_utc_ms": 1_000,
+                 "schema_version": 1, "source_system": "synthetic_test_fixture_only", "source_record_id": "fx-open-usd",
+                 "source_epoch": "fx-fixture-epoch", "source_cursor": 1},
+                {"boundary": "opening", "currency": "USDT", "rate_usd": 1.0, "updated_at_utc_ms": 1_000,
+                 "schema_version": 1, "source_system": "synthetic_test_fixture_only", "source_record_id": "fx-open-usdt",
+                 "source_epoch": "fx-fixture-epoch", "source_cursor": 2},
+                {"boundary": "closing", "currency": "USD", "rate_usd": 1.0, "updated_at_utc_ms": 3_000,
+                 "schema_version": 1, "source_system": "synthetic_test_fixture_only", "source_record_id": "fx-close-usd",
+                 "source_epoch": "fx-fixture-epoch", "source_cursor": 3},
+                {"boundary": "closing", "currency": "USDT", "rate_usd": 1.0, "updated_at_utc_ms": 3_000,
+                 "schema_version": 1, "source_system": "synthetic_test_fixture_only", "source_record_id": "fx-close-usdt",
+                 "source_epoch": "fx-fixture-epoch", "source_cursor": 4},
             ],
         }
         independent_contract = {
@@ -406,6 +619,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                  "fee": -0.0606, "fee_known": True, "fee_currency": "USDT"},
             ],
         }
+        self.attach_fee_schedule_evidence(independent)
         result = reconcile_independent_execution_fills(
             pm_trades, independent, self.pm_source_coverage(pm_trades)
         )
@@ -439,6 +653,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                  "fee": -0.05, "fee_known": True, "fee_currency": "USDT"},
             ],
         }
+        self.attach_fee_schedule_evidence(independent)
         result = reconcile_independent_execution_fills(
             pm_trades, independent, self.pm_source_coverage(pm_trades)
         )
@@ -474,16 +689,36 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                  "fee_currency": "USD"},
             ],
         }
+        self.attach_fee_schedule_evidence(independent)
 
         result = reconcile_independent_execution_fills(
             pm_trades, independent, self.pm_source_coverage(pm_trades)
         )
 
         self.assertFalse(result["independent_execution_ledger_reconciled"])
-        self.assertEqual(result["mismatch_count"], 2)
-        by_order = {row["order_id"]: row["reasons"] for row in result["mismatches"]}
-        self.assertIn("fee_amount_mismatch", by_order["order-amount"])
-        self.assertIn("fee_currency_mismatch", by_order["order-currency"])
+        self.assertFalse(result["independent_execution_ledger_reconciled"])
+        self.assertTrue(any("quote currency" in blocker for blocker in result["blockers"]))
+
+    def test_fee_schedule_arithmetic_mismatch_fails_closed(self):
+        trade = {"fill_id": "pm-fill-1", "parent_order_id": "order-1",
+                 "symbol": "BTC-USDT", "side": "buy", "quantity": 1.0,
+                 "execution_price": 100.0, "fee": -0.09, "fee_known": True,
+                 "fee_currency": "USDT"}
+        ledger = {"schema_version": 1, "source_system": "paper_exchange",
+                  "execution_mode": "paper", "independent_source": True,
+                  "complete": True, "snapshot_id": "fee-arithmetic",
+                  "fills": [{"execution_id": "ex-1", "order_id": "order-1",
+                             "symbol": "BTC-USDT", "side": "buy", "quantity": 1.0,
+                             "price": 100.0, "fee": -0.09, "fee_known": True,
+                             "fee_currency": "USDT"}]}
+        self.attach_fee_schedule_evidence(ledger)
+        ledger["fee_schedules"][0]["taker_rate"] = 0.001
+        ledger["fills"][0]["fee"] = -0.09
+        result = reconcile_independent_execution_fills(
+            [trade], ledger, self.pm_source_coverage([trade])
+        )
+        self.assertFalse(result["independent_execution_ledger_reconciled"])
+        self.assertIn("signed fee differs", result["blockers"][0])
 
     def test_missing_fee_and_incomplete_source_metadata_fail_closed(self):
         pm_trade = {
@@ -502,6 +737,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                 "price": 100.0,
             }],
         }
+        self.attach_fee_schedule_evidence(independent)
         coverage = self.pm_source_coverage([pm_trade])
         result = reconcile_independent_execution_fills([pm_trade], independent, coverage)
         self.assertFalse(result["independent_execution_ledger_reconciled"])
@@ -542,6 +778,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
             "snapshot_id": "paper-exchange-v1:fixture-3",
             "fills": [external_fill, dict(external_fill)],
         }
+        self.attach_fee_schedule_evidence(independent)
         result = reconcile_independent_execution_fills(
             [position_trade], independent, self.pm_source_coverage([position_trade])
         )
@@ -595,7 +832,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
 
         mismatched_contribution = copy.deepcopy(independent)
         mismatched_contribution["intervals"][0]["external_contribution_events"][0][
-            "contribution_id"
+            "pm_contribution_id"
         ] = "unidentified-topup"
         contribution_mismatch = reconcile_independent_portfolio_intervals(
             pm_intervals,
@@ -628,6 +865,53 @@ class FinancialSnapshotContractTests(unittest.TestCase):
         )
         self.assertFalse(page_result["independent_portfolio_interval_reconciled"])
         self.assertIsNone(page_result["reconciled_flat_cash_period_return_percent"])
+
+    def test_portfolio_interval_rejects_pm_copied_or_unlinked_account_evidence(self):
+        """Independent source IDs are required; PM rows cannot be relabeled as independent."""
+        inputs = self.synthetic_portfolio_interval_inputs()
+        pm_intervals, independent, coverage, trades, trade_coverage = inputs
+
+        copied_balance = copy.deepcopy(independent)
+        copied_balance["intervals"][0]["opening_balance_evidence"]["source_system"] = (
+            "position_management"
+        )
+        blocked_balance = reconcile_independent_portfolio_intervals(
+            pm_intervals, copied_balance, coverage, trades, trade_coverage
+        )
+        self.assertFalse(blocked_balance["independent_portfolio_interval_reconciled"])
+        self.assertIsNone(blocked_balance["reconciled_flat_cash_period_return_percent"])
+        self.assertIn("copied from the Position Management", blocked_balance["blockers"][0])
+
+        missing_contribution_source = copy.deepcopy(independent)
+        del missing_contribution_source["intervals"][0]["external_contribution_events"][0][
+            "source_record_id"
+        ]
+        blocked_contribution = reconcile_independent_portfolio_intervals(
+            pm_intervals, missing_contribution_source, coverage, trades, trade_coverage
+        )
+        self.assertFalse(blocked_contribution["independent_portfolio_interval_reconciled"])
+        self.assertIsNone(blocked_contribution["reconciled_flat_cash_period_return_percent"])
+
+    def test_portfolio_interval_rejects_unavailable_or_mismatched_versioned_fee_schedule(self):
+        inputs = self.synthetic_portfolio_interval_inputs()
+        pm_intervals, independent, coverage, trades, trade_coverage = inputs
+
+        missing = copy.deepcopy(independent)
+        missing["intervals"][0]["fee_schedules"] = []
+        blocked = reconcile_independent_portfolio_intervals(
+            pm_intervals, missing, coverage, trades, trade_coverage
+        )
+        self.assertFalse(blocked["independent_portfolio_interval_reconciled"])
+        self.assertIsNone(blocked["reconciled_flat_cash_period_return_percent"])
+        self.assertTrue(any("fee schedule" in reason.lower() for reason in blocked["blockers"]))
+
+        mismatch = copy.deepcopy(independent)
+        mismatch["intervals"][0]["fills"][0]["fee_schedule_version"] = "foreign-version"
+        rejected = reconcile_independent_portfolio_intervals(
+            pm_intervals, mismatch, coverage, trades, trade_coverage
+        )
+        self.assertFalse(rejected["independent_portfolio_interval_reconciled"])
+        self.assertIsNone(rejected["reconciled_flat_cash_period_return_percent"])
 
     def test_one_interval_mismatch_withholds_returns_for_the_entire_series(self):
         """Synthetic test-only second interval proves no partial return series leaks."""
@@ -717,7 +1001,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                 ),
                 (
                     "positions",
-                    "/positions/portfolio-evidence-intervals",
+                    "/positions/portfolio-evidence/intervals",
                     "positions-portfolio-evidence-intervals-fixture.json",
                     {"schema_version": 1, "coverage": "pm_internal_complete",
                      "truncated": False, "next_cursor": 0, "intervals": []},
@@ -761,7 +1045,7 @@ class FinancialSnapshotContractTests(unittest.TestCase):
                     "service": service,
                     "endpoint": (
                         "portfolio-evidence-intervals"
-                        if route == "/positions/portfolio-evidence-intervals"
+                        if route == "/positions/portfolio-evidence/intervals"
                         else "match-evidence-ledger"
                         if route == "/internal/orders/match/ledger"
                         else "execution-ledger"

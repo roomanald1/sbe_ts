@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let gateway = Router::new().fallback(any(proxy)).with_state(gateway_state);
     let market_routes = paper_exchange::market_data::router(Arc::clone(&market));
-    let order_routes = paper_exchange::orders_api::router(Arc::clone(&market));
+    let order_routes = paper_exchange::orders_api::router(Arc::clone(&market))?;
     let application_router = Router::new()
         .merge(gateway)
         .merge(paper_exchange::vwap_api::router())
@@ -188,6 +188,7 @@ impl RSocket for PaperExchangeRSocketResponder {
                 "/positions/twap",
                 "/positions/barriers",
                 "/positions/close-profitable",
+                "/internal/financial/evidence",
                 "/internal/orders/match",
                 "/internal/market-book",
                 "/internal/market-mark",
@@ -355,5 +356,28 @@ mod tests {
         let response: serde_json::Value = serde_json::from_slice(response.data().unwrap()).unwrap();
         assert_eq!(response["status"], 200);
         assert_eq!(response["body"]["orders"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn paper_exchange_rsocket_allows_read_only_financial_evidence_route() {
+        let router = Router::new().route(
+            "/internal/financial/evidence",
+            get(|| async { axum::Json(serde_json::json!({"events": []})) }),
+        );
+        let responder = PaperExchangeRSocketResponder { router };
+        let request = Payload::builder()
+            .set_data(
+                serde_json::to_vec(&PositionManagementRequest {
+                    method: "GET".into(),
+                    path: "/internal/financial/evidence?after_cursor=0&limit=100".into(),
+                    body: None,
+                })
+                .unwrap(),
+            )
+            .build();
+        let response = responder.request_response(request).await.unwrap().unwrap();
+        let response: serde_json::Value = serde_json::from_slice(response.data().unwrap()).unwrap();
+        assert_eq!(response["status"], 200);
+        assert_eq!(response["body"]["events"], serde_json::json!([]));
     }
 }

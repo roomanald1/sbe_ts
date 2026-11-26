@@ -1,3 +1,80 @@
+const MAX_SCOUT_PATH_SAMPLES_PER_WRITE: usize = 32_768;
+
+fn valid_scout_path_sample(sample: &ScoutPathSample) -> bool {
+    let sqlite_safe = |value: u64| value <= i64::MAX as u64;
+    !sample.decision_id.trim().is_empty()
+        && sample.decision_id.len() <= 240
+        && !sample.symbol.trim().is_empty()
+        && sample.symbol.len() <= 32
+        && sample.path_epoch > 0
+        && sqlite_safe(sample.path_epoch)
+        && sample.sequence > 0
+        && sqlite_safe(sample.sequence)
+        && sample.timestamp > 0
+        && sqlite_safe(sample.timestamp)
+        && sample.freshness_ms <= i64::MAX as u64
+        && sample.gap_ms <= i64::MAX as u64
+        && sample.first_source_timestamp.is_none_or(sqlite_safe)
+        && sample
+            .first_source_timestamp
+            .is_none_or(|first| first <= sample.timestamp)
+        && sample.maximum_gap_ms >= sample.gap_ms
+        && sample.maximum_gap_ms <= i64::MAX as u64
+        && sample.sample_count >= sample.sequence
+        && sample.sample_count <= i64::MAX as u64
+        && sample.bid.is_finite()
+        && sample.ask.is_finite()
+        && sample.bid > 0.0
+        && sample.ask >= sample.bid
+        && sample
+            .maximum_favorable_excursion_percent
+            .is_none_or(f64::is_finite)
+        && sample
+            .maximum_adverse_excursion_percent
+            .is_none_or(f64::is_finite)
+}
+
+fn recovered_scout_path_is_complete(
+    decision_id: &str,
+    symbol: &str,
+    registered_sample_count: u64,
+    truncated: bool,
+    capture_complete: bool,
+    samples: &[ScoutPathSample],
+) -> bool {
+    if !capture_complete
+        || samples.iter().any(|sample| {
+            !valid_scout_path_sample(sample)
+                || sample.decision_id != decision_id
+                || sample.symbol != symbol
+                || !sample.capture_complete
+        })
+    {
+        return false;
+    }
+    let Some(first) = samples.first() else {
+        return registered_sample_count == 0 || truncated;
+    };
+    if !truncated && (first.sequence != 1 || first.sample_count != 1) {
+        return false;
+    }
+    for pair in samples.windows(2) {
+        let (previous, current) = (&pair[0], &pair[1]);
+        if current.path_epoch < previous.path_epoch
+            || current.sequence != previous.sequence.saturating_add(1)
+            || current.sample_count != previous.sample_count.saturating_add(1)
+            || current.timestamp < previous.timestamp
+            || current.gap_ms != current.timestamp.saturating_sub(previous.timestamp)
+        {
+            return false;
+        }
+    }
+    samples.last().is_some_and(|last| {
+        last.sample_count == registered_sample_count
+            && (truncated || samples.len() as u64 == registered_sample_count)
+    })
+}
+
 impl SignalStore {
     pub async fn register_scout_path(
         &self,
@@ -15,6 +92,27 @@ impl SignalStore {
         u64,
         Option<(f64, f64, u64)>,
     )> {
+        if decision_id.trim().is_empty()
+            || decision_id.len() > 240
+            || symbol.trim().is_empty()
+            || symbol.len() > 32
+            || !matches!(direction.as_str(), "bullish" | "bearish")
+            || signal_timestamp == 0
+            || signal_timestamp > i64::MAX as u64
+            || !entry_price.is_finite()
+            || entry_price <= 0.0
+            || entry_quote.is_some_and(|(bid, ask, timestamp)| {
+                !bid.is_finite()
+                    || !ask.is_finite()
+                    || bid <= 0.0
+                    || ask < bid
+                    || timestamp == 0
+                    || timestamp > signal_timestamp
+                    || timestamp > i64::MAX as u64
+            })
+        {
+            anyhow::bail!("invalid Scout path registration identity or entry quote");
+        }
         self.send_write(WriteOperation::ScoutRegistration {
             decision_id: decision_id.clone(),
             symbol,
@@ -26,18 +124,44 @@ impl SignalStore {
             entry_quote_timestamp: entry_quote.map(|quote| quote.2),
         })
         .await?;
-        self.load_scout_path(&decision_id).await
+        let restored = self.load_scout_path(&decision_id).await?;
+        if !restored.2 {
+            self.mark_scout_path_capture_failed(vec![decision_id])
+                .await?;
+        }
+        Ok(restored)
     }
 
     pub async fn persist_scout_path_samples(&self, samples: Vec<ScoutPathSample>) -> Result<()> {
         if samples.is_empty() {
             return Ok(());
         }
+        if samples.len() > MAX_SCOUT_PATH_SAMPLES_PER_WRITE
+            || samples
+                .iter()
+                .any(|sample| !valid_scout_path_sample(sample))
+        {
+            let decision_ids = samples
+                .iter()
+                .filter(|sample| {
+                    !sample.decision_id.trim().is_empty() && sample.decision_id.len() <= 240
+                })
+                .map(|sample| sample.decision_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .take(MAX_SCOUT_PATH_SAMPLES_PER_WRITE)
+                .collect::<Vec<_>>();
+            self.mark_scout_path_capture_failed(decision_ids).await?;
+            anyhow::bail!("invalid or oversized Scout path sample batch");
+        }
         self.send_write(WriteOperation::ScoutPathSamples(samples))
             .await
     }
 
     pub async fn complete_scout_path(&self, decision_id: String) -> Result<()> {
+        if decision_id.trim().is_empty() || decision_id.len() > 240 {
+            anyhow::bail!("invalid Scout path completion identity");
+        }
         self.send_write(WriteOperation::ScoutPathComplete(decision_id))
             .await
     }
@@ -45,6 +169,13 @@ impl SignalStore {
     pub async fn mark_scout_path_capture_failed(&self, decision_ids: Vec<String>) -> Result<()> {
         if decision_ids.is_empty() {
             return Ok(());
+        }
+        if decision_ids.len() > MAX_SCOUT_PATH_SAMPLES_PER_WRITE
+            || decision_ids
+                .iter()
+                .any(|id| id.trim().is_empty() || id.len() > 240)
+        {
+            anyhow::bail!("invalid or oversized Scout path failure marker batch");
         }
         self.send_write(WriteOperation::ScoutPathFailure(decision_ids))
             .await
@@ -65,8 +196,8 @@ impl SignalStore {
         let decision_id = decision_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let connection = Self::open_database_path(&path)?;
-            let (capture_complete, truncated, sample_count, entry_bid, entry_ask, quote_timestamp): (i64, i64, i64, Option<f64>, Option<f64>, Option<i64>) = connection.query_row(
-                "SELECT capture_complete, truncated, sample_count, entry_bid, entry_ask, entry_quote_timestamp FROM scout_path_registrations WHERE decision_id=?1",
+            let (symbol, signal_timestamp, capture_complete, truncated, sample_count, entry_bid, entry_ask, quote_timestamp): (String, i64, i64, i64, i64, Option<f64>, Option<f64>, Option<i64>) = connection.query_row(
+                "SELECT symbol, signal_timestamp, capture_complete, truncated, sample_count, entry_bid, entry_ask, entry_quote_timestamp FROM scout_path_registrations WHERE decision_id=?1",
                 [&decision_id],
                 |row| {
                     Ok((
@@ -76,6 +207,8 @@ impl SignalStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
                     ))
                 },
             )?;
@@ -99,13 +232,44 @@ impl SignalStore {
                     maximum_favorable_excursion_percent: row.get(11)?,
                     maximum_adverse_excursion_percent: row.get(12)?,
                     sample_count: row.get::<_, i64>(13)? as u64,
-                    capture_complete: row.get(14)?,
+                    capture_complete: row.get::<_, i64>(14)? == 1,
                 })
             })?;
             let samples = rows.collect::<rusqlite::Result<Vec<_>>>()?;
             let freshness = samples.last().map(|sample| sample.freshness_ms);
             let entry_quote = entry_bid.zip(entry_ask).zip(quote_timestamp.map(|time| time as u64)).map(|((bid, ask), time)| (bid, ask, time));
-            Ok((samples, truncated != 0, capture_complete != 0, freshness, sample_count as u64, entry_quote))
+            let truncated = truncated != 0;
+            let entry_quote_valid = match (entry_bid, entry_ask, quote_timestamp) {
+                (None, None, None) => true,
+                (Some(bid), Some(ask), Some(timestamp)) => {
+                    bid.is_finite()
+                        && ask.is_finite()
+                        && bid > 0.0
+                        && ask >= bid
+                        && timestamp > 0
+                        && timestamp <= signal_timestamp
+                }
+                _ => false,
+            };
+            let capture_complete = sample_count >= 0
+                && signal_timestamp > 0
+                && entry_quote_valid
+                && recovered_scout_path_is_complete(
+                    &decision_id,
+                    &symbol,
+                    sample_count.max(0) as u64,
+                    truncated,
+                capture_complete == 1,
+                    &samples,
+                );
+            Ok((
+                samples,
+                truncated,
+                capture_complete,
+                freshness,
+                sample_count.max(0) as u64,
+                entry_quote,
+            ))
         })
         .await
         .map_err(|error| anyhow::anyhow!("Scout path read task failed: {error}"))?
@@ -237,7 +401,7 @@ mod scout_path_persistence_tests {
             .as_nanos();
         let path_timestamp = (unique / 1_000_000) as u64;
         let path = std::env::temp_dir().join(format!("insights-scout-path-{unique}.sqlite"));
-        let store = test_store(path);
+        let store = test_store(path.clone());
         let entry_quote = Some((99.9, 100.1, path_timestamp));
         store
             .register_scout_path(
@@ -278,7 +442,11 @@ mod scout_path_persistence_tests {
             .persist_scout_path_samples(vec![samples[4_099].clone()])
             .await
             .unwrap();
-        let (restored, truncated, complete, freshness, sample_count, restored_entry_quote) = store
+        drop(store);
+        tokio::task::yield_now().await;
+        let restarted_store = test_store(path.clone());
+        let (restored, truncated, complete, freshness, sample_count, restored_entry_quote) =
+            restarted_store
             .register_scout_path(
                 "scout-1".into(),
                 "BTC-USDT".into(),
@@ -298,11 +466,11 @@ mod scout_path_persistence_tests {
         assert_eq!(restored.first().unwrap().sequence, 5);
         assert_eq!(restored.last().unwrap().sequence, 4_100);
         assert!(restored.iter().all(|sample| sample.symbol == "BTC-USDT"));
-        store
+        restarted_store
             .mark_scout_path_capture_failed(vec!["scout-1".into()])
             .await
             .unwrap();
-        let (_, _, complete_after_failure, _, _, _) = store
+        let (_, _, complete_after_failure, _, _, _) = restarted_store
             .register_scout_path(
                 "scout-1".into(),
                 "BTC-USDT".into(),
@@ -314,5 +482,198 @@ mod scout_path_persistence_tests {
             .await
             .unwrap();
         assert!(!complete_after_failure);
+    }
+
+    #[tokio::test]
+    async fn malformed_registered_symbol_marks_partial_path_incomplete_without_storing_sample() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let timestamp = (unique / 1_000_000) as u64;
+        let path =
+            std::env::temp_dir().join(format!("insights-scout-path-identity-{unique}.sqlite"));
+        let store = test_store(path);
+        let entry_quote = Some((99.9, 100.1, timestamp));
+        store
+            .register_scout_path(
+                "identity-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                entry_quote,
+            )
+            .await
+            .unwrap();
+        let malformed = ScoutPathSample {
+            decision_id: "identity-check".into(),
+            symbol: "ETH-USDT".into(),
+            path_epoch: 1,
+            sequence: 1,
+            timestamp: timestamp + 1,
+            bid: 99.9,
+            ask: 100.1,
+            freshness_ms: 1,
+            gap_ms: 0,
+            first_source_timestamp: Some(timestamp + 1),
+            maximum_gap_ms: 0,
+            source_timestamps_monotonic: true,
+            maximum_favorable_excursion_percent: Some(0.0),
+            maximum_adverse_excursion_percent: Some(0.0),
+            sample_count: 1,
+            capture_complete: true,
+        };
+
+        assert!(
+            store
+                .persist_scout_path_samples(vec![malformed])
+                .await
+                .is_err()
+        );
+        let (samples, _, capture_complete, _, _, _) = store
+            .register_scout_path(
+                "identity-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(samples.is_empty());
+        assert!(!capture_complete);
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_sequence_fails_closed() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let timestamp = (unique / 1_000_000) as u64;
+        let store = test_store(
+            std::env::temp_dir().join(format!("insights-scout-path-conflict-{unique}.sqlite")),
+        );
+        store
+            .register_scout_path(
+                "duplicate-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                Some((99.9, 100.1, timestamp)),
+            )
+            .await
+            .unwrap();
+        let sample = ScoutPathSample {
+            decision_id: "duplicate-check".into(),
+            symbol: "BTC-USDT".into(),
+            path_epoch: 42,
+            sequence: 1,
+            timestamp: timestamp + 1,
+            bid: 99.9,
+            ask: 100.1,
+            freshness_ms: 1,
+            gap_ms: 0,
+            first_source_timestamp: Some(timestamp + 1),
+            maximum_gap_ms: 0,
+            source_timestamps_monotonic: true,
+            maximum_favorable_excursion_percent: Some(0.0),
+            maximum_adverse_excursion_percent: Some(0.0),
+            sample_count: 1,
+            capture_complete: true,
+        };
+        store
+            .persist_scout_path_samples(vec![sample.clone()])
+            .await
+            .unwrap();
+        let mut conflicting = sample;
+        conflicting.bid = 99.8;
+        assert!(
+            store
+                .persist_scout_path_samples(vec![conflicting])
+                .await
+                .is_err()
+        );
+        let (_, _, capture_complete, _, _, _) = store
+            .register_scout_path(
+                "duplicate-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!capture_complete);
+    }
+
+    #[tokio::test]
+    async fn malformed_durable_epoch_is_not_restored_as_a_complete_path() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let timestamp = (unique / 1_000_000) as u64;
+        let path =
+            std::env::temp_dir().join(format!("insights-scout-path-corrupt-{unique}.sqlite"));
+        let store = test_store(path.clone());
+        store
+            .register_scout_path(
+                "corrupt-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                Some((99.9, 100.1, timestamp)),
+            )
+            .await
+            .unwrap();
+        let sample = ScoutPathSample {
+            decision_id: "corrupt-check".into(),
+            symbol: "BTC-USDT".into(),
+            path_epoch: 11,
+            sequence: 1,
+            timestamp: timestamp + 1,
+            bid: 99.9,
+            ask: 100.1,
+            freshness_ms: 1,
+            gap_ms: 0,
+            first_source_timestamp: Some(timestamp + 1),
+            maximum_gap_ms: 0,
+            source_timestamps_monotonic: true,
+            maximum_favorable_excursion_percent: Some(0.0),
+            maximum_adverse_excursion_percent: Some(0.0),
+            sample_count: 1,
+            capture_complete: true,
+        };
+        store
+            .persist_scout_path_samples(vec![sample])
+            .await
+            .unwrap();
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE scout_path_samples SET path_epoch=0 WHERE decision_id='corrupt-check'",
+                [],
+            )
+            .unwrap();
+
+        let (samples, _, capture_complete, _, _, _) = store
+            .register_scout_path(
+                "corrupt-check".into(),
+                "BTC-USDT".into(),
+                timestamp,
+                "bullish".into(),
+                100.0,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!(!capture_complete);
     }
 }

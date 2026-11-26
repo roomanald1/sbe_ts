@@ -62,18 +62,20 @@ services:
   position-management:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: position_management, BIN: position_management, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${POSITION_MANAGEMENT_MEMORY_LIMIT:-8G}" } } }
-    environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, PAPER_EXCHANGE_RSOCKET_URL: ws://paper-exchange:10006, POSITION_MANAGEMENT_RSOCKET_PORT: 10005, POSITIONS_FILE: /data/positions.json }
+    environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, PAPER_EXCHANGE_RSOCKET_URL: ws://paper-exchange:10006, POSITION_MANAGEMENT_RSOCKET_PORT: 10005, POSITIONS_FILE: /data/positions.json, PAPER_ACCOUNT_INITIAL_CASH: "10000", PAPER_OKX_SPOT_MAKER_FEE_RATE: "0.0008", PAPER_OKX_SPOT_TAKER_FEE_RATE: "0.001" }
     volumes: ["../logs:/var/log/app", "position-management-data:/data"]
     ports: ["11002:3002", "10105:10005"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3002"], interval: 15s, timeout: 3s, retries: 5 }
     depends_on:
       paper-exchange: { condition: service_healthy }
+  # Simulator-only capital and fee policy. These rates are not actual OKX
+  # account fees or a claim about any live exchange fee schedule.
   paper-exchange:
     build: { context: .., dockerfile: system/Dockerfile.rust, args: { CRATE: paper_exchange, BIN: paper_exchange, SOURCE_REVISION: "${SOURCE_REVISION:-unknown}", SOURCE_DIRTY: "${SOURCE_DIRTY:-unknown}", SOURCE_BUILT_AT: "${SOURCE_BUILT_AT:-unknown}" } }
     deploy: { resources: { limits: { memory: "${PAPER_EXCHANGE_MEMORY_LIMIT:-256M}" } } }
-    environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, PAPER_EXCHANGE_RSOCKET_PORT: 10006 }
-    volumes: ["../logs:/var/log/app"]
+    environment: { SERVICE_LOG_DIR: /var/log/app, FEED_HANDLERS_RSOCKET_URL: ws://feed-handlers:10001, POSITION_MANAGEMENT_RSOCKET_URL: ws://position-management:10005, PAPER_EXCHANGE_RSOCKET_PORT: 10006, PAPER_EXCHANGE_EXECUTION_LEDGER_FILE: /data/paper_exchange_matches.sqlite, PAPER_EXCHANGE_PORTFOLIO_ID: paper-default, PAPER_ACCOUNT_INITIAL_CASH: "10000", PAPER_EXCHANGE_FEE_SCHEDULE_ID: v35-paper-sim-spot, PAPER_EXCHANGE_FEE_SCHEDULE_VERSION: v1, PAPER_OKX_SPOT_MAKER_FEE_RATE: "0.0008", PAPER_OKX_SPOT_TAKER_FEE_RATE: "0.001" }
+    volumes: ["../logs:/var/log/app", "paper-exchange-data:/data"]
     ports: ["11003:3003", "10106:10006"]
     restart: unless-stopped
     healthcheck: { test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/3003"], interval: 15s, timeout: 3s, retries: 5 }
@@ -283,10 +285,12 @@ services:
 volumes:
   news-models:
   position-management-data:
-    name: sbe-position-management-data
+    name: sbe-v35-position-management-data
   insights-data:
-    name: sbe-insights-data
+    name: sbe-v35-insights-data
   learning-data:
-    name: sbe-learning-data
+    name: sbe-v35-learning-data
+  paper-exchange-data:
+    name: sbe-v35-paper-exchange-data
   strategy-x-state:
-    name: sbe-scouts-state
+    name: sbe-v35-scouts-state

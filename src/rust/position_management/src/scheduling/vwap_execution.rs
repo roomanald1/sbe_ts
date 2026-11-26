@@ -114,8 +114,9 @@ async fn run_vwap(
                 child_qty,
                 &request.source,
                 &run_id,
-                request.client_order_id.as_deref(),
                 request.lifecycle.as_ref(),
+                "vwap",
+                target_bin as u64,
             )
             .await
             {
@@ -157,18 +158,29 @@ async fn execute_vwap_child(
     quantity: f64,
     source: &str,
     parent_order_id: &str,
-    client_order_id: Option<&str>,
     lifecycle: Option<&CanonicalLifecycleLink>,
+    execution_origin: &str,
+    execution_index: u64,
 ) -> Result<(f64, Option<f64>), String> {
-    let mut matched = paper_exchange_match(symbol, side, quantity, None, client_order_id)
-        .await
-        .map_err(|(status, message)| format!("Paper exchange returned {status}: {message}"))?;
+    let request_order_id = format!("{parent_order_id}:{execution_origin}:{execution_index}");
+    let mut matched = paper_exchange_match(
+        symbol,
+        side,
+        quantity,
+        None,
+        Some(&request_order_id),
+        Some(parent_order_id),
+        execution_origin,
+        None,
+    )
+    .await
+    .map_err(|(status, message)| format!("Paper exchange returned {status}: {message}"))?;
     matched.source_reported_filled_quantity = Some(matched.filled_quantity);
     for fill in &mut matched.fills {
         fill.source_quantity = Some(fill.quantity);
         fill.source_price = Some(fill.price);
     }
-    let source_evidence = paper_exchange_fill_evidence(&matched, client_order_id, quantity);
+    let source_evidence = paper_exchange_fill_evidence(&matched, Some(&request_order_id), quantity);
     let filled = matched.filled_quantity;
     if filled <= EPSILON {
         return Ok((0.0, None));
@@ -206,7 +218,7 @@ async fn execute_vwap_child(
             timestamp,
             source: source.to_owned(),
             parent_order_id: Some(parent_order_id.to_owned()),
-            client_order_id: client_order_id.map(str::to_owned),
+            client_order_id: Some(parent_order_id.to_owned()),
             lifecycle: lifecycle.cloned(),
             fee: -qty * execution_price * fee_rate.abs(),
             fee_known: true,

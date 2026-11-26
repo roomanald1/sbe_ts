@@ -6,7 +6,9 @@ fn validate_active_live_strategy_profiles(
         let strategy = Strategy::from_name(strategy_name)
             .ok_or_else(|| format!("Unknown strategy profile set {strategy_name}"))?;
         if strategy.is_legacy_composite() {
-            return Err(format!("Legacy strategy {strategy_name} cannot have live profiles"));
+            return Err(format!(
+                "Legacy strategy {strategy_name} cannot have live profiles"
+            ));
         }
         total = total.saturating_add(profiles.len());
         if total > 512 {
@@ -18,15 +20,25 @@ fn validate_active_live_strategy_profiles(
             if profile.profile_symbol.trim().is_empty()
                 || !seen.insert(profile.profile_id.clone())
                 || profile.parameters.len() != specs.len()
-                || profile.parameters.keys().any(|key| !specs.iter().any(|spec| spec.key.as_str() == key))
+                || profile
+                    .parameters
+                    .keys()
+                    .any(|key| !specs.iter().any(|spec| spec.key.as_str() == key))
                 || strategy::profile_id(&profile.profile_symbol, strategy_name, &profile.parameters)
                     != profile.profile_id
             {
                 return Err(format!("Invalid or duplicate profile for {strategy_name}"));
             }
-            let overrides = profile.parameters.iter().map(|(key, value)| {
-                (strategy::strategy_parameter_key(&profile.profile_symbol, strategy, key), *value)
-            }).collect::<BTreeMap<_, _>>();
+            let overrides = profile
+                .parameters
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        strategy::strategy_parameter_key(&profile.profile_symbol, strategy, key),
+                        *value,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             strategy::validate_strategy_parameter_overrides(&overrides)?;
         }
     }
@@ -69,6 +81,9 @@ async fn update_settings(
             .risk_appetite
             .is_some_and(|value| !value.is_finite() || !(0.0..=100.0).contains(&value))
         || request
+            .take_profit_percent
+            .is_some_and(|value| !valid_take_profit_setting(value))
+        || request
             .vwap_duration_minutes
             .is_some_and(|value| !(5..=390).contains(&value))
         || request
@@ -89,7 +104,8 @@ async fn update_settings(
         || request
             .closed_trade_window
             .is_some_and(|value| !(1..=5000).contains(&value))
-        || request.minimum_scout_parameter_samples
+        || request
+            .minimum_scout_parameter_samples
             .is_some_and(|value| !(2..=100).contains(&value))
         || !(1..=20).contains(&request.max_open_positions)
         || request
@@ -136,9 +152,8 @@ async fn update_settings(
         if budgets.iter().any(|(strategy, budget)| {
             !budget.is_finite()
                 || *budget < 0.0
-                || !Strategy::from_name(strategy).is_some_and(|kind| {
-                    !kind.is_live_insight() && !kind.is_dated_carry()
-                })
+                || !Strategy::from_name(strategy)
+                    .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
         }) || !configured_total.is_finite()
             || configured_total > daily_limit + 1e-9
         {
@@ -213,6 +228,9 @@ async fn update_settings(
     if let Some(value) = request.risk_appetite {
         settings.risk_appetite = value;
     }
+    if let Some(value) = request.take_profit_percent {
+        settings.take_profit_percent = value;
+    }
     settings.max_open_positions = request.max_open_positions;
     if let Some(value) = request.max_intraday_open_positions {
         settings.max_intraday_open_positions = value;
@@ -267,7 +285,9 @@ async fn update_settings(
             let timestamp_excess = excess.min(settings.closed_trade_timestamps_ms.len());
             let realized_excess = excess.min(settings.closed_trade_realized_usd.len());
             let fees_excess = excess.min(settings.closed_trade_fees_usd.len());
-            settings.closed_trade_timestamps_ms.drain(0..timestamp_excess);
+            settings
+                .closed_trade_timestamps_ms
+                .drain(0..timestamp_excess);
             settings.closed_trade_realized_usd.drain(0..realized_excess);
             settings.closed_trade_fees_usd.drain(0..fees_excess);
         }
@@ -288,7 +308,10 @@ async fn update_settings(
         settings
             .strategy_parameter_overrides
             .retain(|key, _| !key.starts_with(&prefix));
-        if let Some(profiles) = settings.active_live_strategy_profiles.get_mut(&profile.strategy) {
+        if let Some(profiles) = settings
+            .active_live_strategy_profiles
+            .get_mut(&profile.strategy)
+        {
             profiles.retain(|candidate| candidate.profile_symbol != profile.symbol);
         }
     }
@@ -319,10 +342,20 @@ async fn update_settings(
         strategy::ScoutWorkerHttpMethod::Put,
         "/config/scout-parameter-samples",
         Some(serde_json::json!({ "minimum_samples": minimum_scout_parameter_samples })),
-    ).await {
+    )
+    .await
+    {
         Ok(response) if (200..300).contains(&response.status) => {}
-        Ok(response) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", response.status),
-        Err(error) => crate::service_log!("ERROR", "Could not sync scout sample minimum to Learning service: {}", error),
+        Ok(response) => crate::service_log!(
+            "ERROR",
+            "Could not sync scout sample minimum to Learning service: {}",
+            response.status
+        ),
+        Err(error) => crate::service_log!(
+            "ERROR",
+            "Could not sync scout sample minimum to Learning service: {}",
+            error
+        ),
     }
 
     if request.reset_learning {
@@ -332,12 +365,36 @@ async fn update_settings(
     Ok(Json(status(&state, &settings)))
 }
 
+fn valid_take_profit_setting(value: f64) -> bool {
+    value.is_finite() && (0.05..=10.0).contains(&value)
+}
+
+#[cfg(test)]
+mod take_profit_setting_tests {
+    use super::valid_take_profit_setting;
+
+    #[test]
+    fn accepts_the_preserved_paper_target_and_rejects_invalid_bounds() {
+        assert!(valid_take_profit_setting(0.75));
+        assert!(!valid_take_profit_setting(0.0));
+        assert!(!valid_take_profit_setting(0.049));
+        assert!(!valid_take_profit_setting(10.01));
+        assert!(!valid_take_profit_setting(f64::NAN));
+    }
+}
+
 #[cfg(test)]
 mod active_live_profile_tests {
     use super::*;
 
-    fn profile(strategy: Strategy, symbol: &str, parameter_value: Option<f64>) -> strategy::LiveStrategyProfile {
-        let mut parameters = strategy.parameter_specs().into_iter()
+    fn profile(
+        strategy: Strategy,
+        symbol: &str,
+        parameter_value: Option<f64>,
+    ) -> strategy::LiveStrategyProfile {
+        let mut parameters = strategy
+            .parameter_specs()
+            .into_iter()
             .map(|spec| (spec.key.as_str().to_owned(), spec.default))
             .collect::<BTreeMap<_, _>>();
         if let Some(value) = parameter_value {
@@ -362,8 +419,10 @@ mod active_live_profile_tests {
         let spec = strategy.parameter_specs()[0];
         let active = BTreeMap::from([(
             strategy.as_str().to_owned(),
-            vec![profile(strategy, "BTC-USDT", Some(spec.default)),
-                 profile(strategy, "BTC-USDT", Some(spec.default + spec.step))],
+            vec![
+                profile(strategy, "BTC-USDT", Some(spec.default)),
+                profile(strategy, "BTC-USDT", Some(spec.default + spec.step)),
+            ],
         )]);
         assert!(validate_active_live_strategy_profiles(&active).is_ok());
     }
@@ -377,8 +436,14 @@ mod active_live_profile_tests {
         assert!(validate_active_live_strategy_profiles(&duplicate).is_err());
 
         let mut invalid = profile(strategy, "BTC-USDT", Some(spec.default));
-        invalid.parameters.insert(spec.key.as_str().to_owned(), spec.max + spec.step);
-        invalid.profile_id = strategy::profile_id(&invalid.profile_symbol, strategy.as_str(), &invalid.parameters);
+        invalid
+            .parameters
+            .insert(spec.key.as_str().to_owned(), spec.max + spec.step);
+        invalid.profile_id = strategy::profile_id(
+            &invalid.profile_symbol,
+            strategy.as_str(),
+            &invalid.parameters,
+        );
         let out_of_bounds = BTreeMap::from([(strategy.as_str().to_owned(), vec![invalid])]);
         assert!(validate_active_live_strategy_profiles(&out_of_bounds).is_err());
     }

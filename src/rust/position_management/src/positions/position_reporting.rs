@@ -1093,6 +1093,7 @@ mod financial_snapshot_tests {
         ledger.topups.push(AccountTopup {
             amount: 25.0,
             timestamp: 900,
+            ..AccountTopup::default()
         });
         save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
 
@@ -1123,6 +1124,127 @@ mod financial_snapshot_tests {
         assert_eq!(second["truncated"], false);
         assert_ne!(second["intervals"][0]["evidence_id"], first_id);
         assert_eq!(second["intervals"][0]["interval_end_utc_ms"], 1_000);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn portfolio_interval_api_preserves_currency_fx_and_separate_contribution_evidence() {
+        let path = std::env::temp_dir().join(format!(
+            "pm-portfolio-interval-currency-{}-{}.sqlite",
+            std::process::id(),
+            now_ms().unwrap_or_default(),
+        ));
+        let mut store = test_store();
+        store.path = path.clone();
+        let store = Arc::new(store);
+        let ledger = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("currency-epoch".to_owned()),
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &ledger, 2_000, true).unwrap();
+
+        // Seed the persisted contract as if the market feed and independent
+        // evidence collector had already supplied these sourced FX marks and
+        // contribution references. The endpoint must return the exact values,
+        // without folding external capital into trading cashflows.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let mut payload: serde_json::Value = db
+            .query_row(
+                "SELECT payload FROM portfolio_evidence_intervals ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|payload| serde_json::from_str(&payload).unwrap())
+            .unwrap();
+        payload["opening_cash_balances_by_currency"] = serde_json::json!({
+            "USD": 10_000.0,
+            "EUR": 2.0,
+        });
+        payload["opening_cash_value_usd_by_currency"] = serde_json::json!({
+            "USD": 10_000.0,
+            "EUR": 2.2,
+        });
+        payload["opening_fx_rates_usd_by_currency"] = serde_json::json!({
+            "USD": 1.0,
+            "EUR": 1.1,
+        });
+        payload["opening_fx_rates_updated_at_by_currency"] = serde_json::json!({
+            "USD": 0,
+            "EUR": 1_900,
+        });
+        payload["closing_cash_value_usd_by_currency"] = serde_json::json!({
+            "USD": 10_010.0,
+            "EUR": 2.4,
+        });
+        payload["closing_fx_rates_usd_by_currency"] = serde_json::json!({
+            "USD": 1.0,
+            "EUR": 1.2,
+        });
+        payload["closing_fx_rates_updated_at_by_currency"] = serde_json::json!({
+            "USD": 0,
+            "EUR": 1_990,
+        });
+        payload["cash_movements_by_currency"] = serde_json::json!({"USD": 0.0});
+        payload["external_contributions_by_currency"] = serde_json::json!({"USD": 5.0});
+        payload["external_contribution_events"] = serde_json::json!([{
+            "contribution_id": "pm-topup:v1:0",
+            "source": "position_manager_account_topup_ledger",
+            "source_cursor": 0,
+            "timestamp_utc_ms": 1_950,
+            "currency": "USD",
+            "amount": 5.0,
+            "value_usd": 5.0,
+            "independent_source_record_id": "operator-contribution:deposit-1",
+            "independent_source_epoch": "pex-epoch-1",
+            "independent_source_cursor": 7,
+        }]);
+        db.execute(
+            "UPDATE portfolio_evidence_intervals SET payload = ?1",
+            [payload.to_string()],
+        )
+        .unwrap();
+        drop(db);
+
+        let Json(response) = get_portfolio_evidence_intervals(
+            State(store),
+            Query(PortfolioEvidenceIntervalsQuery {
+                after_ms: None,
+                after_cursor: None,
+                limit: Some(10),
+            }),
+        )
+        .await
+        .unwrap();
+        let interval = &response["intervals"][0];
+        assert_eq!(interval["opening_cash_balances_by_currency"]["EUR"], 2.0);
+        assert_eq!(interval["opening_cash_value_usd_by_currency"]["EUR"], 2.2);
+        assert_eq!(
+            interval["opening_fx_rates_updated_at_by_currency"]["EUR"],
+            1_900
+        );
+        assert_eq!(interval["closing_cash_value_usd_by_currency"]["EUR"], 2.4);
+        assert_eq!(
+            interval["closing_fx_rates_updated_at_by_currency"]["EUR"],
+            1_990
+        );
+        assert_eq!(interval["cash_movements_by_currency"]["USD"], 0.0);
+        assert_eq!(interval["external_contributions_by_currency"]["USD"], 5.0);
+        assert_eq!(
+            interval["external_contribution_events"][0]["independent_source_record_id"],
+            "operator-contribution:deposit-1"
+        );
+        assert_eq!(
+            interval["external_contribution_events"][0]["independent_source_cursor"],
+            7
+        );
+        assert_eq!(
+            response["quantitative_eligibility"],
+            "blocked_pending_independent_reconciliation"
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));

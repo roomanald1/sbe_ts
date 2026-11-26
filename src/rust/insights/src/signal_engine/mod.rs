@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use axum::{http::StatusCode, routing::get, Json, Router};
-use flate2::{read::MultiGzDecoder, write::GzEncoder, Compression};
-use rusqlite::{params, Connection};
+use axum::{Json, Router, http::StatusCode, routing::get};
+use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::{
@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 const PRICE_WINDOW_MS: u64 = 3_610_000;
 const TRADE_WINDOW_MS: u64 = 300_000;
@@ -27,6 +27,7 @@ pub const RESEARCH_SAMPLE_INTERVAL_MS: u64 = 10_000;
 pub const LIVE_SIGNAL_SNAPSHOT_INTERVAL_MS: u64 = 2_000;
 const CALIBRATION_SNAPSHOT_LIMIT: usize = 1_000;
 const CALIBRATION_OUTCOME_LIMIT: usize = 5_000;
+const MAX_DURABLE_SCOUT_PATH_REGISTRATIONS: i64 = 32_768;
 
 include!("engine/signal_contracts.rs");
 include!("engine/signal_engine_types.rs");
@@ -159,6 +160,7 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 Err(_) => break,
             }
         }
+        let mut scout_path_validation_error = None;
         let result = (|| -> Result<()> {
             // Do serialization and compression before taking SQLite's write lock.
             let mut signal_rows = Vec::new();
@@ -191,6 +193,10 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                     WriteOperation::ScoutPathComplete(decision_id) => completed_scout_paths.push(decision_id),
                 }
             }
+            let has_scout_path_operations = !scout_registrations.is_empty()
+                || !scout_path_samples.is_empty()
+                || !failed_scout_paths.is_empty()
+                || !completed_scout_paths.is_empty();
             let transaction = connection.transaction()?;
             if !signal_rows.is_empty() {
                 let mut insert = transaction.prepare(
@@ -253,8 +259,63 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 let mut touched_scout_paths = HashSet::new();
                 let mut inserted_per_path = HashMap::<&str, u64>::new();
                 for sample in scout_path_samples {
+                    let registration: Option<(String, i64)> = transaction
+                        .query_row(
+                            "SELECT symbol, active FROM scout_path_registrations WHERE decision_id=?1",
+                            [&sample.decision_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if !registration.as_ref().is_some_and(|(symbol, active)| {
+                        symbol == &sample.symbol && *active != 0
+                    }) {
+                        if registration.is_some() {
+                            transaction.execute(
+                                "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
+                                [&sample.decision_id],
+                            )?;
+                        }
+                        scout_path_validation_error.get_or_insert_with(|| {
+                            format!(
+                                "Scout path sample identity is not an active registration: {}",
+                                sample.decision_id
+                            )
+                        });
+                        continue;
+                    }
                     let inserted = insert.execute(params![sample.decision_id, sample.path_epoch as i64, sample.sequence as i64, sample.timestamp as i64, sample.bid, sample.ask, sample.freshness_ms as i64, sample.gap_ms as i64, sample.first_source_timestamp.map(|value| value as i64), sample.maximum_gap_ms as i64, sample.source_timestamps_monotonic, sample.maximum_favorable_excursion_percent, sample.maximum_adverse_excursion_percent, sample.sample_count as i64, sample.capture_complete])?;
                     touched_scout_paths.insert(sample.decision_id.as_str());
+                    if inserted == 0 {
+                        let existing: (i64, f64, f64, i64, i64, Option<i64>, i64, bool, Option<f64>, Option<f64>, i64, bool) = transaction.query_row(
+                            "SELECT timestamp, bid, ask, freshness_ms, gap_ms, first_source_timestamp, maximum_gap_ms, source_timestamps_monotonic, maximum_favorable_excursion_percent, maximum_adverse_excursion_percent, sample_count, capture_complete FROM scout_path_samples WHERE decision_id=?1 AND path_epoch=?2 AND sequence=?3",
+                            params![sample.decision_id, sample.path_epoch as i64, sample.sequence as i64],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?)),
+                        )?;
+                        let duplicate_matches = existing.0 as u64 == sample.timestamp
+                            && existing.1.to_bits() == sample.bid.to_bits()
+                            && existing.2.to_bits() == sample.ask.to_bits()
+                            && existing.3 as u64 == sample.freshness_ms
+                            && existing.4 as u64 == sample.gap_ms
+                            && existing.5.map(|value| value as u64) == sample.first_source_timestamp
+                            && existing.6 as u64 == sample.maximum_gap_ms
+                            && existing.7 == sample.source_timestamps_monotonic
+                            && existing.8 == sample.maximum_favorable_excursion_percent
+                            && existing.9 == sample.maximum_adverse_excursion_percent
+                            && existing.10 as u64 == sample.sample_count
+                            && existing.11 == sample.capture_complete;
+                        if !duplicate_matches {
+                            transaction.execute(
+                                "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
+                                [&sample.decision_id],
+                            )?;
+                            scout_path_validation_error.get_or_insert_with(|| {
+                                format!(
+                                    "conflicting Scout path sample replay for {} epoch {} sequence {}",
+                                    sample.decision_id, sample.path_epoch, sample.sequence
+                                )
+                            });
+                        }
+                    }
                     if !sample.capture_complete {
                         transaction.execute(
                             "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
@@ -308,6 +369,12 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
             for decision_id in completed_scout_paths {
                 transaction.execute("UPDATE scout_path_registrations SET active=0 WHERE decision_id=?1", [&decision_id])?;
             }
+            if has_scout_path_operations {
+                enforce_scout_path_registration_limit(
+                    &transaction,
+                    MAX_DURABLE_SCOUT_PATH_REGISTRATIONS,
+                )?;
+            }
             for decision_id in failed_scout_paths {
                 transaction.execute(
                     "UPDATE scout_path_registrations SET capture_complete=0 WHERE decision_id=?1",
@@ -315,12 +382,168 @@ fn run_database_writer(mut connection: Connection, mut receiver: mpsc::Receiver<
                 )?;
             }
             transaction.commit()?;
+            if let Some(error) = scout_path_validation_error.take() {
+                anyhow::bail!("{error}");
+            }
             Ok(())
         })()
         .map_err(|error| error.to_string());
         for request in batch {
             let _ = request.ack.send(result.clone());
         }
+    }
+}
+
+fn enforce_scout_path_registration_limit(
+    transaction: &rusqlite::Transaction<'_>,
+    max_rows: i64,
+) -> Result<()> {
+    if max_rows < 0 {
+        anyhow::bail!("Scout path registration limit must be non-negative");
+    }
+    let total: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM scout_path_registrations", [], |row| {
+            row.get(0)
+        })?;
+    let excess = total.saturating_sub(max_rows);
+    if excess == 0 {
+        return Ok(());
+    }
+    let inactive_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT decision_id FROM scout_path_registrations WHERE active=0 ORDER BY signal_timestamp ASC, decision_id ASC LIMIT ?1",
+        )?;
+        statement
+            .query_map([excess], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for decision_id in inactive_ids {
+        transaction.execute(
+            "DELETE FROM scout_path_samples WHERE decision_id=?1",
+            [&decision_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM scout_path_registrations WHERE decision_id=?1 AND active=0",
+            [&decision_id],
+        )?;
+    }
+    let remaining: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM scout_path_registrations", [], |row| {
+            row.get(0)
+        })?;
+    if remaining > max_rows {
+        anyhow::bail!(
+            "active Scout path registrations exceed the durable bound ({remaining}>{max_rows})"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod scout_path_registration_retention_tests {
+    use super::*;
+
+    fn insert_registration(
+        transaction: &rusqlite::Transaction<'_>,
+        id: &str,
+        time: i64,
+        active: bool,
+    ) {
+        transaction
+            .execute(
+                "INSERT INTO scout_path_registrations(decision_id,symbol,signal_timestamp,direction,entry_price,active) VALUES (?1,'BTC-USDT',?2,'bullish',100.0,?3)",
+                params![id, time, active],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO scout_path_samples(decision_id,path_epoch,sequence,timestamp,bid,ask,freshness_ms,gap_ms,first_source_timestamp,maximum_gap_ms,source_timestamps_monotonic,maximum_favorable_excursion_percent,maximum_adverse_excursion_percent,sample_count,capture_complete) VALUES (?1,1,1,?2,99.9,100.1,1,0,?2,0,1,0.0,0.0,1,1)",
+                params![id, time],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn registration_bound_prunes_old_inactive_rows_and_their_samples() {
+        let path = std::env::temp_dir().join(format!(
+            "insights-scout-path-retention-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut connection = SignalStore::open_database_at(&path).unwrap();
+        {
+            let transaction = connection.transaction().unwrap();
+            insert_registration(&transaction, "inactive-old", 1, false);
+            insert_registration(&transaction, "inactive-new", 2, false);
+            insert_registration(&transaction, "active", 3, true);
+            enforce_scout_path_registration_limit(&transaction, 2).unwrap();
+            transaction.commit().unwrap();
+        }
+        let registrations: i64 = connection
+            .query_row("SELECT COUNT(*) FROM scout_path_registrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let samples: i64 = connection
+            .query_row("SELECT COUNT(*) FROM scout_path_samples", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(registrations, 2);
+        assert_eq!(samples, 2);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM scout_path_registrations WHERE decision_id='inactive-old'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn registration_bound_fails_closed_instead_of_evicting_active_paths() {
+        let path = std::env::temp_dir().join(format!(
+            "insights-scout-path-active-limit-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut connection = SignalStore::open_database_at(&path).unwrap();
+        {
+            let transaction = connection.transaction().unwrap();
+            insert_registration(&transaction, "active-one", 1, true);
+            insert_registration(&transaction, "active-two", 2, true);
+            transaction.commit().unwrap();
+        }
+        {
+            let transaction = connection.transaction().unwrap();
+            assert!(enforce_scout_path_registration_limit(&transaction, 1).is_err());
+            transaction.rollback().unwrap();
+        }
+        let active: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM scout_path_registrations WHERE active=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 2);
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }
 
@@ -434,27 +657,33 @@ mod granular_live_feature_tests {
 
         let snapshot = engine.snapshot("ETH-USDT", 121_000).unwrap();
         let components = snapshot.components;
-        assert!(components
-            .momentum_by_window
-            .iter()
-            .any(|feature| { feature.window_seconds == 10 && feature.value.is_some() }));
+        assert!(
+            components
+                .momentum_by_window
+                .iter()
+                .any(|feature| { feature.window_seconds == 10 && feature.value.is_some() })
+        );
         assert!(components.trade_flow_by_window.iter().any(|feature| {
             feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count > 0
         }));
-        assert!(components
-            .book_imbalance_by_depth
-            .iter()
-            .any(|feature| { feature.depth_levels == 5 && feature.value.is_some() }));
+        assert!(
+            components
+                .book_imbalance_by_depth
+                .iter()
+                .any(|feature| { feature.depth_levels == 5 && feature.value.is_some() })
+        );
         assert!(components.vwap_dislocation_by_window.iter().any(|feature| {
             feature.window_seconds == 60 && feature.value.is_some() && feature.sample_count >= 5
         }));
-        assert!(components
-            .absorption_pressure_by_window
-            .iter()
-            .any(|feature| {
-                feature.window_seconds == 30
-                    && feature.replenishment_window_ms == 2_000
-                    && feature.touch_tolerance_bps == 2.0
-            }));
+        assert!(
+            components
+                .absorption_pressure_by_window
+                .iter()
+                .any(|feature| {
+                    feature.window_seconds == 30
+                        && feature.replenishment_window_ms == 2_000
+                        && feature.touch_tolerance_bps == 2.0
+                })
+        );
     }
 }

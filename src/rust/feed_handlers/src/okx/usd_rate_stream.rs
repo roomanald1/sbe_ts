@@ -36,6 +36,7 @@ async fn bootstrap_usd_rates() -> Result<UsdRateSnapshot> {
 fn parse_usd_rate_response(response: IndexTickerRestResponse) -> Result<UsdRateSnapshot> {
     let mut rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
     let mut updated_at_by_currency = BTreeMap::from([("USD".to_owned(), 0)]);
+    let mut source_record_id_by_currency = BTreeMap::new();
     let mut updated_at = 0;
     for item in response.data {
         let Some((currency, quote)) = item.instrument.split_once('-') else { continue; };
@@ -44,11 +45,17 @@ fn parse_usd_rate_response(response: IndexTickerRestResponse) -> Result<UsdRateS
         if quote != "USD" || !rate.is_finite() || rate <= 0.0 { continue; }
         let currency = currency.to_owned();
         rates.insert(currency.clone(), rate);
-        updated_at_by_currency.insert(currency, timestamp);
+        updated_at_by_currency.insert(currency.clone(), timestamp);
+        source_record_id_by_currency.insert(currency, format!("{}:{timestamp}", item.instrument));
         updated_at = updated_at.max(timestamp);
     }
     if rates.len() == 1 { anyhow::bail!("OKX returned no usable USD index rates"); }
-    Ok(UsdRateSnapshot { rates, updated_at, updated_at_by_currency })
+    Ok(UsdRateSnapshot {
+        rates,
+        updated_at,
+        updated_at_by_currency,
+        source_record_id_by_currency,
+    })
 }
 
 #[cfg(test)]
@@ -77,6 +84,10 @@ mod usd_rate_stream_tests {
         assert_eq!(snapshot.updated_at, 1_700_000_001_000);
         assert_eq!(snapshot.updated_at_by_currency["USD"], 0);
         assert_eq!(snapshot.updated_at_by_currency["BTC"], 1_700_000_000_000);
+        assert_eq!(
+            snapshot.source_record_id_by_currency["BTC"],
+            "BTC-USD:1700000000000"
+        );
     }
 
     #[test]

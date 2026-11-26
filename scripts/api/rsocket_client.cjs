@@ -23,7 +23,8 @@ const services = {
   "learning": 10110,
   "autotrader": 10009,
   "insights": 10111,
-  "positions": 10105
+  "positions": 10105,
+  "paper_exchange": 10106
 };
 const allowedRoutes = {
   "learning": [
@@ -35,6 +36,7 @@ const allowedRoutes = {
     "/internal/learning-feedback-queues",
     "/internal/monitoring-metrics",
     "/internal/strategy/open-position-counts",
+    "/positions/auto-trader",
     "/positions/auto-trader/parameters",
     "/positions/auto-trader/activity"
   ],
@@ -54,7 +56,11 @@ const allowedRoutes = {
     "/positions/usd-rates",
     "/positions/barriers",
     "/internal/persistence-timing",
-    "/positions/trades"
+    "/positions/trades",
+    "/positions/portfolio-evidence/intervals"
+  ],
+  "paper_exchange": [
+    "/internal/financial/evidence"
   ]
 };
 const allowed = Object.fromEntries(Object.entries(allowedRoutes).map(([k,v]) => [k,new Set(v)]));
@@ -96,18 +102,24 @@ async function main() {
     }
 
     if (input.params !== undefined) {
-        if (service !== 'positions' || route !== '/positions/trades' ||
+        if (!((service === 'positions' && ['/positions/trades', '/positions/portfolio-evidence/intervals'].includes(route)) ||
+              (service === 'paper_exchange' && route === '/internal/financial/evidence')) ||
             input.params === null || typeof input.params !== 'object' ||
             Array.isArray(input.params)) {
             throw new Error('Query parameters unsupported for this route');
         }
         const allowedParams = new Set([
-            'symbol', 'source', 'since_ms', 'before_ms', 'limit', 'offset'
+            'symbol', 'source', 'since_ms', 'before_ms', 'limit', 'offset', 'after_cursor', 'after_ms'
         ]);
+        const routeParams = service === 'paper_exchange'
+            ? new Set(['after_cursor', 'limit'])
+            : route === '/positions/portfolio-evidence/intervals'
+                ? new Set(['after_cursor', 'after_ms', 'limit'])
+                : allowedParams;
         const query = new URLSearchParams();
         for (const [key, value] of Object.entries(input.params)) {
-            if (!allowedParams.has(key)) {
-                throw new Error(`Unsupported positions.trades parameter: ${key}`);
+            if (!routeParams.has(key)) {
+                throw new Error(`Unsupported query parameter for ${service}${route}: ${key}`);
             }
             if (key === 'symbol') {
                 if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,64}$/.test(value)) {
@@ -121,8 +133,8 @@ async function main() {
                 if (!Number.isSafeInteger(value) || value < 0) {
                     throw new Error(`Invalid positions.trades ${key}`);
                 }
-                if (key === 'limit' && (value < 1 || value > 500)) {
-                    throw new Error('positions.trades limit must be 1-500');
+                if (key === 'limit' && (value < 1 || value > 1000)) {
+                    throw new Error('page limit must be 1-1000');
                 }
                 if (key === 'offset' && value > 100000) {
                     throw new Error('positions.trades offset exceeds the read bound');

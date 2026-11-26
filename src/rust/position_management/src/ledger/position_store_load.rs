@@ -20,6 +20,10 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64, 
         no_fill_order_responses: guard.no_fill_order_responses.clone(),
         fill_id_epoch: guard.fill_id_epoch.clone(),
         fill_id_sequence: guard.fill_id_sequence,
+        portfolio_baseline_source_system: guard.portfolio_baseline_source_system.clone(),
+        portfolio_baseline_source_record_id: guard.portfolio_baseline_source_record_id.clone(),
+        portfolio_baseline_source_epoch: guard.portfolio_baseline_source_epoch.clone(),
+        portfolio_baseline_source_cursor: guard.portfolio_baseline_source_cursor,
     };
     copy_ms += copy_started.elapsed().as_secs_f64() * 1_000.0;
     drop(guard);
@@ -172,6 +176,14 @@ impl PositionStore {
         {
             let ledger = store.ledger.lock().await;
             with_ledger_trade_index(&store, &ledger, |_| ());
+        }
+        if start_background_writer && !ledger_migrated {
+            if let Err(error) = store.ensure_clean_start_portfolio_baseline().await {
+                crate::service_log!(
+                    "WARN",
+                    "Clean-start independent portfolio baseline unavailable: {error:#}"
+                );
+            }
         }
         if start_background_writer {
             let writer_ledger = Arc::clone(&store.ledger);
@@ -331,11 +343,104 @@ impl PositionStore {
         Ok(())
     }
 
+    async fn ensure_clean_start_portfolio_baseline(&self) -> anyhow::Result<bool> {
+        let Some(configured_cash) = std::env::var("PAPER_ACCOUNT_INITIAL_CASH")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|amount| amount.is_finite() && *amount > 0.0)
+        else {
+            return Ok(false);
+        };
+        {
+            let ledger = self.ledger.lock().await;
+            if !should_initialize_clean_start_baseline(&ledger)
+                || ledger.initial_cash != configured_cash
+            {
+                return Ok(false);
+            }
+        }
+
+        let page = match fetch_initial_paper_evidence_with_retry(|| {
+            paper_exchange_client::paper_exchange_get(
+                "/internal/financial/evidence?after_cursor=0&limit=500",
+            )
+        })
+        .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                crate::service_log!(
+                    "WARN",
+                    "Paper Exchange opening capital evidence unavailable: {error:#}"
+                );
+                return Ok(false);
+            }
+        };
+        let Some(reference) =
+            paper_exchange_opening_capital_reference(&page, "paper-default", configured_cash)
+        else {
+            crate::service_log!(
+                "WARN",
+                "Fresh PM ledger remains without baseline: Paper Exchange opening capital is missing, incomplete, or mismatched"
+            );
+            return Ok(false);
+        };
+
+        let baseline_observed_at_ms = now_ms()?;
+        let new_fill_epoch = create_fill_id_epoch(baseline_observed_at_ms);
+        let previous_baseline_state = {
+            let mut ledger = self.ledger.lock().await;
+            if !should_initialize_clean_start_baseline(&ledger)
+                || ledger.initial_cash != reference.amount_usd
+            {
+                return Ok(false);
+            }
+            let previous = (
+                ledger.fill_id_epoch.clone(),
+                ledger.fill_id_sequence,
+                ledger.portfolio_baseline_source_system.clone(),
+                ledger.portfolio_baseline_source_record_id.clone(),
+                ledger.portfolio_baseline_source_epoch.clone(),
+                ledger.portfolio_baseline_source_cursor,
+            );
+            ledger.fill_id_epoch = Some(new_fill_epoch.clone());
+            ledger.portfolio_baseline_source_system = Some(reference.source_system);
+            ledger.portfolio_baseline_source_record_id = Some(reference.source_record_id);
+            ledger.portfolio_baseline_source_epoch = Some(reference.source_epoch);
+            ledger.portfolio_baseline_source_cursor = Some(reference.source_cursor);
+            previous
+        };
+        if let Err(error) = self
+            .persist_portfolio_evidence_baseline_at(baseline_observed_at_ms)
+            .await
+        {
+            let mut ledger = self.ledger.lock().await;
+            if ledger.fill_id_epoch.as_deref() == Some(new_fill_epoch.as_str()) {
+                ledger.fill_id_epoch = previous_baseline_state.0;
+                ledger.fill_id_sequence = previous_baseline_state.1;
+                ledger.portfolio_baseline_source_system = previous_baseline_state.2;
+                ledger.portfolio_baseline_source_record_id = previous_baseline_state.3;
+                ledger.portfolio_baseline_source_epoch = previous_baseline_state.4;
+                ledger.portfolio_baseline_source_cursor = previous_baseline_state.5;
+            }
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     async fn persist_portfolio_evidence_baseline(&self) -> anyhow::Result<serde_json::Value> {
+        let observed_at_ms = now_ms()?;
+        self.persist_portfolio_evidence_baseline_at(observed_at_ms)
+            .await
+    }
+
+    async fn persist_portfolio_evidence_baseline_at(
+        &self,
+        observed_at_ms: u64,
+    ) -> anyhow::Result<serde_json::Value> {
         let _write_guard = self.persistence_write_lock.lock().await;
         let (snapshot, _, _, _) = snapshot_position_ledger(&self.ledger).await;
         let path = self.path.clone();
-        let observed_at_ms = now_ms()?;
         tokio::task::spawn_blocking(move || {
             save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, true)
         })
@@ -394,6 +499,21 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
             .get("fill_id_sequence")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
+        ledger.portfolio_baseline_source_system = meta
+            .get("portfolio_baseline_source_system")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        ledger.portfolio_baseline_source_record_id = meta
+            .get("portfolio_baseline_source_record_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        ledger.portfolio_baseline_source_epoch = meta
+            .get("portfolio_baseline_source_epoch")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        ledger.portfolio_baseline_source_cursor = meta
+            .get("portfolio_baseline_source_cursor")
+            .and_then(serde_json::Value::as_u64);
         if ledger.no_fill_order_responses.len() > NO_FILL_IDEMPOTENCY_CAPACITY {
             let excess = ledger.no_fill_order_responses.len() - NO_FILL_IDEMPOTENCY_CAPACITY;
             ledger.no_fill_order_responses.drain(..excess);
@@ -436,11 +556,13 @@ fn current_portfolio_fx_marks(
         .get()
         .and_then(|rates| rates.load_full())
     else {
-        return (BTreeMap::new(), BTreeMap::new());
+        return fixed_usd_parity_fx_mark();
     };
-    let mut rates = BTreeMap::new();
-    let mut updated_at = BTreeMap::new();
+    let (mut rates, mut updated_at) = fixed_usd_parity_fx_mark();
     for (currency, rate) in &snapshot.rates {
+        if currency == "USD" {
+            continue;
+        }
         let timestamp = snapshot
             .updated_at_by_currency
             .get(currency)
@@ -458,6 +580,23 @@ fn current_portfolio_fx_marks(
         rates.insert(currency.clone(), *rate);
         updated_at.insert(currency.clone(), timestamp);
     }
+    (rates, updated_at)
+}
+
+fn fixed_usd_parity_fx_mark() -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+    (
+        BTreeMap::from([("USD".to_owned(), 1.0)]),
+        BTreeMap::from([("USD".to_owned(), 0)]),
+    )
+}
+
+fn retain_cash_currency_fx_marks(
+    cash_balances_by_currency: &BTreeMap<String, f64>,
+    mut rates: BTreeMap<String, f64>,
+    mut updated_at: BTreeMap<String, u64>,
+) -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+    rates.retain(|currency, _| cash_balances_by_currency.contains_key(currency));
+    updated_at.retain(|currency, _| cash_balances_by_currency.contains_key(currency));
     (rates, updated_at)
 }
 
@@ -493,6 +632,14 @@ struct PortfolioEvidenceIntervalV1 {
     topup_cursor_start: Option<usize>,
     topup_cursor_end: usize,
     baseline_source: Option<String>,
+    #[serde(default)]
+    baseline_independent_source_system: Option<String>,
+    #[serde(default)]
+    baseline_independent_source_record_id: Option<String>,
+    #[serde(default)]
+    baseline_independent_source_epoch: Option<String>,
+    #[serde(default)]
+    baseline_independent_source_cursor: Option<u64>,
     #[serde(default)]
     baseline_evidence_id: Option<String>,
     #[serde(default)]
@@ -586,6 +733,116 @@ struct PortfolioCashContributionV1 {
     amount: f64,
     #[serde(default)]
     value_usd: Option<f64>,
+    #[serde(default)]
+    independent_source_record_id: Option<String>,
+    #[serde(default)]
+    independent_source_epoch: Option<String>,
+    #[serde(default)]
+    independent_source_cursor: Option<u64>,
+}
+
+#[derive(Clone)]
+struct PaperOpeningCapitalReference {
+    amount_usd: f64,
+    source_system: String,
+    source_record_id: String,
+    source_epoch: String,
+    source_cursor: u64,
+}
+
+fn clean_start_ledger_is_empty(ledger: &Ledger) -> bool {
+    ledger.trades.is_empty()
+        && ledger.dated_carry_positions.is_empty()
+        && ledger.topups.is_empty()
+        && ledger.orders.is_empty()
+        && ledger.barrier_orders.is_empty()
+        && ledger.scheduled_runs.is_empty()
+        && ledger.no_fill_order_responses.is_empty()
+        && ledger.fill_id_sequence == 0
+}
+
+fn should_initialize_clean_start_baseline(ledger: &Ledger) -> bool {
+    clean_start_ledger_is_empty(ledger)
+}
+
+async fn fetch_initial_paper_evidence_with_retry<F, Fut>(
+    mut fetch: F,
+) -> anyhow::Result<serde_json::Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<serde_json::Value>>,
+{
+    let mut last_error = None;
+    for attempt in 0..4 {
+        match fetch().await {
+            Ok(page) => return Ok(page),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt < 3 {
+            tokio::time::sleep(Duration::from_millis(100_u64 << attempt)).await;
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("Paper Exchange opening evidence unavailable")))
+}
+
+fn paper_exchange_opening_capital_reference(
+    page: &serde_json::Value,
+    expected_portfolio_id: &str,
+    expected_amount_usd: f64,
+) -> Option<PaperOpeningCapitalReference> {
+    if page.get("schema_version")?.as_str()? != "paper_exchange_financial_evidence:v1"
+        || page.get("evidence_kind")?.as_str()?
+            != "paper_exchange_source_attributed_account_evidence"
+        || page.get("cursor_kind")?.as_str()? != "financial_event"
+        || page.get("opening_capital_status")?.as_str()?
+            != "explicit_simulator_opening_capital_captured"
+        || page.get("after_cursor")?.as_u64()? != 0
+        || page.get("execution_history_empty")?.as_bool()? != true
+    {
+        return None;
+    }
+    let pex_source_epoch = page.get("source_epoch")?.as_str()?;
+    let events = page.get("events")?.as_array()?;
+    if events.first()?.get("source_cursor")?.as_u64()? != 1 {
+        return None;
+    }
+    for stored in events {
+        let Some(event) = stored.get("event") else {
+            continue;
+        };
+        if event.get("event_type").and_then(serde_json::Value::as_str) != Some("account_balance")
+            || event.get("source_system")?.as_str()?
+                != "paper_exchange_simulator_account_configuration"
+            || event.get("portfolio_id")?.as_str()? != expected_portfolio_id
+            || event.get("boundary")?.as_str()? != "opening"
+        {
+            continue;
+        }
+        let amount_usd = event.get("balances_by_currency")?.get("USD")?.as_f64()?;
+        let timestamp_utc_ms = event.get("source_timestamp_utc_ms")?.as_u64()?;
+        let local_cursor = stored.get("source_cursor")?.as_u64()?;
+        let source_record_id = event.get("source_record_id")?.as_str()?;
+        let source_system = event.get("source_system")?.as_str()?;
+        if amount_usd != expected_amount_usd
+            || !amount_usd.is_finite()
+            || amount_usd <= 0.0
+            || timestamp_utc_ms == 0
+            || local_cursor == 0
+            || source_record_id.is_empty()
+            || pex_source_epoch.is_empty()
+        {
+            return None;
+        }
+        return Some(PaperOpeningCapitalReference {
+            amount_usd,
+            source_system: source_system.to_owned(),
+            source_record_id: source_record_id.to_owned(),
+            source_epoch: pex_source_epoch.to_owned(),
+            source_cursor: local_cursor,
+        });
+    }
+    None
 }
 
 fn save_sqlite_ledger_at(
@@ -611,6 +868,10 @@ fn save_sqlite_ledger_at(
             "no_fill_order_responses": ledger.no_fill_order_responses,
             "fill_id_epoch": ledger.fill_id_epoch,
             "fill_id_sequence": ledger.fill_id_sequence,
+            "portfolio_baseline_source_system": ledger.portfolio_baseline_source_system,
+            "portfolio_baseline_source_record_id": ledger.portfolio_baseline_source_record_id,
+            "portfolio_baseline_source_epoch": ledger.portfolio_baseline_source_epoch,
+            "portfolio_baseline_source_cursor": ledger.portfolio_baseline_source_cursor,
         }))?],
     )?;
     tx.execute("DELETE FROM trades", [])?;
@@ -842,12 +1103,17 @@ fn save_sqlite_ledger_at(
             timestamp_utc_ms: topup.timestamp,
             currency: "USD".to_owned(),
             amount: topup.amount,
-            value_usd: (topup.amount.is_finite() && topup.amount > 0.0)
-                .then_some(topup.amount),
+            value_usd: (topup.amount.is_finite() && topup.amount > 0.0).then_some(topup.amount),
+            independent_source_record_id: topup.contribution_id.clone(),
+            independent_source_epoch: topup.financial_evidence_epoch.clone(),
+            independent_source_cursor: topup.financial_evidence_cursor,
         });
     }
+    let (fx_rates, fx_updated_at) = current_portfolio_fx_marks(observed_at_ms);
+    // The source rate cache contains every subscribed instrument base. Portfolio
+    // evidence only values currencies that actually carry cash in this interval.
     let (closing_fx_rates_usd_by_currency, closing_fx_rates_updated_at_by_currency) =
-        current_portfolio_fx_marks(observed_at_ms);
+        retain_cash_currency_fx_marks(&cash_balances_by_currency, fx_rates, fx_updated_at);
     let closing_cash_value_usd_by_currency = value_cash_balances_usd(
         &cash_balances_by_currency,
         &closing_fx_rates_usd_by_currency,
@@ -994,7 +1260,14 @@ fn save_sqlite_ledger_at(
     }
     let source_quality = completeness_reasons.is_empty();
     let baseline_source = if explicit_baseline_request && source_quality {
-        Some("position_manager_account_fill_topup_ledger_v1".to_owned())
+        if ledger.portfolio_baseline_source_record_id.is_some()
+            && ledger.portfolio_baseline_source_epoch.is_some()
+            && ledger.portfolio_baseline_source_cursor.is_some()
+        {
+            Some("paper_exchange_simulator_opening_capital_v1".to_owned())
+        } else {
+            Some("position_manager_account_fill_topup_ledger_v1".to_owned())
+        }
     } else if !explicit_baseline_request {
         previous
             .as_ref()
@@ -1098,7 +1371,9 @@ fn save_sqlite_ledger_at(
                 .flatten()
         })
         .try_fold(0.0, |sum, amount| {
-            amount.filter(|amount| amount.is_finite()).map(|amount| sum + amount)
+            amount
+                .filter(|amount| amount.is_finite())
+                .map(|amount| sum + amount)
         })
         .filter(|sum: &f64| sum.is_finite());
     if external_contributions_usd.is_none() {
@@ -1108,9 +1383,7 @@ fn save_sqlite_ledger_at(
     let portfolio_return_complete = portfolio_return_completeness_reasons.is_empty();
     let flat_cash_period_net_pnl_usd = portfolio_return_complete
         .then(|| {
-            Some(
-                closing_cash_total_usd? - opening_cash_total_usd? - external_contributions_usd?,
-            )
+            Some(closing_cash_total_usd? - opening_cash_total_usd? - external_contributions_usd?)
         })
         .flatten()
         .filter(|value| value.is_finite());
@@ -1144,6 +1417,34 @@ fn save_sqlite_ledger_at(
         },
         topup_cursor_end: ledger.topups.len(),
         baseline_source,
+        baseline_independent_source_system: if is_baseline {
+            ledger.portfolio_baseline_source_system.clone()
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.baseline_independent_source_system.clone())
+        },
+        baseline_independent_source_record_id: if is_baseline {
+            ledger.portfolio_baseline_source_record_id.clone()
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.baseline_independent_source_record_id.clone())
+        },
+        baseline_independent_source_epoch: if is_baseline {
+            ledger.portfolio_baseline_source_epoch.clone()
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.baseline_independent_source_epoch.clone())
+        },
+        baseline_independent_source_cursor: if is_baseline {
+            ledger.portfolio_baseline_source_cursor
+        } else {
+            previous
+                .as_ref()
+                .and_then(|prior| prior.baseline_independent_source_cursor)
+        },
         baseline_evidence_id,
         is_baseline,
         opening_cash_amount: if is_baseline {
@@ -1198,12 +1499,21 @@ fn save_sqlite_ledger_at(
         known_fee_fills,
         unknown_fee_fills,
         legacy_fill_rows_without_allocator_identity,
-        provenance: vec![
-            "position_manager_sqlite_fill_ledger".to_owned(),
-            "position_manager_account_api_usd_cash_baseline".to_owned(),
-            "position_manager_sqlite_usd_topup_ledger".to_owned(),
-            "position_manager_dated_carry_ledger".to_owned(),
-        ],
+        provenance: if ledger.portfolio_baseline_source_record_id.is_some() {
+            vec![
+                "position_manager_sqlite_fill_ledger".to_owned(),
+                "paper_exchange_simulator_opening_capital_v1".to_owned(),
+                "position_manager_sqlite_usd_topup_ledger".to_owned(),
+                "position_manager_dated_carry_ledger".to_owned(),
+            ]
+        } else {
+            vec![
+                "position_manager_sqlite_fill_ledger".to_owned(),
+                "position_manager_account_api_usd_cash_baseline".to_owned(),
+                "position_manager_sqlite_usd_topup_ledger".to_owned(),
+                "position_manager_dated_carry_ledger".to_owned(),
+            ]
+        },
         heartbeat_at_utc_ms: observed_at_ms,
         heartbeat_source: "position_manager_ledger_persistence_only".to_owned(),
         heartbeat_gap: heartbeat_gap && !is_baseline,
@@ -1247,6 +1557,221 @@ fn canonical_fill_sequence(fill_id: &str, epoch: &str) -> Option<u64> {
 mod ledger_snapshot_tests {
     use super::*;
 
+    #[test]
+    fn portfolio_fx_evidence_contains_only_cash_currencies() {
+        let cash = BTreeMap::from([("USD".to_owned(), 10_000.0)]);
+        let rates = BTreeMap::from([
+            ("USD".to_owned(), 1.0),
+            ("BTC".to_owned(), 60_000.0),
+            ("AAPL".to_owned(), 300.0),
+        ]);
+        let timestamps = BTreeMap::from([
+            ("USD".to_owned(), 0),
+            ("BTC".to_owned(), 1_900),
+            ("AAPL".to_owned(), 1_900),
+        ]);
+        let (rates, timestamps) = retain_cash_currency_fx_marks(&cash, rates, timestamps);
+        assert_eq!(rates, BTreeMap::from([("USD".to_owned(), 1.0)]));
+        assert_eq!(timestamps, BTreeMap::from([("USD".to_owned(), 0)]));
+    }
+
+    #[test]
+    fn usd_cash_has_fixed_parity_valuation_without_an_upstream_rate_snapshot() {
+        let (rates, timestamps) = fixed_usd_parity_fx_mark();
+        assert_eq!(rates, BTreeMap::from([("USD".to_owned(), 1.0)]));
+        assert_eq!(timestamps, BTreeMap::from([("USD".to_owned(), 0)]));
+    }
+
+    fn opening_evidence_page(amount: f64) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": "paper_exchange_financial_evidence:v1",
+            "evidence_kind": "paper_exchange_source_attributed_account_evidence",
+            "source_epoch": "pex-financial-epoch-1",
+            "cursor_kind": "financial_event",
+            "after_cursor": 0,
+            "page_complete": true,
+            "execution_history_empty": true,
+            "opening_capital_status": "explicit_simulator_opening_capital_captured",
+            "events": [{
+                "source_cursor": 1,
+                "source_system": "paper_exchange_simulator_account_configuration",
+                "source_epoch": "match-ledger-epoch-1",
+                "source_record_id": "opening-capital:paper-default",
+                "source_timestamp_utc_ms": 1_000,
+                "event": {
+                    "schema_version": "paper_exchange_financial_evidence:v1",
+                    "event_id": "opening-1",
+                    "source_system": "paper_exchange_simulator_account_configuration",
+                    "source_epoch": "match-ledger-epoch-1",
+                    "source_cursor": 1,
+                    "source_record_id": "opening-capital:paper-default",
+                    "source_timestamp_utc_ms": 1_000,
+                    "event_type": "account_balance",
+                    "portfolio_id": "paper-default",
+                    "boundary": "opening",
+                    "balances_by_currency": {"USD": amount},
+                },
+            }],
+        })
+    }
+
+    #[tokio::test]
+    async fn startup_opening_evidence_fetch_retries_transient_rsocket_unavailability() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let page = opening_evidence_page(10_000.0);
+        let page_for_fetch = page.clone();
+        let calls_for_fetch = std::sync::Arc::clone(&calls);
+        let fetched = fetch_initial_paper_evidence_with_retry(move || {
+            let calls = std::sync::Arc::clone(&calls_for_fetch);
+            let page = page_for_fetch.clone();
+            async move {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                    anyhow::bail!("RSocket not ready")
+                }
+                Ok(page)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(
+            paper_exchange_opening_capital_reference(&fetched, "paper-default", 10_000.0).is_some()
+        );
+    }
+
+    #[test]
+    fn clean_start_baseline_requires_an_exact_independent_paper_capital_event() {
+        let page = opening_evidence_page(10_000.0);
+        assert!(
+            paper_exchange_opening_capital_reference(&page, "paper-default", 10_000.0).is_some()
+        );
+        assert!(
+            paper_exchange_opening_capital_reference(&page, "paper-default", 9_999.0).is_none()
+        );
+        let mut paged_history = page.clone();
+        paged_history["page_complete"] = false.into();
+        assert!(
+            paper_exchange_opening_capital_reference(&paged_history, "paper-default", 10_000.0,)
+                .is_some()
+        );
+
+        let mut legacy_echo = page.clone();
+        legacy_echo["events"][0]["event"]["source_system"] = "position_management".into();
+        assert!(
+            paper_exchange_opening_capital_reference(&legacy_echo, "paper-default", 10_000.0)
+                .is_none()
+        );
+        let mut existing_execution = page.clone();
+        existing_execution["execution_history_empty"] = false.into();
+        assert!(
+            paper_exchange_opening_capital_reference(
+                &existing_execution,
+                "paper-default",
+                10_000.0
+            )
+            .is_none()
+        );
+        assert!(should_initialize_clean_start_baseline(&Ledger::default()));
+        let interrupted_clean_start = Ledger {
+            fill_id_epoch: Some("attempted-epoch".to_owned()),
+            portfolio_baseline_source_system: Some(
+                "paper_exchange_simulator_account_configuration".to_owned(),
+            ),
+            portfolio_baseline_source_record_id: Some("opening-capital:paper-default".to_owned()),
+            portfolio_baseline_source_epoch: Some("paper-exchange-epoch".to_owned()),
+            portfolio_baseline_source_cursor: Some(1),
+            ..Ledger::default()
+        };
+        assert!(should_initialize_clean_start_baseline(
+            &interrupted_clean_start
+        ));
+
+        let mut legacy = Ledger::default();
+        legacy.trades.push(fill("legacy", "buy", 1, 500));
+        assert!(!should_initialize_clean_start_baseline(&legacy));
+        let mut topped_up = Ledger::default();
+        topped_up.topups.push(AccountTopup {
+            amount: 1.0,
+            timestamp: 1,
+            ..AccountTopup::default()
+        });
+        assert!(!should_initialize_clean_start_baseline(&topped_up));
+        let mut ordered = Ledger::default();
+        ordered.orders.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"legacy-order", "symbol":"BTC-USDT", "side":"buy", "quantity":1.0,
+                "remaining_quantity":1.0, "limit_price":10.0, "timestamp":1
+            }))
+            .unwrap(),
+        );
+        assert!(!should_initialize_clean_start_baseline(&ordered));
+    }
+
+    #[test]
+    fn clean_start_baseline_source_link_survives_restart_without_duplicate_baseline() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-clean-baseline-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut ledger = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some(create_fill_id_epoch(1_000)),
+            ..Ledger::default()
+        };
+        ledger.portfolio_baseline_source_system =
+            Some("paper_exchange_simulator_account_configuration".to_owned());
+        ledger.portfolio_baseline_source_record_id =
+            Some("opening-capital:paper-default".to_owned());
+        ledger.portfolio_baseline_source_epoch = Some("pex-financial-epoch-1".to_owned());
+        ledger.portfolio_baseline_source_cursor = Some(1);
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+
+        let baseline = latest_portfolio_evidence(&path).unwrap();
+        assert!(baseline.is_baseline && baseline.complete);
+        assert_eq!(
+            baseline.baseline_source.as_deref(),
+            Some("paper_exchange_simulator_opening_capital_v1")
+        );
+        assert_eq!(
+            baseline.baseline_independent_source_system.as_deref(),
+            Some("paper_exchange_simulator_account_configuration")
+        );
+        assert_eq!(
+            baseline.baseline_independent_source_record_id.as_deref(),
+            Some("opening-capital:paper-default")
+        );
+        assert_eq!(
+            baseline.baseline_independent_source_epoch.as_deref(),
+            Some("pex-financial-epoch-1")
+        );
+        assert_eq!(baseline.baseline_independent_source_cursor, Some(1));
+
+        let restarted = load_sqlite_ledger(&path).unwrap();
+        assert_eq!(restarted.fill_id_epoch, ledger.fill_id_epoch);
+        assert_eq!(
+            restarted.portfolio_baseline_source_record_id,
+            ledger.portfolio_baseline_source_record_id
+        );
+        save_sqlite_ledger_at(&path, &restarted, 2_000, false).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let (rows, baselines): (i64, i64) = db.query_row(
+            "SELECT COUNT(*), SUM(CASE WHEN json_extract(payload, '$.is_baseline') = 1 THEN 1 ELSE 0 END)
+             FROM portfolio_evidence_intervals",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(baselines, 1);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
     fn fill(id: &str, side: &str, sequence: u64, timestamp: u64) -> PositionTrade {
         let mut trade: PositionTrade = serde_json::from_value(serde_json::json!({
             "id": id,
@@ -1282,6 +1807,7 @@ mod ledger_snapshot_tests {
             topups: vec![AccountTopup {
                 amount: 50.0,
                 timestamp: 800,
+                ..AccountTopup::default()
             }],
             ..Ledger::default()
         };
@@ -1298,11 +1824,13 @@ mod ledger_snapshot_tests {
         ledger.topups.push(AccountTopup {
             amount: 25.0,
             timestamp: 2_500,
+            ..AccountTopup::default()
         });
         save_sqlite_ledger_at(&path, &ledger, 3_000, false).unwrap();
         ledger.topups.push(AccountTopup {
             amount: 10.0,
             timestamp: 70_000,
+            ..AccountTopup::default()
         });
         save_sqlite_ledger_at(&path, &ledger, 70_001, false).unwrap();
 
@@ -1369,6 +1897,7 @@ mod ledger_snapshot_tests {
             topups: vec![AccountTopup {
                 amount: 50.0,
                 timestamp: 800,
+                ..AccountTopup::default()
             }],
             ..Ledger::default()
         };
@@ -1415,6 +1944,7 @@ mod ledger_snapshot_tests {
         ledger.topups.push(AccountTopup {
             amount: 25.0,
             timestamp: 31_000,
+            ..AccountTopup::default()
         });
         save_sqlite_ledger_at(&path, &ledger, 32_000, false).unwrap();
         let after_topup = latest_portfolio_evidence(&path).unwrap();
@@ -1431,10 +1961,12 @@ mod ledger_snapshot_tests {
         );
         assert!(!after_topup.portfolio_return_complete);
         assert!(after_topup.flat_cash_period_net_pnl_usd.is_none());
-        assert!(after_topup
-            .portfolio_return_completeness_reasons
-            .iter()
-            .any(|reason| reason == "closing_timestamp_aligned_fx_valuation_incomplete"));
+        assert!(
+            after_topup
+                .portfolio_return_completeness_reasons
+                .iter()
+                .any(|reason| reason == "closing_timestamp_aligned_fx_valuation_incomplete")
+        );
 
         ledger.trades.push(fill("reopen", "buy", 3, 33_000));
         ledger.fill_id_sequence = 3;
@@ -1443,10 +1975,12 @@ mod ledger_snapshot_tests {
         assert!(!after_fill.complete);
         assert_eq!(after_fill.fill_cursor_end, 3);
         assert!(after_fill.cash_movements_by_currency.contains_key("USDT"));
-        assert!(after_fill
-            .portfolio_return_completeness_reasons
-            .iter()
-            .any(|reason| reason == "open_positions_not_valued_at_interval_end"));
+        assert!(
+            after_fill
+                .portfolio_return_completeness_reasons
+                .iter()
+                .any(|reason| reason == "open_positions_not_valued_at_interval_end")
+        );
 
         save_sqlite_ledger_at(&path, &ledger, 94_001, false).unwrap();
         let after_gap = latest_portfolio_evidence(&path).unwrap();
@@ -1572,6 +2106,7 @@ mod ledger_snapshot_tests {
             topups: vec![AccountTopup {
                 amount: 50.0,
                 timestamp: 456,
+                ..AccountTopup::default()
             }],
             max_leverage: Some(3.0),
             ..Ledger::default()

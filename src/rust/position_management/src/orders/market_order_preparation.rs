@@ -14,12 +14,27 @@ async fn prepare_market_match(
 ) -> Result<PreparedMarketMatch, (StatusCode, String)> {
     let mut timings = BTreeMap::new();
     let matching_started = Instant::now();
+    let requested_parent_order_id = request.client_order_id.as_deref();
+    let execution_origin = if requested_parent_order_id.is_some_and(|id| id.starts_with("barrier-")) {
+        "protective_barrier"
+    } else if matches!(&request.order_type, OrderType::PostOnlyLimit) {
+        "match_probe"
+    } else {
+        "market_match"
+    };
+    let barrier_request_id = (execution_origin == "protective_barrier").then(|| {
+        format!("{}:barrier:{:016x}", requested_parent_order_id.unwrap(), request.quantity.to_bits())
+    });
+    let request_order_id = barrier_request_id.as_deref().or(requested_parent_order_id);
     let mut matched = paper_exchange_match(
         symbol,
         &request.side,
         request.quantity,
         options.limit_price,
-        request.client_order_id.as_deref(),
+        request_order_id,
+        (execution_origin == "protective_barrier").then_some(requested_parent_order_id).flatten(),
+        execution_origin,
+        None,
     )
     .await?;
     matched.source_reported_filled_quantity = Some(matched.filled_quantity);
@@ -240,6 +255,9 @@ async fn paper_exchange_match(
     quantity: f64,
     limit_price: Option<f64>,
     order_id: Option<&str>,
+    parent_order_id: Option<&str>,
+    execution_origin: &str,
+    execution_price_override: Option<f64>,
 ) -> Result<MatcherResponse, (StatusCode, String)> {
     let side = match side {
         TradeSide::Buy => "buy",
@@ -253,6 +271,9 @@ async fn paper_exchange_match(
             "quantity": quantity,
             "limit_price": limit_price,
             "order_id": order_id,
+            "parent_order_id": parent_order_id,
+            "execution_origin": execution_origin,
+            "execution_price_override": execution_price_override,
         }),
     )
     .await

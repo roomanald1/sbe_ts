@@ -5,6 +5,7 @@
     "decision-snapshot": "/decision-snapshot"
   },
   "autotrader": {
+    "status": "/positions/auto-trader",
     "feedback-queues": "/internal/learning-feedback-queues",
     "monitoring-metrics": "/internal/monitoring-metrics",
     "open-position-counts": "/internal/strategy/open-position-counts",
@@ -27,6 +28,10 @@
     "usd-rates": "/positions/usd-rates",
     "barriers": "/positions/barriers",
     "persistence-timing": "/internal/persistence-timing",
-    "trades": "/positions/trades"
+    "trades": "/positions/trades",
+    "portfolio-evidence-intervals": "/positions/portfolio-evidence/intervals"
+  },
+  "paper_exchange": {
+    "financial-evidence": "/internal/financial/evidence"
   }
 }
