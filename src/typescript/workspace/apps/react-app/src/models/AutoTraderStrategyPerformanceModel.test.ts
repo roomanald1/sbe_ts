@@ -3,6 +3,14 @@ import test from 'node:test';
 import { BehaviorSubject } from 'rxjs';
 import {
   AutoTraderStrategyPerformanceModel,
+  isValidatedWalkForwardProfile,
+  projectWalkForwardProfileRows,
+  projectExitProfileSnapshot,
+  projectStrategyCoverageByStrategy,
+  projectStrategyCoverageHeatmap,
+  projectStrategyOutcomeCoverage,
+  projectStrategyOutcomeHistory,
+  projectScoutOutcomeCounts,
   type StrategyPerformanceSources,
   type StrategyPerformanceStorage,
   summarizeStrategyOutcomeEvidence,
@@ -45,6 +53,222 @@ test('empty outcomes remain zero evidence and never imply reconciliation', () =>
     unknownSourceRows: 0,
     independentReconciliation: 'not-provided-by-outcomes-contract',
   });
+});
+
+test('coverage projection groups only closed audit rows and preserves source classification', () => {
+  const rows = [
+    {
+      ...outcome('strict'),
+      rowId: 'strict',
+      strategy: 'momentum',
+      symbol: 'BTC-USDT',
+      closedAt: 10,
+    },
+    {
+      ...outcome('exploratory'),
+      rowId: 'explore',
+      strategy: 'momentum',
+      symbol: 'BTC-USDT',
+      closedAt: 20,
+    },
+    {
+      ...outcome('scout'),
+      rowId: 'scout',
+      strategy: 'flow',
+      symbol: 'ETH-USDT',
+      closedAt: 15,
+    },
+    {
+      ...outcome('strict', 'Open'),
+      rowId: 'open',
+      strategy: 'momentum',
+      symbol: 'BTC-USDT',
+      closedAt: 30,
+    },
+  ] as AutoTraderOutcome[];
+  assert.deepEqual(projectStrategyOutcomeCoverage(rows), [
+    {
+      strategy: 'flow',
+      symbol: 'ETH-USDT',
+      closedAuditRows: 1,
+      strictRows: 0,
+      exploratoryRows: 0,
+      scoutRows: 1,
+      carryRows: 0,
+      unknownRows: 0,
+      latestClosedAt: 15,
+    },
+    {
+      strategy: 'momentum',
+      symbol: 'BTC-USDT',
+      closedAuditRows: 2,
+      strictRows: 1,
+      exploratoryRows: 1,
+      scoutRows: 0,
+      carryRows: 0,
+      unknownRows: 0,
+      latestClosedAt: 20,
+    },
+  ]);
+  const coverage = projectStrategyOutcomeCoverage(rows);
+  assert.deepEqual(projectStrategyCoverageByStrategy(coverage), [
+    { strategy: 'flow', closedAuditRows: 1 },
+    { strategy: 'momentum', closedAuditRows: 2 },
+  ]);
+  assert.deepEqual(projectStrategyCoverageHeatmap(coverage), {
+    symbols: ['BTC-USDT', 'ETH-USDT'],
+    rows: [
+      {
+        strategy: 'flow',
+        cells: [
+          { symbol: 'BTC-USDT', closedAuditRows: 0, intensity: 0 },
+          { symbol: 'ETH-USDT', closedAuditRows: 1, intensity: 3 },
+        ],
+      },
+      {
+        strategy: 'momentum',
+        cells: [
+          { symbol: 'BTC-USDT', closedAuditRows: 2, intensity: 5 },
+          { symbol: 'ETH-USDT', closedAuditRows: 0, intensity: 0 },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(
+    projectStrategyOutcomeHistory(rows, 1).map((row) => row.rowId),
+    [rows[1].rowId],
+  );
+});
+
+test('walk-forward validation does not promote incomplete or missing evidence', () => {
+  assert.equal(isValidatedWalkForwardProfile(undefined), null);
+  assert.equal(
+    isValidatedWalkForwardProfile({
+      sampleCount: 100,
+      lastSampleTimestampMs: 10,
+      finalHoldoutStatus: 'validated',
+      historyCoverage: 'complete',
+      costCoverage: 'complete',
+      searchFamilyCoverage: 'complete',
+      oosFoldCount: 3,
+      effectiveSampleSize: 20,
+    }),
+    true,
+  );
+  assert.equal(
+    isValidatedWalkForwardProfile({
+      sampleCount: 100,
+      lastSampleTimestampMs: 10,
+      finalHoldoutStatus: 'validated',
+      historyCoverage: 'complete',
+      costCoverage: 'partial',
+      searchFamilyCoverage: 'complete',
+      oosFoldCount: 3,
+      effectiveSampleSize: 20,
+    }),
+    false,
+  );
+});
+
+test('exit policy snapshot exposes profile parameters without inventing validation', () => {
+  const [row] = projectExitProfileSnapshot([
+    {
+      symbol: 'BTC-USDT',
+      strategy: 'live-momentum',
+      profile_id: 'p-1',
+      profile_version: 3,
+      learning_samples: 10,
+      realized_pnl: 0,
+      parameters: [
+        {
+          key: 'stop_loss',
+          label: 'Stop loss',
+          value: 0.42,
+          learned_value: 0.42,
+          default_value: 0.5,
+          min: 0.1,
+          max: 1,
+          step: 0.1,
+          unit: '%',
+          overridden: false,
+        },
+        {
+          key: 'entry_score',
+          label: 'Entry score',
+          value: 5,
+          learned_value: 5,
+          default_value: 4,
+          min: 0,
+          max: 10,
+          step: 1,
+          unit: '',
+          overridden: false,
+        },
+      ],
+      walk_forward_evidence: null,
+    },
+  ]);
+  assert.deepEqual(row, {
+    symbol: 'BTC-USDT',
+    strategy: 'live-momentum',
+    profile: 'p-1 · v3',
+    parameters: [{ label: 'Stop loss', value: 0.42, unit: '%' }],
+    effectiveSamples: null,
+    validation: 'unavailable',
+  });
+});
+
+test('Scout evidence remains separated as raw counts with no inferred gains', () => {
+  assert.deepEqual(
+    projectScoutOutcomeCounts([
+      { strategy: 'zeta', count: 3, positive: 1 },
+      { strategy: 'alpha', count: 2, positive: 2 },
+      { strategy: 'invalid', count: Number.NaN, positive: 4 },
+    ]),
+    [
+      { strategy: 'alpha', outcomes: 2, positiveOutcomes: 2 },
+      { strategy: 'zeta', outcomes: 3, positiveOutcomes: 1 },
+    ],
+  );
+});
+
+test('projects walk-forward rows from declared profile evidence and preserves missing values', () => {
+  const rows = projectWalkForwardProfileRows([
+    {
+      symbol: 'BTC-USDT',
+      strategy: 'live-momentum',
+      learning_samples: 0,
+      realized_pnl: 0,
+      parameters: [],
+      walk_forward_evidence: {
+        sampleCount: 37,
+        positiveNetRate: 0.6,
+        averageNetReturnPercent: 0.12,
+        expectancyCiLowPercent: 0.04,
+        expectancyCiHighPercent: 0.18,
+        effectiveSampleSize: 24.5,
+        windowCount: 8,
+        maxDrawdownPercent: -2.1,
+        downsideLossPercent: -0.4,
+        lastSampleTimestampMs: 1_800_000_000_000,
+      },
+    },
+    {
+      symbol: 'ETH-USDT',
+      strategy: 'live-momentum',
+      learning_samples: 0,
+      realized_pnl: 0,
+      parameters: [],
+      walk_forward_evidence: null,
+    },
+  ]);
+
+  assert.equal(rows[0].samples, 37);
+  assert.equal(rows[0].winRate, 0.6);
+  assert.equal(rows[0].averageNet, 0.12);
+  assert.equal(rows[0].expectancyCiLowPercent, 0.04);
+  assert.equal(rows[1].samples, null);
+  assert.equal(rows[1].winRate, null);
 });
 
 type FakeSource<T> = {
@@ -183,6 +407,18 @@ test('filter and column settings persist independently per widget instance', () 
   first.model.dispose();
   second.model.dispose();
   restored.model.dispose();
+});
+
+test('view tab selection belongs to the model lifecycle', () => {
+  const { model } = createModel('view-state');
+  assert.equal(model.state$.value.view, 'performance');
+  model.setView('heatmap');
+  assert.equal(model.state$.value.view, 'heatmap');
+  model.setView('history');
+  assert.equal(model.state$.value.view, 'history');
+  model.setSourceView('scouts');
+  assert.equal(model.state$.value.sourceView, 'scouts');
+  model.dispose();
 });
 
 test('storage failures leave the view usable and expose the persistence error', () => {

@@ -111,80 +111,57 @@ function usesSignalManagedExits(position: AutoTraderOutcome): boolean {
   );
 }
 
-function protectedMarkers(position: AutoTraderOutcome) {
-  const sign = directionSign(position);
-  const signalManagedExits = usesSignalManagedExits(position);
-  const markers: Array<{
-    label: string;
-    value: number;
-    kind: 'stop' | 'target' | 'dynamic';
-  }> = [];
-  if (
-    !signalManagedExits &&
-    finite(position.selectedStopLossPercent) &&
-    position.selectedStopLossPercent > 0
-  ) {
-    markers.push({
-      label: 'SL',
-      value: -sign * position.selectedStopLossPercent,
-      kind: 'stop',
-    });
-  }
-  if (
-    !signalManagedExits &&
-    finite(position.selectedTakeProfitPercent) &&
-    position.selectedTakeProfitPercent > 0
-  ) {
-    markers.push({
-      label: 'TP',
-      value: sign * position.selectedTakeProfitPercent,
-      kind: 'target',
-    });
-  }
-  const trigger = position.currentPmBarrier?.trigger_price;
-  if (finite(trigger) && position.entryPrice > 0) {
-    const threshold =
-      ((trigger - position.entryPrice) / position.entryPrice) * sign * 100;
-    const latest = position.currentPmBarrier?.trigger_adjustments?.at(-1);
-    markers.push({
-      label: latest?.reason ? `PM ${latest.reason}` : 'PM trigger',
-      value: threshold,
-      kind: 'dynamic',
-    });
-  }
-  return markers;
-}
-
-function netBar(position: AutoTraderOutcome) {
-  const markers = protectedMarkers(position);
-  if (markers.length === 0) {
-    return (
-      <span className="orders-positions-mark-unavailable">
-        Net mark unavailable ·{' '}
-        {usesSignalManagedExits(position)
-          ? 'signal managed'
-          : 'protection thresholds unavailable'}
-      </span>
-    );
-  }
+function netBar(position: AutoTraderOutcome, stale = false) {
+  const operational = position.operationalPosition;
+  const returnPercent = operational?.net_edge_vs_breakeven_percent;
+  const protectionMarkers = (operational?.protection_markers ?? []).flatMap(
+    (marker, index) => {
+      const value = marker.projected_net_return_percent;
+      if (!finite(value)) return [];
+      const orderKind = (marker.order_kind ?? '').toLowerCase();
+      const kind = /stop|loss/.test(orderKind)
+        ? 'stop'
+        : /take|profit/.test(orderKind)
+          ? 'target'
+          : 'dynamic';
+      return [
+        {
+          label: `PM ${marker.order_kind ?? `trigger ${index + 1}`}`,
+          value,
+          kind: kind as 'stop' | 'target' | 'dynamic',
+        },
+      ];
+    },
+  );
+  const markers = [
+    ...(finite(returnPercent)
+      ? [{ label: 'Close now', value: returnPercent, kind: 'current' as const }]
+      : []),
+    ...protectionMarkers,
+  ];
   const maxAbs =
     Math.max(1, ...markers.map((marker) => Math.abs(marker.value))) * 1.15;
-  const stop = markers.find((marker) => marker.kind === 'stop')?.value;
-  const target = markers.find((marker) => marker.kind === 'target')?.value;
+  const mark = operational?.executable_mark;
+  const markLabel = finite(mark)
+    ? `Executable ${operational?.executable_close_side ?? 'close'} ${number(mark, 6)} ${operational?.quote_currency ?? position.pnlQuoteCurrency}`
+    : operational
+      ? 'Executable mark unavailable'
+      : 'No exact PM operational identity linked';
+  const currentLabel = finite(returnPercent)
+    ? `Close now ${returnPercent >= 0 ? '+' : ''}${number(returnPercent, 3)}% · ${money(operational?.net_unrealized_usd)}`
+    : `${markLabel} · net return unavailable`;
   return (
     <InlineNetPnlBar
       min={-maxAbs}
       max={maxAbs}
-      currentLabel={`Close now ${unavailable} · executable net mark unavailable`}
-      markers={[
-        ...(stop === undefined
-          ? []
-          : [{ label: 'SL', value: stop, kind: 'stop' as const }]),
-        ...(target === undefined
-          ? []
-          : [{ label: 'TP', value: target, kind: 'target' as const }]),
-        ...markers.filter((marker) => marker.kind === 'dynamic'),
-      ]}
+      currentLabel={stale ? `${currentLabel} · stale snapshot` : currentLabel}
+      breakevenAt={finite(returnPercent) ? 0 : undefined}
+      breakevenLabel={
+        finite(returnPercent)
+          ? 'Net breakeven 0.000%'
+          : 'Net breakeven unavailable'
+      }
+      markers={[...markers]}
     />
   );
 }
@@ -192,9 +169,11 @@ function netBar(position: AutoTraderOutcome) {
 function OpenRowDetails({
   position,
   state,
+  nowMs,
 }: {
   position: AutoTraderOutcome;
   state: OrdersPositionsState;
+  nowMs: number;
 }) {
   const barriers = barriersForPosition(
     position,
@@ -204,10 +183,17 @@ function OpenRowDetails({
   const lifecycle = identity(position.ledgerTrade?.lifecycle);
   const provenance = position.exitParameterProvenance;
   const protection = position.currentPmBarrier;
+  const operational = position.operationalPosition;
   const signalManagedExits = usesSignalManagedExits(position);
   return (
-    <ExpandableDetails label="Details · profile, protection and lineage">
+    <ExpandableDetails label="Details">
       <dl className="operator-details-grid">
+        <div>
+          <dt>Symbol / strategy</dt>
+          <dd>
+            {position.symbol} / {position.strategy}
+          </dd>
+        </div>
         <div>
           <dt>Profile / version / selection</dt>
           <dd>
@@ -288,6 +274,159 @@ function OpenRowDetails({
           </dd>
         </div>
         <div>
+          <dt>Operational position identity</dt>
+          <dd>
+            {value(operational?.position_identity)} ·{' '}
+            {operational
+              ? `${state.operationalSummary?.stale ? 'Stale · ' : ''}Captured ${stamp(state.operationalSummary?.capturedAtMs)}`
+              : 'No unique canonical trade ID match; symbol-only match withheld'}
+          </dd>
+        </div>
+        <div>
+          <dt>Entry notional</dt>
+          <dd>
+            {finite(operational?.entry_value_usd)
+              ? money(operational.entry_value_usd)
+              : finite(operational?.entry_value_quote)
+                ? money(
+                    operational.entry_value_quote,
+                    operational.quote_currency ?? position.pnlQuoteCurrency,
+                  )
+                : money(position.entryNotionalUsd)}
+          </dd>
+        </div>
+        <div>
+          <dt>Executable mark</dt>
+          <dd>
+            {finite(operational?.executable_mark)
+              ? `${value(operational.executable_close_side)} ${number(operational.executable_mark, 6)} ${value(operational.quote_currency)} · ${number(operational.mark_age_ms, 0)} ms old · ${value(operational.mark_source_record_id)}`
+              : unavailable}
+          </dd>
+        </div>
+        <div>
+          <dt>Gross / net unrealised</dt>
+          <dd>
+            {finite(operational?.gross_unrealized_quote)
+              ? money(
+                  operational.gross_unrealized_quote,
+                  operational.quote_currency ?? position.pnlQuoteCurrency,
+                )
+              : unavailable}{' '}
+            /{' '}
+            {finite(operational?.net_unrealized_quote)
+              ? money(
+                  operational.net_unrealized_quote,
+                  operational.quote_currency ?? position.pnlQuoteCurrency,
+                )
+              : unavailable}{' '}
+            ({money(operational?.net_unrealized_usd)})
+          </dd>
+        </div>
+        <div>
+          <dt>Signed / gross exposure</dt>
+          <dd>
+            {finite(operational?.signed_exposure_usd)
+              ? money(operational.signed_exposure_usd)
+              : unavailable}{' '}
+            /{' '}
+            {finite(operational?.gross_exposure_usd)
+              ? money(operational.gross_exposure_usd)
+              : unavailable}
+          </dd>
+        </div>
+        <div>
+          <dt>Valuation evidence</dt>
+          <dd>
+            {value(operational?.valuation_status)} ·{' '}
+            {operational?.valuation_reasons?.join(', ') ||
+              value(operational?.net_pnl_cost_scope)}
+          </dd>
+        </div>
+        <div>
+          <dt>Executable source</dt>
+          <dd>
+            {value(operational?.mark_source_system)} /{' '}
+            {value(operational?.mark_source_epoch)} /{' '}
+            {value(operational?.mark_source_cursor)} /{' '}
+            {value(operational?.mark_source_record_id)} ·{' '}
+            {stamp(operational?.mark_updated_at_ms)}
+          </dd>
+        </div>
+        <div>
+          <dt>Quote FX evidence</dt>
+          <dd>
+            {number(operational?.quote_fx_rate, 8)} ·{' '}
+            {stamp(operational?.quote_fx_updated_at_ms)} ·{' '}
+            {value(operational?.quote_fx_source_record_id)}
+          </dd>
+        </div>
+        <div>
+          <dt>Net P&amp;L cost scope</dt>
+          <dd>{value(operational?.net_pnl_cost_scope)}</dd>
+        </div>
+        <div>
+          <dt>Fee evidence</dt>
+          <dd>
+            {number(operational?.entry_fees_quote, 6)}{' '}
+            {value(operational?.quote_currency)} entry fees · close rate{' '}
+            {number(operational?.projected_exit_fee_rate, 6)} ·{' '}
+            {value(operational?.fee_schedule_status)} ·{' '}
+            {number(operational?.known_fee_fills, 0)} known /{' '}
+            {number(operational?.unknown_fee_fills, 0)} unknown fills
+          </dd>
+        </div>
+        <div>
+          <dt>Exit fee schedule evidence</dt>
+          <dd>
+            {value(operational?.exit_fee_schedule_id)} v
+            {value(operational?.exit_fee_schedule_version)} ·{' '}
+            {value(operational?.exit_fee_schedule_source_epoch)} /{' '}
+            {value(operational?.exit_fee_schedule_source_cursor)} /{' '}
+            {value(operational?.exit_fee_schedule_source_record_id)} ·{' '}
+            {stamp(operational?.exit_fee_schedule_source_timestamp_ms)}
+          </dd>
+        </div>
+        <div>
+          <dt>Protection exception</dt>
+          <dd>
+            {operational?.protection_exception === true
+              ? `Exception · ${value(operational.protection_status)}`
+              : operational?.protection_exception === false
+                ? value(operational.protection_status)
+                : unavailable}
+          </dd>
+        </div>
+        <div>
+          <dt>Protection orders</dt>
+          <dd>
+            {operational?.protection_orders?.length
+              ? operational.protection_orders
+                  .map(
+                    (order) =>
+                      `${value(order.id)} · ${value(order.order_kind)} · ${value(order.status)}${order.error ? ` · ${order.error}` : ''}`,
+                  )
+                  .join('; ')
+              : value(operational?.protection_status)}
+          </dd>
+        </div>
+        <div>
+          <dt>Entry fees / initial risk</dt>
+          <dd>
+            {finite(position.entryFees)
+              ? money(position.entryFees, position.pnlQuoteCurrency)
+              : unavailable}{' '}
+            /{' '}
+            {position.initialRiskEvidence?.eligibleForRMultiple &&
+            finite(position.initialRiskEvidence.quoteAmount)
+              ? `${money(position.initialRiskEvidence.quoteAmount, position.initialRiskEvidence.quoteCurrency ?? position.pnlQuoteCurrency)} · eligible`
+              : value(position.initialRiskEvidence?.eligibilityStatus)}
+          </dd>
+        </div>
+        <div>
+          <dt>Holding duration</dt>
+          <dd>{duration(position.openedAt, nowMs)}</dd>
+        </div>
+        <div>
           <dt>Entry / quantity / quote</dt>
           <dd>
             {number(position.entryPrice, 6)} /{' '}
@@ -299,6 +438,25 @@ function OpenRowDetails({
           <dt>Entry timestamp / execution mode</dt>
           <dd>
             {stamp(position.openedAt)} / {value(position.executionMode)}
+          </dd>
+        </div>
+        <div>
+          <dt>Technical IDs</dt>
+          <dd>
+            <details className="operator-row-details">
+              <summary>Expand / copy</summary>
+              <div className="orders-positions-ids">
+                <code>Position {position.rowId}</code>
+                <code>Decision {position.decisionId}</code>
+                {position.tradeId && <code>Trade {position.tradeId}</code>}
+                {position.opportunityId && (
+                  <code>Opportunity {position.opportunityId}</code>
+                )}
+                {position.episodeId && (
+                  <code>Episode {position.episodeId}</code>
+                )}
+              </div>
+            </details>
           </dd>
         </div>
       </dl>
@@ -388,10 +546,15 @@ function OpenPositionsTable({
         {rows.map((position) => (
           <tr key={position.rowId}>
             <td>
-              <strong>{position.symbol}</strong>
+              <strong title={position.symbol}>{position.symbol}</strong>
               <br />
-              <span className="operator-muted">{position.strategy}</span>
-              <OpenRowDetails position={position} state={state} />
+              <span
+                className="operator-muted open-position-strategy"
+                title={position.strategy}
+              >
+                {position.strategy}
+              </span>
+              <OpenRowDetails position={position} state={state} nowMs={nowMs} />
             </td>
             <td
               className={
@@ -407,96 +570,36 @@ function OpenPositionsTable({
                   : value(position.direction)}
             </td>
             <td>
-              {money(position.entryNotionalUsd)}
-              <small> entry</small>
+              {finite(position.operationalPosition?.entry_value_usd) ? (
+                <>
+                  {money(position.operationalPosition.entry_value_usd)}
+                  <small> entry</small>
+                </>
+              ) : finite(position.operationalPosition?.entry_value_quote) ? (
+                <>
+                  {money(
+                    position.operationalPosition.entry_value_quote,
+                    position.operationalPosition.quote_currency ??
+                      position.pnlQuoteCurrency,
+                  )}
+                  <small> entry</small>
+                </>
+              ) : finite(position.entryNotionalUsd) ? (
+                <>
+                  {money(position.entryNotionalUsd)}
+                  <small> entry</small>
+                </>
+              ) : (
+                unavailable
+              )}
             </td>
             <td>{duration(position.openedAt, nowMs)}</td>
-            <td>{netBar(position)}</td>
+            <td>{netBar(position, state.operationalSummary?.stale)}</td>
             <td>{entryMode(position)}</td>
           </tr>
         ))}
       </tbody>
     </CompactTable>
-  );
-}
-
-function SinglePositionContext({ position }: { position: AutoTraderOutcome }) {
-  const risk = position.initialRiskEvidence;
-  const signalManaged = usesSignalManagedExits(position);
-  return (
-    <div
-      className="orders-positions-context-grid"
-      aria-label={`Position context for ${position.symbol}`}
-    >
-      <section>
-        <h3>Exit policy · {position.symbol}</h3>
-        <dl>
-          <div>
-            <dt>Profile</dt>
-            <dd>
-              {value(profileId(position))} ·{' '}
-              {value(
-                position.entryProfileVersion ?? position.exitProfileVersion,
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Initial risk</dt>
-            <dd>
-              {risk?.eligibleForRMultiple && finite(risk.quoteAmount)
-                ? `${money(risk.quoteAmount, risk.quoteCurrency ?? position.pnlQuoteCurrency)} · eligible for R`
-                : value(risk?.eligibilityStatus)}
-            </dd>
-          </div>
-          <div>
-            <dt>Protection</dt>
-            <dd>
-              {signalManaged
-                ? 'Signal managed'
-                : position.currentPmBarrier?.id
-                  ? value(position.currentPmBarrier.status)
-                  : 'Unavailable · no exact barrier link'}
-            </dd>
-          </div>
-        </dl>
-      </section>
-      <section>
-        <h3>Execution &amp; evidence</h3>
-        <dl>
-          <div>
-            <dt>Entry fee</dt>
-            <dd>
-              {finite(position.entryFees)
-                ? `${number(position.entryFees, 6)} ${position.pnlQuoteCurrency}`
-                : unavailable}
-            </dd>
-          </div>
-          <div>
-            <dt>Executable mark</dt>
-            <dd>Unavailable · no executable quote in this position contract</dd>
-          </div>
-          <div>
-            <dt>Technical IDs</dt>
-            <dd>
-              <details className="operator-row-details">
-                <summary>Expand / copy</summary>
-                <div className="orders-positions-ids">
-                  <code>Position {position.rowId}</code>
-                  <code>Decision {position.decisionId}</code>
-                  {position.tradeId && <code>Trade {position.tradeId}</code>}
-                  {position.opportunityId && (
-                    <code>Opportunity {position.opportunityId}</code>
-                  )}
-                  {position.episodeId && (
-                    <code>Episode {position.episodeId}</code>
-                  )}
-                </div>
-              </details>
-            </dd>
-          </div>
-        </dl>
-      </section>
-    </div>
   );
 }
 
@@ -506,9 +609,16 @@ function ClosedRowDetails({
   position: OrdersPositionsState['closedPositions'][number];
 }) {
   const lifecycle = identity(position.ledgerTrade?.lifecycle);
+  const risk = position.initialRiskEvidence;
   return (
-    <ExpandableDetails label="Details · ledger and attribution">
+    <ExpandableDetails label="Details">
       <dl className="operator-details-grid">
+        <div>
+          <dt>Symbol / strategy</dt>
+          <dd>
+            {position.symbol} / {position.strategy}
+          </dd>
+        </div>
         <div>
           <dt>Trade / decision / opportunity / episode</dt>
           <dd>
@@ -546,8 +656,38 @@ function ClosedRowDetails({
           <dd>Unavailable in this position contract</dd>
         </div>
         <div>
+          <dt>Net return</dt>
+          <dd>Unavailable in this position contract</dd>
+        </div>
+        <div>
+          <dt>Realised R multiple</dt>
+          <dd>
+            {risk?.eligibleForRMultiple
+              ? 'Initial risk is eligible; realised R remains unavailable'
+              : value(risk?.eligibilityStatus)}
+          </dd>
+        </div>
+        <div>
+          <dt>Initial risk</dt>
+          <dd>
+            {finite(risk?.quoteAmount)
+              ? `${money(risk.quoteAmount, risk.quoteCurrency ?? position.pnlQuoteCurrency)} · ${value(risk.eligibilityStatus)}`
+              : unavailable}
+          </dd>
+        </div>
+        <div>
           <dt>Learning eligibility</dt>
           <dd>Unavailable in this position contract</dd>
+        </div>
+        <div>
+          <dt>Executable path evidence</dt>
+          <dd>
+            {position.executablePricePathEvidence?.complete
+              ? `${position.executablePricePathEvidence.retainedSampleCount} / ${position.executablePricePathEvidence.totalSampleCount} complete samples`
+              : position.executablePricePathEvidence
+                ? `${position.executablePricePathEvidence.retainedSampleCount} / ${position.executablePricePathEvidence.totalSampleCount} samples · incomplete`
+                : 'Unavailable'}
+          </dd>
         </div>
         <div>
           <dt>MFE / MAE</dt>
@@ -628,10 +768,17 @@ function ClosedPositionsTable({
           return (
             <tr key={position.rowId}>
               <td>
-                <strong>{position.symbol}</strong>
+                <strong title={position.symbol}>{position.symbol}</strong>
                 <ClosedRowDetails position={position} />
               </td>
-              <td>{position.strategy}</td>
+              <td>
+                <span
+                  className="closed-strategy-text"
+                  title={position.strategy}
+                >
+                  {position.strategy}
+                </span>
+              </td>
               <td>
                 {position.direction === 'bullish'
                   ? 'Long'
@@ -662,10 +809,25 @@ function ClosedPositionsTable({
                   ? `${number(path.grossExecutableMaePercent, 2)}%`
                   : unavailable}
               </td>
-              <td>{value(position.exitReason)}</td>
               <td>
-                {path?.complete ? 'Path complete' : 'Path incomplete'}
-                {risk?.eligibleForRMultiple ? ' · R eligible' : ''}
+                <span
+                  className="closed-exit-text"
+                  title={value(position.exitReason)}
+                >
+                  {value(position.exitReason)}
+                </span>
+              </td>
+              <td>
+                <span
+                  className="closed-evidence"
+                  title={
+                    (path?.complete ? 'Path complete' : 'Path incomplete') +
+                    (risk?.eligibleForRMultiple ? ' · R eligible' : '')
+                  }
+                >
+                  {path?.complete ? 'Path complete' : 'Path incomplete'}
+                  {risk?.eligibleForRMultiple ? ' · R eligible' : ''}
+                </span>
               </td>
             </tr>
           );
@@ -896,13 +1058,41 @@ export function OrdersPositionsPanel({
             value: openRows.length,
           },
           { label: 'Pending', value: state.history.activeOrders.length },
-          { label: 'Exposure', value: unavailable },
-          { label: 'Net unrealised', value: unavailable },
-          { label: 'Protection exceptions', value: unavailable },
+          {
+            label: 'Exposure',
+            value: finite(state.operationalSummary?.grossExposureUsd)
+              ? money(state.operationalSummary.grossExposureUsd)
+              : unavailable,
+            detail:
+              state.operationalSummary?.error ??
+              state.operationalSummary?.valuationStatus ??
+              'Operational valuation unavailable',
+          },
+          {
+            label: 'Net unrealised',
+            value: finite(state.operationalSummary?.netUnrealizedUsd)
+              ? money(state.operationalSummary.netUnrealizedUsd)
+              : unavailable,
+            detail:
+              state.operationalSummary?.error ??
+              state.operationalSummary?.valuationReasons?.join(', ') ??
+              'Operational valuation unavailable',
+          },
+          {
+            label: 'Protection exceptions',
+            value: finite(state.operationalSummary?.protectionExceptionCount)
+              ? state.operationalSummary.protectionExceptionCount
+              : unavailable,
+            detail:
+              state.operationalSummary === null
+                ? 'Operational protection unavailable'
+                : 'Current PM barrier status',
+          },
         ];
   return (
     <div className="orders-positions-redesign" data-view={tab}>
       <OperatorPanel
+        hideTitle
         title={
           tab === 'closed'
             ? 'Orders & positions · closed'
@@ -986,9 +1176,6 @@ export function OrdersPositionsPanel({
                 nowMs={nowMs}
                 onSort={onOpenSort}
               />
-              {openRows.length === 1 && (
-                <SinglePositionContext position={openRows[0]} />
-              )}
             </>
           ) : (
             <p role="status" className="operator-muted">

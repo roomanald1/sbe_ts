@@ -317,6 +317,7 @@ fn is_allowed_route(method: &Method, path: &str) -> bool {
                 "/positions/auto-trader/missed-opportunity-bands"
             )
             | (&Method::GET, "/positions/auto-trader/activity")
+            | (&Method::GET, "/positions/auto-trader/trade-price-path")
             | (&Method::GET, "/internal/monitoring-metrics")
             | (&Method::GET, "/internal/learning-feedback-queues")
             | (&Method::GET, "/internal/strategy/open-position-counts")
@@ -460,6 +461,10 @@ mod tests {
         assert!(is_allowed_route(
             &Method::GET,
             "/positions/auto-trader/activity"
+        ));
+        assert!(is_allowed_route(
+            &Method::GET,
+            "/positions/auto-trader/trade-price-path?trade_id=t"
         ));
         assert!(is_allowed_route(
             &Method::GET,

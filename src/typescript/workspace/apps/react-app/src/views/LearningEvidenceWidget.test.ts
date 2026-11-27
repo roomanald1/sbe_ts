@@ -162,10 +162,7 @@ describe('LearningEvidenceView', () => {
       evidenceMarkup,
       /Sample counts and eligibility are not assumed to be zero/,
     );
-    assert.match(
-      promotionMarkup,
-      /Accepted evidence gains and promotion history are unavailable/,
-    );
+    assert.match(promotionMarkup, /Promotion status unavailable/);
     assert.doesNotMatch(promotionMarkup, /Actual promotion count: 0/);
   });
 
@@ -194,18 +191,16 @@ describe('LearningEvidenceView', () => {
       createElement(LearningEvidenceView, { view, tab: 'promotion' }),
     );
     assert.match(activityMarkup, /Completed; evidence acceptance is separate/);
-    assert.match(evidenceMarkup, /Raw samples/);
-    assert.match(evidenceMarkup, /Effective samples/);
-    assert.match(historyMarkup, /12 reported Scout outcomes/);
+    assert.match(evidenceMarkup, /Raw N/);
+    assert.match(evidenceMarkup, /Effective N/);
+    assert.match(historyMarkup, /Reported outcomes/);
+    assert.match(historyMarkup, /12/);
     assert.match(
       historyMarkup,
-      /aria-label="Profile-linked actual trading outcomes"/i,
+      /aria-label="Profile-linked actual trade outcome summaries"/i,
     );
-    assert.match(historyMarkup, /not cadence or accepted-gain measurements/);
+    assert.match(historyMarkup, /not accepted independent gain/);
     assert.doesNotMatch(historyMarkup, /99 Scout outcomes/);
-    assert.match(
-      promotionMarkup,
-      /Accepted evidence gains and promotion history are unavailable/,
-    );
+    assert.match(promotionMarkup, /Promotion status unavailable/);
   });
 });

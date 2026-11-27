@@ -13,28 +13,36 @@ import { CapitalAllocationView } from './AutoTraderAllocationView';
 
 export function CapitalAllocationPanel({
   state,
+  onSetTab,
+  onSetGroupBy,
 }: {
   state: CapitalAllocationWidgetState;
+  onSetTab: (tab: CapitalAllocationWidgetState['tab']) => void;
+  onSetGroupBy: (groupBy: CapitalAllocationWidgetState['groupBy']) => void;
 }) {
   const autonomous = state.capitalAllocation?.model === 'shared_pool';
   return (
     <OperatorPanel
-      title="Capital allocation"
-      context="All eligible strategies, symbols and horizons"
+      hideTitle
+      title="Autonomous capital allocation"
+      context="Paper · shared pool"
       status={
-        <OperatorStatus tone={autonomous ? 'positive' : 'warning'}>
-          {autonomous ? 'Autonomous' : 'Allocation contract unavailable'}
+        <OperatorStatus
+          tone={state.loading ? 'neutral' : autonomous ? 'positive' : 'warning'}
+        >
+          {state.loading
+            ? 'Loading'
+            : autonomous
+              ? 'Autonomous'
+              : 'Allocation unavailable'}
         </OperatorStatus>
       }
     >
       <CapitalAllocationView
-        allocation={state.capitalAllocation}
-        availableNotional={state.availableNotional}
+        state={state}
+        onSetTab={onSetTab}
+        onSetGroupBy={onSetGroupBy}
       />
-      <p>
-        Global order, daily loss and position limits remain in Auto Trader
-        Controls.
-      </p>
     </OperatorPanel>
   );
 }
@@ -54,5 +62,11 @@ export function CapitalAllocationWidget({
     return () => model.stop();
   }, [model]);
   const state = useBehaviorSnapshot(model.state$);
-  return <CapitalAllocationPanel state={state} />;
+  return (
+    <CapitalAllocationPanel
+      state={state}
+      onSetTab={(tab) => model.setTab(tab)}
+      onSetGroupBy={(groupBy) => model.setGroupBy(groupBy)}
+    />
+  );
 }

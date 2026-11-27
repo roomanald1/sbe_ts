@@ -77,7 +77,6 @@ struct ReplayObservation {
     entry_price: f64,
     quantity: f64,
     entry_fees: f64,
-    counterfactual_exit_fee_rate: f64,
     initial_risk_quote: Option<f64>,
     initial_risk_currency: Option<String>,
     quote_currency: Option<String>,
@@ -122,8 +121,8 @@ struct Quote {
 
 #[derive(Clone, Debug)]
 struct CounterfactualExitFeeAttribution {
-    rate: f64,
-    fee_currency: String,
+    rate_by_timestamp: BTreeMap<u64, f64>,
+    fee_currency_by_timestamp: BTreeMap<u64, String>,
     quote_currency: String,
     fx_rate_to_quote_by_timestamp: BTreeMap<u64, Option<f64>>,
 }
@@ -811,6 +810,10 @@ where
         .iter()
         .filter_map(|value| gross_only_excursion_for_observation(value, symbol, strategy_name))
         .collect::<Vec<_>>();
+    let fee_schedule_covered = matching
+        .iter()
+        .filter(|value| counterfactual_exit_fee_contract_complete(value))
+        .count();
     for (key, index) in [
         ("gross_executable_mfe_percent", 0),
         ("gross_executable_mae_percent", 1),
@@ -838,7 +841,9 @@ where
                     "pre_exit_price_path.ask",
                     "entry_context.average_price",
                 ],
-                Some("gross excursion only; fee-adjusted attribution requires a sourced versioned schedule"),
+                Some(
+                    "gross excursion only; fee-adjusted attribution requires a sourced versioned schedule",
+                ),
             ),
         );
     }
@@ -856,8 +861,8 @@ where
         .filter(|value| {
             value["pre_exit_price_path_evidence"]["complete"].as_bool() == Some(true)
                 && value["price_path_evidence"]["complete"].as_bool() == Some(true)
-                && value["pre_exit_price_path"].as_array().is_some()
-                && value["price_path"].as_array().is_some()
+                && is_supported_quote_path(&value["pre_exit_price_path"])
+                && is_supported_quote_path(&value["price_path"])
         })
         .count();
     let initial_risk_covered = matching
@@ -899,7 +904,7 @@ where
     for (key, covered, source, unavailable_reason) in [
         (
             "counterfactual_exit_fee_schedule_source_coverage_percent",
-            complete_samples,
+            fee_schedule_covered,
             "counterfactual_exit_fee_attribution",
             "sourced versioned fee schedule and quote-aligned order-class attribution are required",
         ),
@@ -1028,16 +1033,16 @@ fn valid_evidence_identifier(value: Option<&str>) -> bool {
     })
 }
 
-fn fee_schedule_covers(attribution: &Value, timestamp_ms: u64) -> bool {
-    let Some(effective_from) = attribution["effective_from_utc_ms"].as_u64() else {
+fn fee_schedule_covers(schedule: &Value, timestamp_ms: u64) -> bool {
+    let Some(effective_from) = schedule["effective_from_utc_ms"].as_u64() else {
         return false;
     };
-    if !attribution["effective_to_utc_ms"].is_null()
-        && attribution["effective_to_utc_ms"].as_u64().is_none()
+    if !schedule["effective_to_utc_ms"].is_null()
+        && schedule["effective_to_utc_ms"].as_u64().is_none()
     {
         return false;
     }
-    let effective_to = attribution["effective_to_utc_ms"].as_u64();
+    let effective_to = schedule["effective_to_utc_ms"].as_u64();
     effective_from <= timestamp_ms && effective_to.is_none_or(|to| timestamp_ms < to)
 }
 
@@ -1061,6 +1066,8 @@ fn validate_fee_currency_conversion(
     let effective_to = conversion["effective_to_utc_ms"].as_u64();
     let source_timestamp = conversion["source_timestamp_utc_ms"].as_u64()?;
     (conversion["schema_version"].as_u64() == Some(1)
+        && conversion["source_schema_version"].as_str()
+            == Some("paper_exchange_financial_evidence:v1")
         && from == fee_currency
         && to == quote_currency
         && effective_from <= timestamp_ms
@@ -1086,51 +1093,146 @@ fn counterfactual_exit_fee_attribution(
     path: &[Quote],
 ) -> Option<CounterfactualExitFeeAttribution> {
     let attribution = &value["counterfactual_exit_fee_attribution"];
-    let schedule_id = attribution["fee_schedule_id"].as_str()?;
-    let schedule_version = attribution["fee_schedule_version"].as_str()?;
-    let fee_symbol = attribution["symbol"].as_str()?;
-    let fee_currency = attribution["fee_currency"].as_str()?;
-    let order_class = attribution["exit_order_class"].as_str()?;
-    let maker_rate = attribution["maker_rate"].as_f64().filter(|rate| {
-        rate.is_finite() && (0.0..=MAX_COUNTERFACTUAL_EXIT_FEE_RATE).contains(rate)
-    })?;
-    let taker_rate = attribution["taker_rate"].as_f64().filter(|rate| {
-        rate.is_finite() && (0.0..=MAX_COUNTERFACTUAL_EXIT_FEE_RATE).contains(rate)
-    })?;
-    let applied_rate = attribution["applied_rate"].as_f64().filter(|rate| {
-        rate.is_finite() && (0.0..=MAX_COUNTERFACTUAL_EXIT_FEE_RATE).contains(rate)
-    })?;
-    let expected_rate = match order_class {
-        "maker" => maker_rate,
-        "taker" => taker_rate,
-        _ => return None,
+    if attribution["schema_version"].as_u64() != Some(1) || path.is_empty() {
+        return None;
+    }
+
+    let mut schedules = BTreeMap::<(String, String), &Value>::new();
+    for schedule in attribution["fee_schedules"].as_array()? {
+        let schedule_id = schedule["fee_schedule_id"].as_str()?;
+        let schedule_version = schedule["fee_schedule_version"].as_str()?;
+        let maker_rate = schedule["maker_rate"].as_f64()?;
+        let taker_rate = schedule["taker_rate"].as_f64()?;
+        let effective_from = schedule["effective_from_utc_ms"].as_u64()?;
+        let source_timestamp = schedule["source_timestamp_utc_ms"].as_u64()?;
+        if schedule["source_system"].as_str() != Some("paper_exchange_simulator")
+            || schedule["source_schema_version"].as_str()
+                != Some("paper_exchange_financial_evidence:v1")
+            || schedule["symbol"].as_str() != Some(symbol)
+            || !valid_evidence_identifier(Some(schedule_id))
+            || !valid_evidence_identifier(Some(schedule_version))
+            || !valid_evidence_identifier(schedule["source_event_id"].as_str())
+            || !valid_evidence_identifier(schedule["source_epoch"].as_str())
+            || !valid_evidence_identifier(schedule["source_record_id"].as_str())
+            || schedule["source_cursor"]
+                .as_u64()
+                .is_none_or(|cursor| cursor == 0)
+            || source_timestamp == 0
+            || !valid_counterfactual_exit_fee_rate(maker_rate)
+            || !valid_counterfactual_exit_fee_rate(taker_rate)
+            || effective_from == 0
+            || (!schedule["effective_to_utc_ms"].is_null()
+                && schedule["effective_to_utc_ms"].as_u64().is_none())
+            || schedule["effective_to_utc_ms"]
+                .as_u64()
+                .is_some_and(|effective_to| effective_to <= effective_from)
+            || schedules
+                .insert(
+                    (schedule_id.to_owned(), schedule_version.to_owned()),
+                    schedule,
+                )
+                .is_some()
+        {
+            return None;
+        }
+    }
+    if schedules.is_empty() {
+        return None;
+    }
+    let fee_fill_matches_schedule = |fill: &Value, timestamp: Option<u64>| {
+        let schedule_key = (
+            fill["paper_exchange_fee_schedule_id"].as_str(),
+            fill["paper_exchange_fee_schedule_version"].as_str(),
+        );
+        let (Some(schedule_id), Some(schedule_version)) = schedule_key else {
+            return false;
+        };
+        let Some(schedule) = schedules.get(&(schedule_id.to_owned(), schedule_version.to_owned()))
+        else {
+            return false;
+        };
+        let fee = fill["fee_amount"].as_f64();
+        let paper_fee = fill["paper_exchange_fee_amount"].as_f64();
+        let currency = fill["fee_currency"].as_str();
+        let paper_currency = fill["paper_exchange_fee_currency"].as_str();
+        let class = fill["paper_exchange_fee_order_class"].as_str();
+        let rate = match class {
+            Some("maker") => schedule["maker_rate"].as_f64(),
+            Some("taker") => schedule["taker_rate"].as_f64(),
+            _ => None,
+        };
+        fee.is_some_and(|value| value.is_finite())
+            && paper_fee.is_some_and(|value| value.is_finite() && value >= 0.0)
+            && fee.zip(paper_fee).is_some_and(|(pm, paper)| {
+                (pm.abs() - paper).abs() <= 1e-9 * pm.abs().max(paper).max(1.0)
+            })
+            && currency == Some(quote_currency)
+            && paper_currency == currency
+            && rate.is_some_and(valid_counterfactual_exit_fee_rate)
+            && timestamp.is_none_or(|timestamp| fee_schedule_covers(schedule, timestamp))
     };
-    let source_timestamp = attribution["source_timestamp_utc_ms"].as_u64()?;
-    if attribution["schema_version"].as_u64() != Some(1)
-        || attribution["source_system"].as_str() != Some("paper_exchange_simulator")
-        || !valid_evidence_identifier(Some(schedule_id))
-        || !valid_evidence_identifier(Some(schedule_version))
-        || !valid_evidence_identifier(attribution["source_epoch"].as_str())
-        || !valid_evidence_identifier(attribution["source_record_id"].as_str())
-        || attribution["source_cursor"]
-            .as_u64()
-            .is_none_or(|cursor| cursor == 0)
-        || source_timestamp == 0
-        || fee_symbol != symbol
-        || !valid_evidence_identifier(Some(fee_currency))
-        || applied_rate != expected_rate
-        || attribution["effective_from_utc_ms"].as_u64().is_none()
-        || path.is_empty()
+    let entry_fills = value["entry_context"]["entry_fill_links"].as_array()?;
+    let exit_fills = value["exit_fill_evidence"]["fills"].as_array()?;
+    if entry_fills.is_empty()
+        || exit_fills.is_empty()
+        || entry_fills
+            .iter()
+            .any(|fill| !fee_fill_matches_schedule(fill, fill["timestamp_ms"].as_u64()))
+        || exit_fills
+            .iter()
+            .any(|fill| !fee_fill_matches_schedule(fill, None))
     {
         return None;
     }
 
+    let exit_timestamp = value["exit_timestamp_ms"].as_u64()?;
+    let exit_ref = &attribution["exit_fee_schedule_ref"];
+    let exit_schedule_key = (
+        exit_ref["fee_schedule_id"].as_str()?.to_owned(),
+        exit_ref["fee_schedule_version"].as_str()?.to_owned(),
+    );
+    let exit_schedule = *schedules.get(&exit_schedule_key)?;
+    let exit_order_class = exit_ref["exit_order_class"].as_str()?;
+    let exit_rate = exit_ref["applied_rate"]
+        .as_f64()
+        .filter(|rate| valid_counterfactual_exit_fee_rate(*rate))?;
+    let exit_fee_currency = exit_ref["fee_currency"].as_str()?;
+    let exit_expected_rate = match exit_order_class {
+        "maker" => exit_schedule["maker_rate"].as_f64()?,
+        "taker" => exit_schedule["taker_rate"].as_f64()?,
+        _ => return None,
+    };
+    if exit_ref["timestamp_ms"].as_u64() != Some(exit_timestamp)
+        || exit_rate != exit_expected_rate
+        || !valid_evidence_identifier(Some(exit_fee_currency))
+        || !fee_schedule_covers(exit_schedule, exit_timestamp)
+        || schedules
+            .values()
+            .filter(|schedule| fee_schedule_covers(schedule, exit_timestamp))
+            .count()
+            != 1
+    {
+        return None;
+    }
+    if exit_fee_currency == quote_currency {
+        if !exit_ref["fee_currency_conversion"].is_null() {
+            return None;
+        }
+    } else {
+        validate_fee_currency_conversion(
+            &exit_ref["fee_currency_conversion"],
+            exit_fee_currency,
+            quote_currency,
+            exit_timestamp,
+        )?;
+    }
+
     let raw_quotes = ["pre_exit_price_path", "price_path"]
         .into_iter()
-        .flat_map(|key| value[key].as_array().into_iter().flatten())
+        .flat_map(|key| executable_quote_path(&value[key]).unwrap_or_default())
         .collect::<Vec<_>>();
     let mut raw_by_timestamp = BTreeMap::<u64, &Value>::new();
-    for quote in raw_quotes {
+    for quote in &raw_quotes {
         let timestamp = quote["timestamp"].as_u64()?;
         if let Some(previous) = raw_by_timestamp.get(&timestamp)
             && (previous["bid"] != quote["bid"] || previous["ask"] != quote["ask"])
@@ -1139,11 +1241,7 @@ fn counterfactual_exit_fee_attribution(
         }
         raw_by_timestamp.insert(timestamp, quote);
     }
-    if raw_by_timestamp.len() != path.len()
-        || path
-            .iter()
-            .any(|quote| !fee_schedule_covers(attribution, quote.timestamp_ms))
-    {
+    if raw_by_timestamp.len() != path.len() {
         return None;
     }
 
@@ -1152,48 +1250,87 @@ fn counterfactual_exit_fee_attribution(
         return None;
     }
     let mut fx_rate_to_quote_by_timestamp = BTreeMap::new();
+    let mut rate_by_timestamp = BTreeMap::new();
+    let mut fee_currency_by_timestamp = BTreeMap::new();
     for (quote, source) in path.iter().zip(quote_observations) {
-        let timestamp = source["timestamp_ms"].as_u64()?;
-        let quote_epoch = source["quote_epoch"].as_str()?;
-        let quote_sequence = source["quote_sequence"].as_u64()?;
-        let source_updated_at = source["quote_source_updated_at_ms"].as_u64()?;
-        let freshness_max_age = source["quote_freshness_max_age_ms"].as_u64()?;
+        let (timestamp, schedule_id, schedule_version, order_class, applied_rate, fee_currency) =
+            if source.is_array() {
+                (
+                    source[0].as_u64()?,
+                    source[1].as_str()?,
+                    source[2].as_str()?,
+                    source[3].as_str()?,
+                    source[4].as_f64()?,
+                    source[5].as_str()?,
+                )
+            } else {
+                (
+                    source["timestamp_ms"].as_u64()?,
+                    source["fee_schedule_id"].as_str()?,
+                    source["fee_schedule_version"].as_str()?,
+                    source["exit_order_class"].as_str()?,
+                    source["applied_rate"].as_f64()?,
+                    source["fee_currency"].as_str()?,
+                )
+            };
         let raw = raw_by_timestamp.get(&timestamp)?;
+        let quote_epoch = raw["epoch"].as_str()?;
+        let quote_sequence = raw["sequence"].as_u64()?;
+        let source_updated_at = raw["source_updated_at_ms"].as_u64()?;
+        let freshness_max_age = raw["freshness_max_age_ms"].as_u64()?;
+        let source_system = raw["quote_source_system"].as_str()?;
+        let source_epoch = raw["quote_source_epoch"].as_str()?;
+        let source_cursor = raw["quote_source_cursor"].as_u64()?;
+        let source_record_id = raw["quote_source_record_id"].as_str()?;
+        let schedule_key = (schedule_id.to_owned(), schedule_version.to_owned());
+        let schedule = *schedules.get(&schedule_key)?;
+        let expected_rate = match order_class {
+            "maker" => schedule["maker_rate"].as_f64()?,
+            "taker" => schedule["taker_rate"].as_f64()?,
+            _ => return None,
+        };
+        let applied_rate = applied_rate
+            .is_finite()
+            .then_some(applied_rate)
+            .filter(|rate| valid_counterfactual_exit_fee_rate(*rate))?;
         if timestamp != quote.timestamp_ms
             || quote_sequence == 0
             || source_updated_at > timestamp
             || timestamp.saturating_sub(source_updated_at) > freshness_max_age
             || freshness_max_age == 0
-            || source["quote_freshness_contract_version"].as_u64() != Some(1)
-            || source["quote_source_fresh"] != Value::Bool(true)
+            || raw["freshness_contract_version"].as_u64() != Some(1)
+            || raw["source_fresh"] != Value::Bool(true)
             || !valid_evidence_identifier(Some(quote_epoch))
-            || !valid_evidence_identifier(source["quote_source_system"].as_str())
-            || !valid_evidence_identifier(source["quote_source_epoch"].as_str())
-            || source["quote_source_cursor"]
-                .as_u64()
-                .is_none_or(|cursor| cursor == 0)
-            || !valid_evidence_identifier(source["quote_source_record_id"].as_str())
-            || source["fee_schedule_id"].as_str() != Some(schedule_id)
-            || source["fee_schedule_version"].as_str() != Some(schedule_version)
-            || source["exit_order_class"].as_str() != Some(order_class)
-            || source["applied_rate"].as_f64() != Some(applied_rate)
-            || raw["epoch"]
-                .as_str()
-                .is_some_and(|epoch| epoch != quote_epoch)
-            || raw["sequence"]
-                .as_u64()
-                .is_some_and(|sequence| sequence != quote_sequence)
-            || raw["source_updated_at_ms"]
-                .as_u64()
-                .is_some_and(|updated| updated != source_updated_at)
-            || raw["source_fresh"].as_bool().is_some_and(|fresh| !fresh)
-            || raw["freshness_contract_version"]
-                .as_u64()
-                .is_some_and(|version| version != 1)
+            || !valid_evidence_identifier(Some(source_system))
+            || !valid_evidence_identifier(Some(source_epoch))
+            || source_cursor == 0
+            || !valid_evidence_identifier(Some(source_record_id))
+            || schedule_id != schedule_key.0
+            || schedule_version != schedule_key.1
+            || applied_rate != expected_rate
+            || !fee_schedule_covers(schedule, timestamp)
+            || schedules
+                .values()
+                .filter(|schedule| fee_schedule_covers(schedule, timestamp))
+                .count()
+                != 1
+            || quote.timestamp_ms != timestamp
+            || raw["epoch"].as_str().is_none()
+            || raw["sequence"].as_u64().is_none()
+            || raw["source_updated_at_ms"].as_u64().is_none()
+            || raw["source_fresh"].as_bool() != Some(true)
+            || raw["freshness_contract_version"].as_u64() != Some(1)
         {
             return None;
         }
-        let conversion = &source["fee_currency_conversion"];
+        if !valid_evidence_identifier(Some(fee_currency)) {
+            return None;
+        }
+        let conversion = if source.is_array() {
+            &Value::Null
+        } else {
+            &source["fee_currency_conversion"]
+        };
         let fx_rate = if fee_currency == quote_currency {
             if !conversion.is_null() {
                 return None;
@@ -1213,13 +1350,35 @@ fn counterfactual_exit_fee_attribution(
         {
             return None;
         }
+        rate_by_timestamp.insert(timestamp, applied_rate);
+        fee_currency_by_timestamp.insert(timestamp, fee_currency.to_owned());
     }
     Some(CounterfactualExitFeeAttribution {
-        rate: applied_rate,
-        fee_currency: fee_currency.to_owned(),
+        rate_by_timestamp,
+        fee_currency_by_timestamp,
         quote_currency: quote_currency.to_owned(),
         fx_rate_to_quote_by_timestamp,
     })
+}
+
+fn counterfactual_exit_fee_contract_complete(value: &Value) -> bool {
+    let Some(symbol) = value["symbol"].as_str() else {
+        return false;
+    };
+    let Some(quote_currency) = symbol.rsplit_once('-').map(|(_, quote)| quote) else {
+        return false;
+    };
+    let quotes = ["pre_exit_price_path", "price_path"]
+        .into_iter()
+        .flat_map(|key| executable_quote_path(&value[key]).unwrap_or_default())
+        .map(|quote| parse_quote(&quote))
+        .collect::<Option<Vec<_>>>();
+    let Some(mut quotes) = quotes else {
+        return false;
+    };
+    quotes.sort_by_key(|quote| quote.timestamp_ms);
+    quotes.dedup_by_key(|quote| quote.timestamp_ms);
+    counterfactual_exit_fee_attribution(value, symbol, quote_currency, &quotes).is_some()
 }
 
 fn gross_executable_excursion_extrema(
@@ -1264,7 +1423,6 @@ fn net_executable_excursion_extrema(
         || !entry_fees_quote.is_finite()
         || entry_fees_quote < 0.0
         || path.is_empty()
-        || attribution.fee_currency.trim().is_empty()
         || attribution.quote_currency.trim().is_empty()
     {
         return None;
@@ -1277,17 +1435,22 @@ fn net_executable_excursion_extrema(
             } else {
                 quote.ask
             };
-            let fee_in_quote = if attribution.fee_currency == attribution.quote_currency {
-                executable_price * quantity * attribution.rate
+            let fee_currency = attribution
+                .fee_currency_by_timestamp
+                .get(&quote.timestamp_ms)?;
+            let fee_rate = attribution.rate_by_timestamp.get(&quote.timestamp_ms)?;
+            let fee_in_quote = if fee_currency == &attribution.quote_currency {
+                executable_price * quantity * fee_rate
             } else {
-                let rate = attribution
+                let fx_rate = attribution
                     .fx_rate_to_quote_by_timestamp
-                    .get(&quote.timestamp_ms)?
-                    .to_owned()?
+                    .get(&quote.timestamp_ms)
+                    .copied()
+                    .flatten()
                     .filter(|rate| rate.is_finite() && *rate > 0.0)?;
-                let notional_in_fee_currency = executable_price * quantity / rate;
-                let fee_in_fee_currency = notional_in_fee_currency * attribution.rate;
-                fee_in_fee_currency * rate
+                let notional_in_fee_currency = executable_price * quantity / fx_rate;
+                let fee_in_fee_currency = notional_in_fee_currency * fee_rate;
+                fee_in_fee_currency * fx_rate
             };
             let net = ((executable_price - entry_price) * quantity * direction
                 - entry_fees_quote
@@ -1323,12 +1486,12 @@ fn gross_only_excursion_for_observation(
         "buy" => -1.0,
         _ => return None,
     };
-    let raw_path = value["pre_exit_price_path"].as_array()?;
+    let raw_path = executable_quote_path(&value["pre_exit_price_path"])?;
     let path = raw_path
         .iter()
         .map(parse_quote)
         .collect::<Option<Vec<_>>>()?;
-    let [mfe, mae] = gross_executable_excursion_extrema(entry_price, quantity, direction, &path)?;
+    let (mfe, mae) = gross_executable_excursion_extrema(entry_price, quantity, direction, &path)?;
     Some([mfe, mae])
 }
 
@@ -1449,8 +1612,7 @@ fn parse_observation(
     {
         return None;
     }
-    let pre_exit_path = value["pre_exit_price_path"]
-        .as_array()?
+    let pre_exit_path = executable_quote_path(&value["pre_exit_price_path"])?
         .iter()
         .map(parse_quote)
         .collect::<Option<Vec<_>>>()?;
@@ -1461,8 +1623,7 @@ fn parse_observation(
     {
         return None;
     }
-    let post_exit_path = value["price_path"]
-        .as_array()?
+    let post_exit_path = executable_quote_path(&value["price_path"])?
         .iter()
         .map(parse_quote)
         .collect::<Option<Vec<_>>>()?;
@@ -1483,19 +1644,15 @@ fn parse_observation(
         return None;
     }
     let quote_currency_str = quote_currency.as_deref()?;
-    let fee_attribution = counterfactual_exit_fee_attribution(
-        value,
-        symbol,
-        quote_currency_str,
-        &path,
-    )?;
-    let counterfactual_exit_fee_rate = fee_attribution.rate;
-    if !valid_exit_policy_inputs(
-        counterfactual_exit_fee_rate,
-        stop_loss_percent,
-        take_profit_percent,
-        baseline,
-    ) {
+    let fee_attribution =
+        counterfactual_exit_fee_attribution(value, symbol, quote_currency_str, &path)?;
+    if fee_attribution.rate_by_timestamp.is_empty()
+        || fee_attribution
+            .rate_by_timestamp
+            .values()
+            .any(|rate| !valid_counterfactual_exit_fee_rate(*rate))
+        || !valid_exit_policy_inputs(stop_loss_percent, take_profit_percent, baseline)
+    {
         return None;
     }
     // Gross and net MFE/MAE use only the path before the actual close. The
@@ -1550,7 +1707,6 @@ fn parse_observation(
         entry_price,
         quantity,
         entry_fees,
-        counterfactual_exit_fee_rate,
         initial_risk_quote,
         initial_risk_currency,
         quote_currency,
@@ -1763,18 +1919,19 @@ fn capital_efficiency_sample(
 }
 
 fn valid_exit_policy_inputs(
-    counterfactual_exit_fee_rate: f64,
     stop_loss_percent: f64,
     take_profit_percent: f64,
     baseline: ProfitProtectionParameters,
 ) -> bool {
-    counterfactual_exit_fee_rate.is_finite()
-        && (0.0..=MAX_COUNTERFACTUAL_EXIT_FEE_RATE).contains(&counterfactual_exit_fee_rate)
-        && stop_loss_percent.is_finite()
+    stop_loss_percent.is_finite()
         && stop_loss_percent > 0.0
         && take_profit_percent.is_finite()
         && take_profit_percent > 0.0
         && valid_policy_parameters(baseline)
+}
+
+fn valid_counterfactual_exit_fee_rate(rate: f64) -> bool {
+    rate.is_finite() && (0.0..=MAX_COUNTERFACTUAL_EXIT_FEE_RATE).contains(&rate)
 }
 
 fn has_horizon_coverage(path: &[Quote], exit_timestamp_ms: u64, horizon_ms: u64) -> bool {
@@ -1816,6 +1973,46 @@ fn parse_quote(value: &Value) -> Option<Quote> {
         && quote.bid > 0.0
         && quote.ask >= quote.bid)
         .then_some(quote)
+}
+
+fn is_supported_quote_path(value: &Value) -> bool {
+    value.as_array().is_some() || value["encoding"].as_str() == Some("executable_quote_path:v1")
+}
+
+fn executable_quote_path(value: &Value) -> Option<Vec<Value>> {
+    if let Some(quotes) = value.as_array() {
+        return Some(quotes.clone());
+    }
+    if value["encoding"].as_str() != Some("executable_quote_path:v1") {
+        return None;
+    }
+    let sources = value["sources"].as_array()?;
+    value["quotes"]
+        .as_array()?
+        .iter()
+        .map(|row| {
+            let values = row.as_array()?;
+            if values.len() != 9 {
+                return None;
+            }
+            let source = sources.get(values[6].as_u64()? as usize)?;
+            Some(serde_json::json!({
+                "timestamp":values[0],
+                "bid":values[1],
+                "ask":values[2],
+                "sequence":values[3],
+                "source_updated_at_ms":values[4],
+                "source_fresh":values[5],
+                "epoch":source["epoch"],
+                "freshness_contract_version":source["freshness_contract_version"],
+                "freshness_max_age_ms":source["freshness_max_age_ms"],
+                "quote_source_system":source["quote_source_system"],
+                "quote_source_epoch":source["quote_source_epoch"],
+                "quote_source_cursor":values[7],
+                "quote_source_record_id":values[8],
+            }))
+        })
+        .collect()
 }
 
 fn replay_net_return(
@@ -2139,7 +2336,7 @@ fn exit_policy_metrics(
                 values.len(),
                 &sources,
                 mean.is_none()
-                    .then_some("complete executable path and cost attribution are required"),
+                    .then_some("at least one complete chronological holdout pair is required"),
             ),
         );
     }
@@ -2585,18 +2782,21 @@ fn counterfactual_exit_fee_quote(
     {
         return None;
     }
-    if attribution.fee_currency == attribution.quote_currency {
-        return (executable_price * quantity * attribution.rate)
+    let rate = attribution.rate_by_timestamp.get(&timestamp_ms)?;
+    let fee_currency = attribution.fee_currency_by_timestamp.get(&timestamp_ms)?;
+    if fee_currency == &attribution.quote_currency {
+        return (executable_price * quantity * rate)
             .is_finite()
-            .then(|| executable_price * quantity * attribution.rate);
+            .then(|| executable_price * quantity * rate);
     }
     let rate_to_quote = attribution
         .fx_rate_to_quote_by_timestamp
-        .get(&timestamp_ms)?
-        .to_owned()?
+        .get(&timestamp_ms)
+        .copied()
+        .flatten()
         .filter(|rate| rate.is_finite() && *rate > 0.0)?;
     let notional_in_fee_currency = executable_price * quantity / rate_to_quote;
-    let fee_in_fee_currency = notional_in_fee_currency * attribution.rate;
+    let fee_in_fee_currency = notional_in_fee_currency * rate;
     let fee_in_quote = fee_in_fee_currency * rate_to_quote;
     fee_in_quote.is_finite().then_some(fee_in_quote)
 }
@@ -2820,12 +3020,24 @@ fn candidate_values(min: f64, max: f64, step: f64) -> Vec<f64> {
 mod tests {
     use super::*;
 
-    fn quote_currency_fee_attribution(rate: f64) -> CounterfactualExitFeeAttribution {
+    fn quote_currency_fee_attribution(
+        rate: f64,
+        timestamps: &[u64],
+    ) -> CounterfactualExitFeeAttribution {
         CounterfactualExitFeeAttribution {
-            rate,
-            fee_currency: "USDT".into(),
+            rate_by_timestamp: timestamps
+                .iter()
+                .map(|timestamp| (*timestamp, rate))
+                .collect(),
+            fee_currency_by_timestamp: timestamps
+                .iter()
+                .map(|timestamp| (*timestamp, "USDT".to_owned()))
+                .collect(),
             quote_currency: "USDT".into(),
-            fx_rate_to_quote_by_timestamp: BTreeMap::new(),
+            fx_rate_to_quote_by_timestamp: timestamps
+                .iter()
+                .map(|timestamp| (*timestamp, None))
+                .collect(),
         }
     }
 
@@ -3050,7 +3262,6 @@ mod tests {
             entry_price: 100.0,
             quantity: 2.0,
             entry_fees: 0.1,
-            counterfactual_exit_fee_rate: 0.001,
             initial_risk_quote: None,
             initial_risk_currency: None,
             quote_currency: Some("USDT".into()),
@@ -3071,7 +3282,7 @@ mod tests {
                 },
             ]),
             execution_costs_complete: false,
-            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001),
+            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001, &[]),
             gross_executable_mfe_percent: 0.0,
             gross_executable_mae_percent: 0.0,
             net_executable_mfe_percent: 0.0,
@@ -3263,6 +3474,11 @@ mod tests {
                 quote["freshness_contract_version"] = serde_json::json!(1);
                 quote["freshness_max_age_ms"] = serde_json::json!(5_000);
                 quote["source_fresh"] = serde_json::json!(true);
+                quote["quote_source_system"] = serde_json::json!("feed_handlers");
+                quote["quote_source_epoch"] = serde_json::json!(epoch);
+                quote["quote_source_cursor"] = serde_json::json!(sequence);
+                quote["quote_source_record_id"] =
+                    serde_json::json!(format!("fixture-quote-{event_id}-{sequence}"));
                 quote_observations.push(serde_json::json!({
                     "timestamp_ms":timestamp,
                     "quote_epoch":epoch,
@@ -3279,13 +3495,19 @@ mod tests {
                     "fee_schedule_version":schedule_version,
                     "exit_order_class":"taker",
                     "applied_rate":0.001,
+                    "fee_currency":"USDT",
                     "fee_currency_conversion":null
                 }));
             }
         }
-        let first_timestamp = quote_observations[0]["timestamp_ms"].as_u64().unwrap();
-        observation["counterfactual_exit_fee_attribution"] = serde_json::json!({
-            "schema_version":1,
+        let first_timestamp = observation["entry_context"]["timestamp_ms"]
+            .as_u64()
+            .unwrap();
+        let exit_timestamp = observation["exit_timestamp_ms"].as_u64().unwrap();
+        let fee_schedule_event = serde_json::json!({
+            "schema_version":"paper_exchange_financial_evidence:v1",
+            "event_type":"fee_schedule",
+            "event_id":"fixture-fee-schedule-event-17",
             "source_system":"paper_exchange_simulator",
             "source_epoch":"fixture-paper-ledger-epoch",
             "source_cursor":17,
@@ -3297,10 +3519,54 @@ mod tests {
             "effective_from_utc_ms":first_timestamp,
             "effective_to_utc_ms":null,
             "maker_rate":0.0008,
-            "taker_rate":0.001,
-            "exit_order_class":"taker",
-            "applied_rate":0.001,
+            "taker_rate":0.001
+        });
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_amount"] =
+            serde_json::json!(0.01);
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_currency"] =
+            serde_json::json!("USDT");
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_schedule_id"] =
+            serde_json::json!(schedule_id);
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_schedule_version"] =
+            serde_json::json!(schedule_version);
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_order_class"] =
+            serde_json::json!("taker");
+        observation["exit_fill_evidence"]["fills"] = serde_json::json!([{
+            "fee_amount":0.01,
             "fee_currency":"USDT",
+            "paper_exchange_fee_amount":0.01,
+            "paper_exchange_fee_currency":"USDT",
+            "paper_exchange_fee_schedule_id":schedule_id,
+            "paper_exchange_fee_schedule_version":schedule_version,
+            "paper_exchange_fee_order_class":"taker"
+        }]);
+        observation["counterfactual_exit_fee_attribution"] = serde_json::json!({
+            "schema_version":1,
+            "fee_schedules":[{
+                "source_schema_version":fee_schedule_event["schema_version"],
+                "source_event_id":fee_schedule_event["event_id"],
+                "source_system":fee_schedule_event["source_system"],
+                "source_epoch":fee_schedule_event["source_epoch"],
+                "source_cursor":fee_schedule_event["source_cursor"],
+                "source_record_id":fee_schedule_event["source_record_id"],
+                "source_timestamp_utc_ms":fee_schedule_event["source_timestamp_utc_ms"],
+                "fee_schedule_id":fee_schedule_event["fee_schedule_id"],
+                "fee_schedule_version":fee_schedule_event["fee_schedule_version"],
+                "symbol":fee_schedule_event["symbol"],
+                "effective_from_utc_ms":fee_schedule_event["effective_from_utc_ms"],
+                "effective_to_utc_ms":fee_schedule_event["effective_to_utc_ms"],
+                "maker_rate":fee_schedule_event["maker_rate"],
+                "taker_rate":fee_schedule_event["taker_rate"]
+            }],
+            "exit_fee_schedule_ref":{
+                "timestamp_ms":exit_timestamp,
+                "fee_schedule_id":schedule_id,
+                "fee_schedule_version":schedule_version,
+                "exit_order_class":"taker",
+                "applied_rate":0.001,
+                "fee_currency":"USDT",
+                "fee_currency_conversion":null
+            },
             "quote_observations":quote_observations
         });
     }
@@ -3315,6 +3581,10 @@ mod tests {
             {"timestamp":exit_timestamp - 10_000,"bid":100.60,"ask":100.62}
         ]);
         add_synthetic_fee_schedule_attribution(&mut observation);
+        observation
+            .as_object_mut()
+            .unwrap()
+            .remove("counterfactual_exit_fee_rate");
 
         let sample = parse_observation(&observation, "BTC-USDT", "live-momentum", u64::MAX)
             .expect("complete versioned fee attribution permits net replay");
@@ -3322,10 +3592,19 @@ mod tests {
         assert!((sample.gross_executable_mae_percent + 0.50).abs() < 1e-9);
         assert!((sample.net_executable_mfe_percent - 0.4894).abs() < 1e-8);
         assert!((sample.net_executable_mae_percent + 0.6095).abs() < 1e-8);
-        assert_eq!(sample.counterfactual_exit_fee_rate, 0.001);
-        assert_eq!(
-            sample.counterfactual_exit_fee_attribution.fee_currency,
-            "USDT"
+        assert!(
+            sample
+                .counterfactual_exit_fee_attribution
+                .rate_by_timestamp
+                .values()
+                .all(|rate| *rate == 0.001)
+        );
+        assert!(
+            sample
+                .counterfactual_exit_fee_attribution
+                .fee_currency_by_timestamp
+                .values()
+                .all(|currency| currency == "USDT")
         );
         assert!(
             sample
@@ -3352,16 +3631,16 @@ mod tests {
             {"timestamp":exit_timestamp - 5_000,"bid":100.60,"ask":100.62}
         ]);
         add_synthetic_fee_schedule_attribution(&mut observation);
-        observation["counterfactual_exit_fee_attribution"]["fee_currency"] =
-            serde_json::json!("BNB");
         let quote_observations =
             observation["counterfactual_exit_fee_attribution"]["quote_observations"]
                 .as_array_mut()
                 .unwrap();
         for quote in quote_observations {
             let timestamp = quote["timestamp_ms"].as_u64().unwrap();
+            quote["fee_currency"] = serde_json::json!("BNB");
             quote["fee_currency_conversion"] = serde_json::json!({
                 "schema_version":1,
+                "source_schema_version":"paper_exchange_financial_evidence:v1",
                 "from_currency":"BNB",
                 "to_currency":"USDT",
                 "rate_to_quote":600.0,
@@ -3374,6 +3653,22 @@ mod tests {
                 "source_timestamp_utc_ms":timestamp
             });
         }
+        observation["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"]["fee_currency"] =
+            serde_json::json!("BNB");
+        observation["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"]["fee_currency_conversion"] = serde_json::json!({
+            "schema_version":1,
+            "source_schema_version":"paper_exchange_financial_evidence:v1",
+            "from_currency":"BNB",
+            "to_currency":"USDT",
+            "rate_to_quote":600.0,
+            "effective_from_utc_ms":exit_timestamp - 10_000,
+            "effective_to_utc_ms":null,
+            "source_system":"paper_exchange_simulator_account",
+            "source_epoch":"fx-epoch-v1",
+            "source_cursor":exit_timestamp,
+            "source_record_id":format!("fx-mark-{exit_timestamp}"),
+            "source_timestamp_utc_ms":exit_timestamp
+        });
         let sample = parse_observation(&observation, "BTC-USDT", "live-momentum", u64::MAX)
             .expect("timestamped sourced conversion permits fee normalization");
         assert!((sample.net_executable_mfe_percent - 0.4894).abs() < 1e-8);
@@ -3384,6 +3679,73 @@ mod tests {
                 .values()
                 .all(|rate| *rate == Some(600.0))
         );
+    }
+
+    #[test]
+    fn replay_attributes_each_quote_to_one_effective_fee_schedule_version() {
+        let mut observation = synthetic_observations(PathCase::TrainingAndHoldoutImprove).remove(0);
+        let exit_timestamp = observation["exit_timestamp_ms"].as_u64().unwrap();
+        observation["pre_exit_price_path"] = serde_json::json!([
+            {"timestamp":exit_timestamp - 20_000,"bid":100.10,"ask":100.12},
+            {"timestamp":exit_timestamp - 10_000,"bid":100.60,"ask":100.62}
+        ]);
+        add_synthetic_fee_schedule_attribution(&mut observation);
+        let first_schedule =
+            observation["counterfactual_exit_fee_attribution"]["fee_schedules"][0].clone();
+        let mut first_schedule = first_schedule;
+        first_schedule["effective_to_utc_ms"] = serde_json::json!(exit_timestamp);
+        let mut second_schedule = first_schedule.clone();
+        second_schedule["fee_schedule_id"] = serde_json::json!("fixture-fee-schedule-next");
+        second_schedule["fee_schedule_version"] = serde_json::json!("v2");
+        second_schedule["source_cursor"] = serde_json::json!(18);
+        second_schedule["source_record_id"] = serde_json::json!("fixture-fee-schedule-record-18");
+        second_schedule["source_timestamp_utc_ms"] = serde_json::json!(exit_timestamp);
+        second_schedule["effective_from_utc_ms"] = serde_json::json!(exit_timestamp);
+        second_schedule["effective_to_utc_ms"] = serde_json::Value::Null;
+        second_schedule["taker_rate"] = serde_json::json!(0.0015);
+        observation["counterfactual_exit_fee_attribution"]["fee_schedules"] =
+            serde_json::json!([first_schedule, second_schedule]);
+        for quote in observation["counterfactual_exit_fee_attribution"]["quote_observations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if quote["timestamp_ms"].as_u64().unwrap() >= exit_timestamp {
+                quote["fee_schedule_id"] = serde_json::json!("fixture-fee-schedule-next");
+                quote["fee_schedule_version"] = serde_json::json!("v2");
+                quote["applied_rate"] = serde_json::json!(0.0015);
+            }
+        }
+        observation["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"] = serde_json::json!({
+            "timestamp_ms":exit_timestamp,
+            "fee_schedule_id":"fixture-fee-schedule-next",
+            "fee_schedule_version":"v2",
+            "exit_order_class":"taker",
+            "applied_rate":0.0015,
+            "fee_currency":"USDT",
+            "fee_currency_conversion":null
+        });
+
+        let sample = parse_observation(&observation, "BTC-USDT", "live-momentum", u64::MAX)
+            .expect("each path quote and close timestamp resolve to one versioned schedule");
+        assert_eq!(
+            sample.counterfactual_exit_fee_attribution.rate_by_timestamp
+                [&(exit_timestamp - 10_000)],
+            0.001
+        );
+        assert_eq!(
+            sample.counterfactual_exit_fee_attribution.rate_by_timestamp[&exit_timestamp],
+            0.0015
+        );
+
+        let mut gap = observation.clone();
+        gap["counterfactual_exit_fee_attribution"]["fee_schedules"][1]["effective_from_utc_ms"] =
+            serde_json::json!(exit_timestamp + 1);
+        assert!(parse_observation(&gap, "BTC-USDT", "live-momentum", u64::MAX).is_none());
+
+        let mut overlap = observation;
+        overlap["counterfactual_exit_fee_attribution"]["fee_schedules"][0]["effective_to_utc_ms"] =
+            serde_json::json!(exit_timestamp + 1);
+        assert!(parse_observation(&overlap, "BTC-USDT", "live-momentum", u64::MAX).is_none());
     }
 
     #[test]
@@ -3408,12 +3770,17 @@ mod tests {
             serde_json::json!("v2");
 
         let mut expired = base.clone();
-        expired["counterfactual_exit_fee_attribution"]["effective_to_utc_ms"] =
+        expired["counterfactual_exit_fee_attribution"]["fee_schedules"][0]["effective_to_utc_ms"] =
             serde_json::json!(exit_timestamp);
 
         let mut currency_unconverted = base.clone();
-        currency_unconverted["counterfactual_exit_fee_attribution"]["fee_currency"] =
-            serde_json::json!("BNB");
+        for quote in
+            currency_unconverted["counterfactual_exit_fee_attribution"]["quote_observations"]
+                .as_array_mut()
+                .unwrap()
+        {
+            quote["fee_currency"] = serde_json::json!("BNB");
+        }
         let absent_assessment_input = absent.clone();
 
         for invalid in [absent, mismatched, expired, currency_unconverted] {
@@ -3439,18 +3806,20 @@ mod tests {
             "live-momentum",
             u64::MAX,
         );
-        assert_eq!(
-            gross_only_assessment.metrics.values["gross_executable_mfe_percent"],
-            0.60
+        assert!(
+            (gross_only_assessment.metrics.values["gross_executable_mfe_percent"] - 0.60).abs()
+                < 1e-9
         );
-        assert_eq!(
-            gross_only_assessment.metrics.values["gross_executable_mae_percent"],
-            0.10
+        assert!(
+            (gross_only_assessment.metrics.values["gross_executable_mae_percent"] - 0.10).abs()
+                < 1e-9
         );
-        assert!(!gross_only_assessment
-            .metrics
-            .values
-            .contains_key("net_executable_mfe_percent"));
+        assert!(
+            !gross_only_assessment
+                .metrics
+                .values
+                .contains_key("net_executable_mfe_percent")
+        );
         assert_eq!(
             gross_only_assessment.metrics.coverage
                 ["counterfactual_exit_fee_schedule_source_coverage_percent"]
@@ -3483,7 +3852,6 @@ mod tests {
             entry_price: 100.0,
             quantity: 1.0,
             entry_fees: 0.1,
-            counterfactual_exit_fee_rate: 0.001,
             initial_risk_quote: None,
             initial_risk_currency: None,
             quote_currency: None,
@@ -3495,7 +3863,7 @@ mod tests {
             initial_entry_notional_quote: None,
             entry_fill_timing: None,
             execution_costs_complete: false,
-            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001),
+            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001, &[2, 3]),
             gross_executable_mfe_percent: 0.0,
             gross_executable_mae_percent: 0.0,
             net_executable_mfe_percent: 0.0,
@@ -3540,8 +3908,8 @@ mod tests {
         sample.direction = 1.0;
         sample.entry_price = 100.0;
         sample.entry_fees = 0.0;
-        sample.counterfactual_exit_fee_rate = 0.0;
-        sample.counterfactual_exit_fee_attribution.rate = 0.0;
+        sample.counterfactual_exit_fee_attribution =
+            quote_currency_fee_attribution(0.0, &[10, 20, 30, 40]);
         sample.stop_loss_percent = 0.5;
         sample.take_profit_percent = 20.0;
         sample.baseline = ProfitProtectionParameters {
@@ -3630,7 +3998,6 @@ mod tests {
             entry_price: 100.0,
             quantity: 1.0,
             entry_fees: 0.1,
-            counterfactual_exit_fee_rate: 0.001,
             initial_risk_quote: None,
             initial_risk_currency: None,
             quote_currency: None,
@@ -3642,7 +4009,7 @@ mod tests {
             initial_entry_notional_quote: None,
             entry_fill_timing: None,
             execution_costs_complete: false,
-            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001),
+            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001, &[2]),
             gross_executable_mfe_percent: 0.0,
             gross_executable_mae_percent: 0.0,
             net_executable_mfe_percent: 0.0,
@@ -3684,7 +4051,6 @@ mod tests {
             entry_price: 100.0,
             quantity: 1.0,
             entry_fees: 0.1,
-            counterfactual_exit_fee_rate: 0.001,
             initial_risk_quote: None,
             initial_risk_currency: None,
             quote_currency: None,
@@ -3696,7 +4062,7 @@ mod tests {
             initial_entry_notional_quote: None,
             entry_fill_timing: None,
             execution_costs_complete: false,
-            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001),
+            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001, &[2, 3]),
             gross_executable_mfe_percent: 0.0,
             gross_executable_mae_percent: 0.0,
             net_executable_mfe_percent: 0.0,
@@ -3747,7 +4113,6 @@ mod tests {
             entry_price: 100.0,
             quantity: 1.0,
             entry_fees: 0.1,
-            counterfactual_exit_fee_rate: 0.001,
             initial_risk_quote: None,
             initial_risk_currency: None,
             quote_currency: None,
@@ -3759,7 +4124,7 @@ mod tests {
             initial_entry_notional_quote: None,
             entry_fill_timing: None,
             execution_costs_complete: false,
-            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001),
+            counterfactual_exit_fee_attribution: quote_currency_fee_attribution(0.001, &[2, 3]),
             gross_executable_mfe_percent: 0.0,
             gross_executable_mae_percent: 0.0,
             net_executable_mfe_percent: 0.0,
@@ -3843,13 +4208,13 @@ mod tests {
             trailing_distance_percent: None,
             breakeven_activation_percent: None,
         };
-        assert!(valid_exit_policy_inputs(0.001, 0.5, 0.8, baseline));
-        assert!(!valid_exit_policy_inputs(-0.001, 0.5, 0.8, baseline));
-        assert!(!valid_exit_policy_inputs(0.1001, 0.5, 0.8, baseline));
-        assert!(!valid_exit_policy_inputs(0.001, 0.0, 0.8, baseline));
-        assert!(!valid_exit_policy_inputs(0.001, 0.5, -0.1, baseline));
+        assert!(valid_exit_policy_inputs(0.5, 0.8, baseline));
+        assert!(valid_counterfactual_exit_fee_rate(0.001));
+        assert!(!valid_counterfactual_exit_fee_rate(-0.001));
+        assert!(!valid_counterfactual_exit_fee_rate(0.1001));
+        assert!(!valid_exit_policy_inputs(0.0, 0.8, baseline));
+        assert!(!valid_exit_policy_inputs(0.5, -0.1, baseline));
         assert!(!valid_exit_policy_inputs(
-            0.001,
             0.5,
             0.8,
             ProfitProtectionParameters {

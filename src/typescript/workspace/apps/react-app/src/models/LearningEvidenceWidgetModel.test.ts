@@ -99,6 +99,9 @@ describe('LearningEvidenceWidgetModel', () => {
       model.state$.value.visibleCohorts?.map(({ symbol }) => symbol),
       ['BTC-USDT'],
     );
+    assert.deepEqual(model.state$.value.visibleGapReasons, [
+      { reason: 'No samples reported', cohortRows: 1 },
+    ]);
     assert.deepEqual(model.state$.value.filters, {
       symbol: 'BTC-USDT',
       strategy: 'live-momentum',

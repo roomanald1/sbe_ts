@@ -1,6 +1,11 @@
 import { useEffect, useMemo } from 'react';
-import { useBehaviorSnapshot } from '@workspace/ui-platform';
-import { FeedToolbar } from './FeedToolbar';
+import {
+  CompactTable,
+  OperatorMetricStrip,
+  OperatorTabBar,
+  SortableHeader,
+  useBehaviorSnapshot,
+} from '@workspace/ui-platform';
 import {
   AutoTraderExecutionQualityModel,
   decisionPriceDistanceLabel,
@@ -10,11 +15,14 @@ import {
   type ExecutionQualityState,
   type MatchedMarketPath,
   type UnlinkedMarketPath,
+  type ExecutionOrderSortField,
 } from '../models/AutoTraderExecutionQualityModel';
 
 function price(value: number | null | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? value.toPrecision(10)
+    ? new Intl.NumberFormat(undefined, { maximumSignificantDigits: 8 }).format(
+        value,
+      )
     : 'Unavailable';
 }
 
@@ -209,409 +217,692 @@ export function ExecutionQualityPanel({
   nowMs,
   onSetFilters,
   onRefresh,
+  onSetView,
+  onSelectOrder,
+  onSetSort,
 }: {
   state: ExecutionQualityState;
   nowMs?: number;
   onSetFilters?: (filters: Partial<ExecutionQualityState['filters']>) => void;
   onRefresh?: () => void;
+  onSetView?: (view: ExecutionQualityState['view']) => void;
+  onSelectOrder?: (key: string | null) => void;
+  onSetSort?: (field: ExecutionOrderSortField) => void;
 }) {
   const currentTime = nowMs ?? state.nowMs;
-  const filteredRows = state.visibleRows;
   const summary = state.summary;
   const freshness = executionFreshnessLabel(
     summary.last_updated_at,
     currentTime,
   );
-  const sampleDenominator = summary.order_samples;
-  const referenceCoverage = summary.reference_price_coverage_percent;
+  const fillCount = summary.filled_order_samples + summary.partial_fill_samples;
+  const fillRate =
+    summary.order_samples > 0
+      ? (fillCount / summary.order_samples) * 100
+      : null;
+  const observedOutcomes = [
+    {
+      id: 'filled',
+      label: 'Filled',
+      count: state.outcomeCounts.filled + state.outcomeCounts.partially_filled,
+      tone: 'filled',
+    },
+    {
+      id: 'cancelled',
+      label: 'Cancelled',
+      count: state.outcomeCounts.cancelled,
+      tone: 'cancelled',
+    },
+    {
+      id: 'expired',
+      label: 'Expired',
+      count: state.outcomeCounts.passive_expiry,
+      tone: 'expired',
+    },
+    {
+      id: 'rejected',
+      label: 'Rejected',
+      count:
+        state.outcomeCounts.rejected +
+        state.outcomeCounts.post_only_cross_rejection,
+      tone: 'rejected',
+    },
+    {
+      id: 'pending',
+      label: 'Pending',
+      count: state.outcomeCounts.pending,
+      tone: 'pending',
+    },
+    {
+      id: 'other',
+      label: 'Other',
+      count: state.outcomeCounts.terminal_no_fill + state.outcomeCounts.unknown,
+      tone: 'other',
+    },
+  ];
+  const outcomeTotal = observedOutcomes.reduce(
+    (total, item) => total + item.count,
+    0,
+  );
+  const selected = state.selectedOrder;
+  const terminalPaths = state.pathEvidence.terminalPaths.map(
+    (record, index) => ({
+      key: 'terminal:' + (record.order.id ?? index),
+      source: 'terminal_history' as const,
+      order: record.order,
+      terminalReason: record.terminal_reason ?? null,
+      terminalAtMs: record.terminal_at_ms ?? null,
+    }),
+  );
+  const activePaths = state.pathEvidence.activeOrders.map((order, index) => ({
+    key: 'active:' + (order.id ?? index),
+    source: 'active_order' as const,
+    order,
+    terminalReason: null,
+    terminalAtMs: null,
+  }));
+  const statusLabel = (row: ExecutionQualityState['rows'][number]) =>
+    row.outcomeLabel;
+  const rowAge = (row: ExecutionQualityState['rows'][number]) => {
+    if (row.outcome === 'pending')
+      return '≥ ' + duration(Math.max(currentTime - row.order.timestamp, 0));
+    const terminal = row.marketPaths.find((path) => path.terminalAtMs !== null);
+    return terminal
+      ? duration(Math.max(terminal.terminalAtMs! - row.order.timestamp, 0))
+      : 'Unavailable';
+  };
+  const compactPercent = (value: number | null) =>
+    value === null || !Number.isFinite(value)
+      ? 'Unavailable'
+      : value.toFixed(1) + '%';
+  const sortHeader = (field: ExecutionOrderSortField, label: string) => (
+    <SortableHeader
+      key={field}
+      label={label}
+      active={state.sort.field === field}
+      direction={state.sort.direction}
+      onSort={() => onSetSort?.(field)}
+    />
+  );
 
   return (
     <section
-      className="auto-trader-execution-check auto-trader-execution-quality v35-operator-card"
+      className="auto-trader-execution-quality operator-panel"
       aria-label="Execution quality"
     >
-      <FeedToolbar title="Execution quality" />
-      <p>
-        Order outcomes and recorded price evidence only. Post-submit executable
-        market path, queue position, cancellation actor, and counterfactual
-        fillability are unavailable; no expected fills or counterfactual profit
-        are inferred.
-      </p>
-
-      <section aria-label="Execution quality aggregate">
-        <div>
-          <strong>Aggregate execution quality</strong>
-          <span role={freshness.stale ? 'status' : undefined}>
-            {freshness.label}
-          </span>
-        </div>
-        <dl
-          className="v35-operator-metrics"
-          aria-label="Execution quality metrics"
-        >
-          <div className="v35-operator-metric">
-            <dt>Orders in quality sample</dt>
-            <dd>{summary.order_samples}</dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Filled orders</dt>
-            <dd>
-              {summary.filled_order_samples} / {sampleDenominator}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Partial fills</dt>
-            <dd>
-              {summary.partial_fill_samples} / {sampleDenominator}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Unfilled orders</dt>
-            <dd>
-              {summary.unfilled_order_samples} / {sampleDenominator}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Measured fill samples</dt>
-            <dd>{summary.measured_fill_samples}</dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Reference price coverage</dt>
-            <dd>
-              {typeof referenceCoverage === 'number'
-                ? `${referenceCoverage.toFixed(1)}%`
-                : 'Unavailable'}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Average implementation shortfall</dt>
-            <dd>
-              {typeof summary.average_implementation_shortfall_bps === 'number'
-                ? `${summary.average_implementation_shortfall_bps.toFixed(2)} bps / ${summary.measured_fill_samples} measured fills`
-                : 'Unavailable'}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Average fee</dt>
-            <dd>
-              {typeof summary.average_fee_bps === 'number'
-                ? `${summary.average_fee_bps.toFixed(2)} bps / ${summary.measured_fill_samples} measured fills`
-                : 'Unavailable'}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Average all-in cost</dt>
-            <dd>
-              {typeof summary.average_all_in_cost_bps === 'number'
-                ? `${summary.average_all_in_cost_bps.toFixed(2)} bps / ${summary.measured_fill_samples} measured fills`
-                : 'Unavailable'}
-            </dd>
-          </div>
-          <div className="v35-operator-metric">
-            <dt>Submit response latency</dt>
-            <dd>
-              {typeof summary.average_submit_response_ms === 'number'
-                ? `${summary.average_submit_response_ms.toFixed(1)} ms / ${summary.response_latency_samples} samples`
-                : `Unavailable / ${summary.response_latency_samples} samples`}
-            </dd>
-          </div>
-        </dl>
-        {summary.history_truncated && (
-          <p role="status">Execution quality history is truncated.</p>
-        )}
-        {!summary.last_updated_at && !summary.order_samples && (
-          <p role="status">
-            Zero samples are reported, but the aggregate update timestamp is
-            unavailable; summary freshness cannot be verified.
-          </p>
-        )}
-      </section>
-
-      <section aria-label="Durable matcher path evidence">
-        <strong>Durable matcher path evidence</strong>
+      <div className="execution-quality-toolbar">
+        <span className="execution-quality-source">AutoTrader · Paper</span>
         <span
-          className={`v35-operator-status ${state.pathEvidenceStatus === 'available' ? 'is-good' : state.pathEvidenceStatus === 'partial' || state.pathEvidenceStatus === 'loading' ? 'is-warning' : 'is-unavailable'}`}
+          className="execution-quality-freshness"
+          role={freshness.stale ? 'status' : undefined}
         >
-          {state.pathEvidenceStatus}
-        </span>
-        <dl className="v35-operator-metrics">
-          <div>
-            <dt>Terminal paths retained</dt>
-            <dd>
-              {state.pathEvidence.historyContractAvailable
-                ? state.pathEvidence.terminalPaths.length
-                : 'Unavailable'}
-            </dd>
-          </div>
-          <div>
-            <dt>Global terminal-path history truncated</dt>
-            <dd>
-              {state.pathEvidence.historyTruncated === null
-                ? 'Unavailable'
-                : String(state.pathEvidence.historyTruncated)}
-            </dd>
-          </div>
-          <div>
-            <dt>More order-history pages</dt>
-            <dd>
-              {state.pathEvidence.historyHasMoreOrders === null
-                ? 'Unavailable'
-                : String(state.pathEvidence.historyHasMoreOrders)}
-            </dd>
-          </div>
-          <div>
-            <dt>Unlinked path records</dt>
-            <dd>
-              {state.pathEvidence.historyContractAvailable
-                ? state.unlinkedMarketPaths.length
-                : 'Unavailable'}
-            </dd>
-          </div>
-        </dl>
-        {state.pathEvidenceStatus !== 'available' && (
-          <p role="status">
-            {!state.pathEvidence.historyContractAvailable
-              ? 'The current Position Management history contract does not expose durable matcher-path records.'
-              : state.pathEvidenceStatus === 'unavailable'
-                ? 'The current Position Management contract does not expose durable matcher-path history.'
-                : 'Matcher-path coverage is partial; missing source, retention, or active-order fields remain unavailable.'}
-          </p>
-        )}
-        <p>
-          Matcher probes and resting-limit observations are not settled fills.
-          Fill quantities shown below come from AutoTrader activity and are not
-          inferred from a price touch.
-        </p>
-      </section>
-
-      <div>
-        <strong>Order records</strong>
-        <span>
-          Showing {state.displayedOrderCount} of {state.availableOrderCount}{' '}
-          returned records (view cap 100)
-          {state.availableOrderCount > state.displayedOrderCount
-            ? '; older returned records omitted'
-            : '; backend history completeness unknown'}
-          .
+          {freshness.label}
         </span>
         <button
           type="button"
           onClick={onRefresh}
           disabled={!onRefresh || state.pathEvidenceLoading}
         >
-          {state.pathEvidenceLoading
-            ? 'Refreshing…'
-            : 'Refresh execution evidence'}
+          {state.pathEvidenceLoading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
 
-      <div className="auto-trader-execution-quality-filters">
-        <label>
-          Symbol
-          <select
-            aria-label="Filter execution orders by symbol"
-            value={state.filters.symbol}
-            onChange={(event) => onSetFilters?.({ symbol: event.target.value })}
-          >
-            <option value="">All symbols</option>
-            {state.symbols.map((symbol) => (
-              <option key={symbol} value={symbol}>
-                {symbol}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Outcome
-          <select
-            aria-label="Filter execution orders by outcome"
-            value={state.filters.outcome}
-            onChange={(event) =>
-              onSetFilters?.({
-                outcome: event.target.value as ExecutionOutcome | '',
-              })
-            }
-          >
-            {outcomeFilters.map((filter) => (
-              <option key={filter.value || 'all'} value={filter.value}>
-                {filter.label}
-              </option>
-            ))}
-          </select>
-        </label>
+      <OperatorMetricStrip
+        label="Execution quality summary"
+        metrics={[
+          {
+            label: 'Submitted',
+            value: summary.order_samples.toLocaleString(),
+            detail: summary.history_truncated
+              ? 'History truncated'
+              : 'Aggregate sample',
+          },
+          {
+            label: 'Filled',
+            value:
+              summary.filled_order_samples.toLocaleString() +
+              (summary.partial_fill_samples > 0
+                ? ' + ' +
+                  summary.partial_fill_samples.toLocaleString() +
+                  ' partial'
+                : ''),
+            detail: summary.order_samples
+              ? 'of ' + summary.order_samples.toLocaleString() + ' orders'
+              : 'No denominator',
+          },
+          {
+            label: 'Fill rate',
+            value: compactPercent(fillRate),
+            tone:
+              fillRate === null
+                ? 'neutral'
+                : fillRate > 0
+                  ? 'positive'
+                  : 'warning',
+            detail:
+              fillRate === null ? 'Unavailable' : 'includes partial fills',
+          },
+          {
+            label: 'Avg fee',
+            value:
+              typeof summary.average_fee_bps === 'number' &&
+              Number.isFinite(summary.average_fee_bps)
+                ? summary.average_fee_bps.toFixed(2) + ' bps'
+                : 'Unavailable',
+            detail:
+              summary.measured_fill_samples.toLocaleString() +
+              ' measured fills',
+          },
+          {
+            label: 'All-in cost',
+            value:
+              typeof summary.average_all_in_cost_bps === 'number' &&
+              Number.isFinite(summary.average_all_in_cost_bps)
+                ? summary.average_all_in_cost_bps.toFixed(2) + ' bps'
+                : 'Unavailable',
+            detail:
+              typeof summary.average_all_in_cost_bps === 'number'
+                ? summary.measured_fill_samples.toLocaleString() +
+                  ' measured fills'
+                : 'No complete cost evidence',
+          },
+        ]}
+      />
+
+      <div
+        className="execution-quality-outcome-bar"
+        role="img"
+        aria-label={
+          'Returned order outcomes: ' +
+          observedOutcomes
+            .filter((item) => item.count > 0)
+            .map((item) => item.label + ' ' + item.count)
+            .join(', ')
+        }
+      >
+        {outcomeTotal > 0 ? (
+          observedOutcomes.map((item) =>
+            item.count > 0 ? (
+              <span
+                key={item.id}
+                className={'execution-quality-outcome-bar__' + item.tone}
+                style={{ width: (item.count / outcomeTotal) * 100 + '%' }}
+              />
+            ) : null,
+          )
+        ) : (
+          <span className="execution-quality-outcome-bar__empty" />
+        )}
+      </div>
+      <div className="execution-quality-outcome-legend">
+        {observedOutcomes.map((item) => (
+          <span key={item.id} data-tone={item.tone}>
+            {item.count.toLocaleString()} {item.label.toLowerCase()}
+          </span>
+        ))}
+        <span className="execution-quality-outcome-coverage">
+          Returned rows only · {state.displayedOrderCount} shown
+          {state.availableOrderCount > state.displayedOrderCount
+            ? ' of ' + state.availableOrderCount.toLocaleString()
+            : ''}
+        </span>
       </div>
 
+      <OperatorTabBar
+        label="Execution quality views"
+        selectedId={state.view}
+        onSelect={(id) => onSetView?.(id as ExecutionQualityState['view'])}
+        tabs={[
+          { id: 'overview', label: 'Overview' },
+          { id: 'orders', label: 'Orders' },
+          { id: 'history', label: 'History' },
+        ]}
+      />
+
       {state.pathEvidenceError && (
-        <p role="alert">
-          Matcher-path refresh failed: {state.pathEvidenceError}
+        <p className="execution-quality-message" role="alert">
+          Matcher path refresh failed: {state.pathEvidenceError}
           {state.pathEvidenceStale
-            ? ' Showing the last successful path evidence; it is stale.'
-            : ' No successful path evidence is available yet.'}
+            ? ' Last successful evidence is shown as stale.'
+            : ' No successful matcher-path evidence is available.'}
         </p>
       )}
       {state.pathEvidenceStale && !state.pathEvidenceError && (
-        <p role="status">
-          Showing the last successful matcher-path snapshot while a refresh is
+        <p className="execution-quality-message" role="status">
+          Showing the last successful matcher-path snapshot while refresh is
           pending.
         </p>
       )}
-      {state.loading && state.availableOrderCount === 0 ? (
-        <p role="status">Loading execution order evidence…</p>
-      ) : state.availableOrderCount === 0 ? (
-        <p role="status">
-          No AutoTrader order records were returned. The quality summary reports{' '}
-          {summary.filled_order_samples} fills from {summary.order_samples}{' '}
-          orders; zero orders in this response do not establish complete
-          history.
-        </p>
-      ) : filteredRows.length === 0 ? (
-        <p role="status">No order records match these filters.</p>
-      ) : (
-        <ol className="auto-trader-execution-quality-orders">
-          {filteredRows.map((row) => {
-            const order = row.order;
-            const pending = row.outcome === 'pending';
-            const elapsedMs = pending
-              ? Math.max(currentTime - order.timestamp, 0)
-              : null;
-            return (
-              <li key={row.key}>
-                <header>
-                  <strong>
-                    {order.symbol} · {order.side.toUpperCase()} ·{' '}
-                    {row.outcomeLabel}
-                  </strong>
-                  <span>{new Date(order.timestamp).toLocaleString()}</span>
-                </header>
-                <dl>
-                  <div>
-                    <dt>Decision ID</dt>
-                    <dd>{row.decisionId ?? 'Not recorded'}</dd>
-                  </div>
-                  <div>
-                    <dt>Execution order ID</dt>
-                    <dd>{row.stableOrderId ?? 'Not recorded'}</dd>
-                  </div>
-                  <div>
-                    <dt>Strategy / purpose</dt>
-                    <dd>
-                      {[order.strategy, order.purpose]
-                        .filter(Boolean)
-                        .join(' · ') || 'Unavailable'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Order type / status</dt>
-                    <dd>
-                      {order.order_type} · {order.status}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Reservation evidence</dt>
-                    <dd>
-                      {typeof order.reserved_notional === 'number'
-                        ? `Recorded notional ${order.reserved_notional.toFixed(2)}`
-                        : 'Amount unavailable'}
-                      {' · reservation ID and timestamp unavailable'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Decision bid / ask</dt>
-                    <dd>
-                      {price(order.decision_bid)} / {price(order.decision_ask)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Submitted limit</dt>
-                    <dd>{price(order.submitted_limit_price)}</dd>
-                  </div>
-                  <div>
-                    <dt>Limit vs same-side decision quote</dt>
-                    <dd>
-                      {decisionPriceDistanceLabel(row.decisionTouchDistanceBps)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Limit vs opposite decision quote</dt>
-                    <dd>
-                      {decisionPriceDistanceLabel(
-                        row.decisionCrossingQuoteDistanceBps,
-                      )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Filled / requested quantity</dt>
-                    <dd>
-                      {order.filled_quantity} / {order.quantity}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Average fill price / fees</dt>
-                    <dd>
-                      {price(order.average_price)} /{' '}
-                      {typeof order.fees_paid === 'number'
-                        ? order.fees_paid.toPrecision(8)
-                        : 'Unavailable'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Configured lifetime to expiry</dt>
-                    <dd>{duration(row.configuredLifetimeMs)}</dd>
-                  </div>
-                  <div>
-                    <dt>Order age</dt>
-                    <dd>
-                      {pending
-                        ? `At least ${duration(elapsedMs)} since recorded order timestamp`
-                        : 'Actual terminal lifetime unavailable; terminal timestamp not recorded'}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Terminal / failure reason</dt>
-                    <dd>
-                      {order.failure_reason?.trim() ||
-                        'No terminal reason recorded'}
-                    </dd>
-                  </div>
-                  {row.outcome === 'cancelled' && (
-                    <div>
-                      <dt>Cancellation actor</dt>
-                      <dd>Unavailable</dd>
-                    </div>
-                  )}
-                </dl>
-                {row.marketPaths.length > 0 ? (
-                  <section aria-label="Linked Position Management market path">
-                    <strong>Linked Position Management path evidence</strong>
-                    {row.marketPaths.map((path) =>
-                      marketPathPanel(path, order),
-                    )}
-                  </section>
-                ) : (
-                  <p>
-                    Linked Position Management market path:{' '}
-                    {state.pathEvidenceStatus === 'unavailable'
-                      ? 'Unavailable'
-                      : 'No path joined by stable order, client, or parent identifier'}
-                    .
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ol>
+
+      {state.view === 'overview' && (
+        <div className="execution-quality-overview">
+          <section aria-label="Strategy execution breakdown">
+            <header className="execution-quality-section-heading">
+              <strong>Returned orders by strategy</strong>
+              <span>
+                {state.displayedOrderCount} order rows · fees are shown as
+                evidence coverage, not summed across currencies
+              </span>
+            </header>
+            {state.strategyRows.length === 0 ? (
+              <p className="execution-quality-message">
+                No strategy breakdown is available from returned order records.
+              </p>
+            ) : (
+              <CompactTable label="Returned order strategy breakdown">
+                <thead>
+                  <tr>
+                    <th className="is-left">Strategy</th>
+                    <th>Orders</th>
+                    <th>With fill</th>
+                    <th>Fill %</th>
+                    <th>Avg age</th>
+                    <th>Fee records</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.strategyRows.map((row) => (
+                    <tr key={row.strategy}>
+                      <td className="is-left">{row.strategy}</td>
+                      <td>{row.orderCount.toLocaleString()}</td>
+                      <td>{row.filledCount.toLocaleString()}</td>
+                      <td>{compactPercent(row.fillRatePercent)}</td>
+                      <td>
+                        {row.averageTerminalLifetimeMs === null
+                          ? 'Unavailable'
+                          : duration(row.averageTerminalLifetimeMs) +
+                            ' · ' +
+                            row.terminalAgeSamples.toLocaleString() +
+                            ' terminal records'}
+                      </td>
+                      <td>
+                        {row.feeEvidenceCount.toLocaleString()} /{' '}
+                        {row.orderCount.toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </CompactTable>
+            )}
+            {state.availableOrderCount > state.displayedOrderCount && (
+              <p className="execution-quality-message" role="status">
+                Strategy counts cover the returned, capped records only; older
+                orders are omitted from this breakdown.
+              </p>
+            )}
+          </section>
+
+          {selected ? (
+            <SelectedExecutionOrder
+              row={selected}
+              nowMs={currentTime}
+              onClose={() => onSelectOrder?.(null)}
+            />
+          ) : (
+            <p className="execution-quality-message">
+              Select an order from the Orders view to inspect its price and
+              lifecycle evidence.
+            </p>
+          )}
+        </div>
       )}
-      {state.unlinkedMarketPaths.length > 0 && (
-        <section aria-label="Unlinked PM market path records">
-          <h3>Unlinked PM path records</h3>
-          <p>
-            These records are retained as observed evidence but are not
-            attributed to AutoTrader activity because stable identifiers did not
-            yield a unique join.
-          </p>
-          {state.unlinkedMarketPaths.map(unlinkedPathPanel)}
+
+      {state.view === 'orders' && (
+        <section
+          aria-label="Execution order records"
+          className="execution-quality-orders-view"
+        >
+          <div className="execution-quality-filters">
+            <label>
+              Symbol
+              <select
+                aria-label="Filter execution orders by symbol"
+                value={state.filters.symbol}
+                onChange={(event) =>
+                  onSetFilters?.({ symbol: event.target.value })
+                }
+              >
+                <option value="">All symbols</option>
+                {state.symbols.map((symbol) => (
+                  <option key={symbol} value={symbol}>
+                    {symbol}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Outcome
+              <select
+                aria-label="Filter execution orders by outcome"
+                value={state.filters.outcome}
+                onChange={(event) =>
+                  onSetFilters?.({
+                    outcome: event.target.value as ExecutionOutcome | '',
+                  })
+                }
+              >
+                {outcomeFilters.map((filter) => (
+                  <option key={filter.value || 'all'} value={filter.value}>
+                    {filter.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {state.loading && state.availableOrderCount === 0 ? (
+            <p className="execution-quality-message" role="status">
+              Loading execution orders…
+            </p>
+          ) : state.availableOrderCount === 0 ? (
+            <p className="execution-quality-message" role="status">
+              No AutoTrader order records were returned. Zero records do not
+              establish complete history.
+            </p>
+          ) : state.visibleRows.length === 0 ? (
+            <p className="execution-quality-message" role="status">
+              No order records match these filters.
+            </p>
+          ) : (
+            <CompactTable label="Execution order records">
+              <thead>
+                <tr>
+                  {sortHeader('symbol', 'Symbol')}
+                  {sortHeader('strategy', 'Strategy')}
+                  {sortHeader('outcome', 'Outcome')}
+                  {sortHeader('timestamp', 'Submitted')}
+                  <th>Limit</th>
+                  <th>Filled</th>
+                  <th>Age</th>
+                </tr>
+              </thead>
+              <tbody>
+                {state.visibleRows.map((row) => (
+                  <tr
+                    key={row.key}
+                    className={
+                      selected?.key === row.key ? 'is-selected' : undefined
+                    }
+                  >
+                    <td className="is-left">
+                      <button
+                        className="execution-quality-order-select"
+                        type="button"
+                        aria-pressed={selected?.key === row.key}
+                        onClick={() => onSelectOrder?.(row.key)}
+                      >
+                        {row.order.symbol || 'Unavailable'}
+                      </button>
+                    </td>
+                    <td>{row.order.strategy?.trim() || 'Unavailable'}</td>
+                    <td data-outcome={row.outcome}>{statusLabel(row)}</td>
+                    <td>
+                      {new Intl.DateTimeFormat(undefined, {
+                        month: 'numeric',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                      }).format(row.order.timestamp)}
+                    </td>
+                    <td>{price(row.order.submitted_limit_price)}</td>
+                    <td>
+                      {sourceValue(row.order.filled_quantity)} /{' '}
+                      {sourceValue(row.order.quantity)}
+                    </td>
+                    <td>{rowAge(row)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </CompactTable>
+          )}
+
+          {selected && (
+            <SelectedExecutionOrder
+              row={selected}
+              nowMs={currentTime}
+              onClose={() => onSelectOrder?.(null)}
+            />
+          )}
         </section>
       )}
+
+      {state.view === 'history' && (
+        <section
+          className="execution-quality-history"
+          aria-label="Durable matcher path history"
+        >
+          <header className="execution-quality-section-heading">
+            <strong>Durable matcher path evidence</strong>
+            <span
+              className={
+                'execution-quality-evidence-state is-' +
+                state.pathEvidenceStatus
+              }
+            >
+              {state.pathEvidenceStatus}
+            </span>
+          </header>
+          <div className="execution-quality-history-summary">
+            <span>
+              Terminal paths{' '}
+              {state.pathEvidence.historyContractAvailable
+                ? state.pathEvidence.terminalPaths.length.toLocaleString()
+                : 'Unavailable'}
+            </span>
+            <span>
+              Unlinked records{' '}
+              {state.pathEvidence.historyContractAvailable
+                ? state.unlinkedMarketPaths.length.toLocaleString()
+                : 'Unavailable'}
+            </span>
+            <span>
+              History truncated{' '}
+              {state.pathEvidence.historyTruncated === null
+                ? 'Unavailable'
+                : String(state.pathEvidence.historyTruncated)}
+            </span>
+          </div>
+          {state.pathEvidenceStatus !== 'available' && (
+            <p className="execution-quality-message" role="status">
+              {!state.pathEvidence.historyContractAvailable
+                ? 'The current Position Management history contract does not expose durable matcher-path records.'
+                : state.pathEvidenceStatus === 'unavailable'
+                  ? 'The current Position Management contract does not expose durable matcher-path history.'
+                  : 'Matcher-path coverage is partial; missing source, retention, or active-order fields remain unavailable.'}
+            </p>
+          )}
+          {state.pathEvidenceStatus === 'unavailable' ? (
+            <p className="execution-quality-message">
+              Matcher probes and resting-limit observations are not settled
+              fills. A price touch does not prove order fillability.
+            </p>
+          ) : (
+            <div className="execution-quality-history-list">
+              {[...activePaths, ...terminalPaths].map((path) =>
+                marketPathPanel(path),
+              )}
+              {state.unlinkedMarketPaths.map(unlinkedPathPanel)}
+            </div>
+          )}
+          <details className="execution-quality-provenance-note">
+            <summary>Coverage and attribution limits</summary>
+            <p>
+              Path records are joined only by stable order or parent identity.
+              They do not establish continuous quote coverage, queue priority,
+              or fillability; settled fills remain sourced from AutoTrader
+              activity.
+            </p>
+            <p>
+              More order-history pages:{' '}
+              {state.pathEvidence.historyHasMoreOrders === null
+                ? 'Unavailable'
+                : String(state.pathEvidence.historyHasMoreOrders)}
+            </p>
+          </details>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function SelectedExecutionOrder({
+  row,
+  nowMs,
+  onClose,
+}: {
+  row: ExecutionQualityState['rows'][number];
+  nowMs: number;
+  onClose: () => void;
+}) {
+  const order = row.order;
+  const pending = row.outcome === 'pending';
+  const elapsed = pending
+    ? 'At least ' + duration(Math.max(nowMs - order.timestamp, 0))
+    : 'Unavailable';
+  return (
+    <section
+      className="execution-quality-selected"
+      aria-label="Selected order detail"
+    >
+      <header>
+        <div>
+          <strong>
+            {order.symbol} · {order.side.toUpperCase()} · {row.outcomeLabel}
+          </strong>
+          <span>
+            {order.strategy?.trim() || 'Strategy unavailable'} ·{' '}
+            {order.order_type || 'Order type unavailable'}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Clear selected order"
+        >
+          ×
+        </button>
+      </header>
+      <div className="execution-quality-selected-grid">
+        <dl>
+          <div>
+            <dt>Submitted limit</dt>
+            <dd>{price(order.submitted_limit_price)}</dd>
+          </div>
+          <div>
+            <dt>Decision bid / ask</dt>
+            <dd>
+              {price(order.decision_bid)} / {price(order.decision_ask)}
+            </dd>
+          </div>
+          <div>
+            <dt>Limit / same-side quote</dt>
+            <dd>{decisionPriceDistanceLabel(row.decisionTouchDistanceBps)}</dd>
+          </div>
+          <div>
+            <dt>Limit / opposite quote</dt>
+            <dd>
+              {decisionPriceDistanceLabel(row.decisionCrossingQuoteDistanceBps)}
+            </dd>
+          </div>
+        </dl>
+        <dl>
+          <div>
+            <dt>Filled / requested</dt>
+            <dd>
+              {sourceValue(order.filled_quantity)} /{' '}
+              {sourceValue(order.quantity)}
+            </dd>
+          </div>
+          <div>
+            <dt>Average fill</dt>
+            <dd>{price(order.average_price)}</dd>
+          </div>
+          <div>
+            <dt>Reservation amount</dt>
+            <dd>
+              {typeof order.reserved_notional === 'number'
+                ? order.reserved_notional.toLocaleString(undefined, {
+                    maximumFractionDigits: 2,
+                  })
+                : 'Unavailable'}
+            </dd>
+          </div>
+          <div>
+            <dt>Configured expiry</dt>
+            <dd>{duration(row.configuredLifetimeMs)}</dd>
+          </div>
+        </dl>
+      </div>
+      <details>
+        <summary>Identifiers, terminal reason and source evidence</summary>
+        <dl className="execution-quality-identifiers">
+          <div>
+            <dt>Decision ID</dt>
+            <dd>{row.decisionId ?? 'Unavailable'}</dd>
+          </div>
+          <div>
+            <dt>Execution order ID</dt>
+            <dd>{row.stableOrderId ?? 'Unavailable'}</dd>
+          </div>
+          <div>
+            <dt>Order age</dt>
+            <dd>{elapsed}</dd>
+          </div>
+          <div>
+            <dt>Terminal lifetime</dt>
+            <dd>
+              {row.marketPaths.find((path) => path.terminalAtMs !== null)
+                ? duration(
+                    Math.max(
+                      row.marketPaths.find(
+                        (path) => path.terminalAtMs !== null,
+                      )!.terminalAtMs! - order.timestamp,
+                      0,
+                    ),
+                  )
+                : 'Unavailable · terminal timestamp not recorded'}
+            </dd>
+          </div>
+          <div>
+            <dt>Failure / terminal reason</dt>
+            <dd>{order.failure_reason?.trim() || 'Not recorded'}</dd>
+          </div>
+          <div>
+            <dt>Fee amount</dt>
+            <dd>
+              {typeof order.fees_paid === 'number'
+                ? order.fees_paid.toPrecision(8)
+                : 'Unavailable'}
+            </dd>
+          </div>
+          <div>
+            <dt>Cancellation actor</dt>
+            <dd>
+              {row.outcome === 'cancelled' ? 'Unavailable' : 'Not applicable'}
+            </dd>
+          </div>
+        </dl>
+      </details>
+      <details>
+        <summary>
+          Linked Position Management market path · {row.marketPaths.length}{' '}
+          record(s)
+        </summary>
+        {row.marketPaths.length > 0 ? (
+          row.marketPaths.map((path) => marketPathPanel(path, order))
+        ) : (
+          <p>
+            {row.marketPaths.length === 0
+              ? 'No durable path joined by stable order, client, or parent identifier.'
+              : 'Unavailable'}
+          </p>
+        )}
+      </details>
+      <p className="execution-quality-disclaimer">
+        Matcher observations are not settled fills; a price touch does not prove
+        fillability.
+      </p>
     </section>
   );
 }
@@ -627,6 +918,9 @@ export function AutoTraderExecutionCheck() {
     <ExecutionQualityPanel
       state={state}
       onSetFilters={(filters) => model.setFilters(filters)}
+      onSetView={(view) => model.setView(view)}
+      onSelectOrder={(key) => model.selectOrder(key)}
+      onSetSort={(field) => model.setSort(field)}
       onRefresh={() => void model.refresh()}
     />
   );

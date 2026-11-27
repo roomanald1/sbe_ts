@@ -189,10 +189,12 @@ impl RSocket for PaperExchangeRSocketResponder {
                 "/positions/barriers",
                 "/positions/close-profitable",
                 "/internal/financial/evidence",
+                "/internal/financial/fee-schedules",
                 "/internal/orders/match",
                 "/internal/market-book",
                 "/internal/market-mark",
                 "/internal/market-history",
+                "/internal/market-quote-path",
                 "/internal/insights-inputs",
                 "/internal/market-histories",
             ];
@@ -360,10 +362,15 @@ mod tests {
 
     #[tokio::test]
     async fn paper_exchange_rsocket_allows_read_only_financial_evidence_route() {
-        let router = Router::new().route(
-            "/internal/financial/evidence",
-            get(|| async { axum::Json(serde_json::json!({"events": []})) }),
-        );
+        let router = Router::new()
+            .route(
+                "/internal/financial/evidence",
+                get(|| async { axum::Json(serde_json::json!({"events": []})) }),
+            )
+            .route(
+                "/internal/financial/fee-schedules",
+                get(|| async { axum::Json(serde_json::json!({"schedules": []})) }),
+            );
         let responder = PaperExchangeRSocketResponder { router };
         let request = Payload::builder()
             .set_data(
@@ -379,5 +386,26 @@ mod tests {
         let response: serde_json::Value = serde_json::from_slice(response.data().unwrap()).unwrap();
         assert_eq!(response["status"], 200);
         assert_eq!(response["body"]["events"], serde_json::json!([]));
+
+        let schedule_request = Payload::builder()
+            .set_data(
+                serde_json::to_vec(&PositionManagementRequest {
+                    method: "GET".into(),
+                    path: "/internal/financial/fee-schedules?symbols=BTC-USDT&at_utc_ms=1000"
+                        .into(),
+                    body: None,
+                })
+                .unwrap(),
+            )
+            .build();
+        let schedule_response = responder
+            .request_response(schedule_request)
+            .await
+            .unwrap()
+            .unwrap();
+        let schedule_body: serde_json::Value =
+            serde_json::from_slice(schedule_response.data().unwrap()).unwrap();
+        assert_eq!(schedule_body["status"], 200);
+        assert_eq!(schedule_body["body"]["schedules"], serde_json::json!([]));
     }
 }

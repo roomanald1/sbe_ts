@@ -16,8 +16,21 @@ import {
 } from '../models/AutoTraderOutcomesModel';
 import { autoTraderScoutModel } from '../models/AutoTraderScoutModel';
 import {
+  CompactTable,
+  OperatorMetricStrip,
+  OperatorStatus,
+  OperatorTabBar,
+  useBehaviorSnapshot,
+} from '@workspace/ui-platform';
+import {
   AutoTraderStrategyPerformanceModel,
   STRATEGY_PERFORMANCE_COLUMN_GROUPS,
+  projectExitProfileSnapshot,
+  projectStrategyCoverageByStrategy,
+  projectStrategyCoverageHeatmap,
+  projectStrategyOutcomeCoverage,
+  projectStrategyOutcomeHistory,
+  projectScoutOutcomeCounts,
   summarizeStrategyOutcomeEvidence,
 } from '../models/AutoTraderStrategyPerformanceModel';
 import {
@@ -25,7 +38,6 @@ import {
   type AutoTraderStrategyProfile,
   type Strategy,
 } from '../models/AutoTraderModel';
-import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { scoutableStrategies } from './AutoTraderStrategyParameters';
 import { strategyLabel } from './AutoTraderOrderGrid';
 
@@ -359,6 +371,41 @@ export function AutoTraderStrategyPerformanceWidget({
   const evidenceSummary = useMemo(
     () => summarizeStrategyOutcomeEvidence(closedRows),
     [closedRows],
+  );
+  const coverageRows = useMemo(
+    () => projectStrategyOutcomeCoverage(closedRows),
+    [closedRows],
+  );
+  const coverageByStrategy = useMemo(
+    () => projectStrategyCoverageByStrategy(coverageRows),
+    [coverageRows],
+  );
+  const coverageHeatmap = useMemo(
+    () => projectStrategyCoverageHeatmap(coverageRows),
+    [coverageRows],
+  );
+  const closedHistory = useMemo(
+    () => projectStrategyOutcomeHistory(closedRows),
+    [closedRows],
+  );
+  const profileRows = useMemo(
+    () =>
+      projectExitProfileSnapshot(
+        settings.decisionParameters?.strategy_profiles ?? [],
+      ),
+    [settings.decisionParameters?.strategy_profiles],
+  );
+  const scoutEvidenceRows = useMemo(
+    () => projectScoutOutcomeCounts(scoutState.learningOutcomes),
+    [scoutState.learningOutcomes],
+  );
+  const scoutOutcomeCount = scoutEvidenceRows.reduce(
+    (total, row) => total + row.outcomes,
+    0,
+  );
+  const scoutPositiveCount = scoutEvidenceRows.reduce(
+    (total, row) => total + row.positiveOutcomes,
+    0,
   );
   const openRows = useMemo(
     () => rows.filter((row) => row.status === 'Open'),
@@ -1255,156 +1302,460 @@ export function AutoTraderStrategyPerformanceWidget({
   );
   return (
     <section
-      className="feed-section auto-trader-outcomes-embedded v35-operator-card"
+      className="feed-section auto-trader-outcomes-embedded v35-operator-card v35-strategy-performance"
       aria-label="Strategy performance"
     >
-      <div className="auto-trader-strategy-winrate-heading">
-        <strong className="auto-trader-strategy-winrate-title">
-          Strategy performance evidence
-        </strong>
-        <label>
-          <input
-            type="checkbox"
-            checked={hideDisabledStrategies}
-            onChange={(event) =>
-              updateHideDisabledStrategies(event.target.checked)
-            }
-          />{' '}
-          Hide disabled strategies
-        </label>
+      <div className="v35-strategy-performance__heading">
+        <strong>Strategy Performance</strong>
+        <OperatorStatus tone={state.loading ? 'warning' : 'neutral'}>
+          {state.loading
+            ? 'Refreshing outcomes'
+            : viewState.sourceView === 'scouts'
+              ? `${scoutOutcomeCount.toLocaleString()} raw Scout outcomes`
+              : `${closedRows.length} closed audit rows`}
+        </OperatorStatus>
       </div>
-      <div
-        className="auto-trader-strategy-column-group-controls"
-        aria-label="Visible column groups"
-      >
-        {STRATEGY_COLUMN_GROUPS.map(({ id, label }) => (
-          <label key={id}>
+      <OperatorTabBar
+        label="Performance evidence source"
+        selectedId={viewState.sourceView}
+        onSelect={(id) =>
+          model.setSourceView(id as typeof viewState.sourceView)
+        }
+        tabs={[
+          { id: 'autotrader', label: 'AutoTrader' },
+          { id: 'scouts', label: 'Scouts' },
+        ]}
+      />
+      <OperatorMetricStrip
+        label="Strategy performance summary"
+        metrics={
+          viewState.sourceView === 'scouts'
+            ? [
+                {
+                  label: 'Scout outcomes',
+                  value: scoutOutcomeCount.toLocaleString(),
+                },
+                {
+                  label: 'Positive outcomes',
+                  value: scoutPositiveCount.toLocaleString(),
+                },
+                { label: 'Accepted gain', value: 'Unavailable' },
+                { label: 'Effective N', value: 'Unavailable' },
+                { label: 'Paper net P&L', value: 'Not Scout evidence' },
+              ]
+            : [
+                {
+                  label: 'Closed audit rows',
+                  value: closedRows.length.toLocaleString(),
+                },
+                { label: 'Reconciled net P&L', value: 'Unavailable' },
+                { label: 'Win rate', value: 'Unavailable' },
+                { label: 'Profit factor', value: 'Unavailable' },
+                { label: 'Expectancy (R)', value: 'Unavailable' },
+              ]
+        }
+      />
+      <OperatorTabBar
+        label="Strategy performance views"
+        selectedId={viewState.view}
+        onSelect={(id) => model.setView(id as typeof viewState.view)}
+        tabs={[
+          { id: 'performance', label: 'Performance' },
+          { id: 'heatmap', label: 'Heatmap' },
+          { id: 'history', label: 'History' },
+          { id: 'exit-policies', label: 'Learned exit policies' },
+        ]}
+      />
+      {viewState.view === 'performance' &&
+        (viewState.sourceView === 'scouts' ? (
+          <>
+            <CompactTable label="Raw Scout outcome counts by strategy">
+              <thead>
+                <tr>
+                  <th scope="col">Strategy</th>
+                  <th scope="col">Raw outcomes</th>
+                  <th scope="col">Positive outcomes</th>
+                  <th scope="col">Net P&amp;L</th>
+                  <th scope="col">Effective N</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scoutEvidenceRows.map((row) => (
+                  <tr key={row.strategy}>
+                    <th scope="row">
+                      {strategyLabel(row.strategy as Strategy)}
+                    </th>
+                    <td>{row.outcomes}</td>
+                    <td>{row.positiveOutcomes}</td>
+                    <td>Unavailable · Scout evidence</td>
+                    <td>Unavailable</td>
+                  </tr>
+                ))}
+                {scoutEvidenceRows.length === 0 && (
+                  <tr>
+                    <td colSpan={5}>No Scout outcome rows returned.</td>
+                  </tr>
+                )}
+              </tbody>
+            </CompactTable>
+            <p className="auto-trader-strategy-winrate-note">
+              Scout observations are separate research evidence, not executed
+              AutoTrader trades. Raw counts do not represent accepted
+              independent gains, effective sample size or promotion eligibility.
+            </p>
+          </>
+        ) : (
+          <>
+            <CompactTable label="Strategy financial performance evidence">
+              <thead>
+                <tr>
+                  <th scope="col">Strategy</th>
+                  <th scope="col">Closed audit rows</th>
+                  <th scope="col">Net P&amp;L</th>
+                  <th scope="col">Win %</th>
+                  <th scope="col">PF</th>
+                  <th scope="col">Payoff</th>
+                  <th scope="col">Avg R</th>
+                  <th scope="col">Effective N</th>
+                </tr>
+              </thead>
+              <tbody>
+                {coverageByStrategy.map(({ strategy, closedAuditRows }) => (
+                  <tr key={strategy}>
+                    <th scope="row">{strategyLabel(strategy as Strategy)}</th>
+                    <td>{closedAuditRows.toLocaleString()}</td>
+                    <td>Unavailable</td>
+                    <td>Unavailable</td>
+                    <td>Unavailable</td>
+                    <td>Unavailable</td>
+                    <td>Unavailable</td>
+                    <td>Unavailable</td>
+                  </tr>
+                ))}
+                {coverageByStrategy.length === 0 && (
+                  <tr>
+                    <td colSpan={8}>No closed audit outcome rows.</td>
+                  </tr>
+                )}
+              </tbody>
+            </CompactTable>
+            <div className="v35-strategy-performance__visuals">
+              <section aria-label="Winner and loser analysis">
+                <strong>Net winners / losers</strong>
+                <p>
+                  Unavailable · no independently reconciled cost-complete
+                  outcome distribution is exposed.
+                </p>
+              </section>
+              <section aria-label="Cumulative net profit and loss">
+                <strong>Cumulative net P&amp;L</strong>
+                <p>
+                  Unavailable · no continuous independently reconciled strategy
+                  series is exposed.
+                </p>
+              </section>
+            </div>
+            <p className="auto-trader-strategy-winrate-note" role="status">
+              Closed rows are audit-derived source records, not verified
+              independent trades. Financial metrics, effective sample size, and
+              performance ranking remain unavailable until authoritative
+              cost-complete reconciliation is connected.
+            </p>
+          </>
+        ))}
+      {viewState.view === 'heatmap' &&
+        (viewState.sourceView === 'scouts' ? (
+          <p className="auto-trader-strategy-winrate-note">
+            Symbol-level Scout outcome coverage is unavailable in the current
+            Learning summary contract.
+          </p>
+        ) : (
+          <div>
+            <p className="auto-trader-strategy-winrate-note">
+              Closed audit-row coverage only. Cell intensity represents returned
+              row count; it does not represent financial performance,
+              eligibility or independent sample size.
+            </p>
+            <CompactTable label="Closed audit row coverage heatmap by strategy and symbol">
+              <thead>
+                <tr>
+                  <th scope="col">Strategy</th>
+                  {coverageHeatmap.symbols.map((symbol) => (
+                    <th scope="col" key={symbol}>
+                      {symbol}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {coverageHeatmap.rows.map((row) => (
+                  <tr key={row.strategy}>
+                    <th scope="row">
+                      {strategyLabel(row.strategy as Strategy)}
+                    </th>
+                    {row.cells.map((cell) => (
+                      <td key={cell.symbol} data-intensity={cell.intensity}>
+                        {cell.closedAuditRows || '—'}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {coverageHeatmap.rows.length === 0 && (
+                  <tr>
+                    <td
+                      colSpan={Math.max(1, coverageHeatmap.symbols.length + 1)}
+                    >
+                      No closed audit coverage.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </CompactTable>
+          </div>
+        ))}
+      {viewState.view === 'history' &&
+        (viewState.sourceView === 'scouts' ? (
+          <p className="auto-trader-strategy-winrate-note">
+            Row-level Scout history is unavailable in the current aggregate
+            Learning summary contract.
+          </p>
+        ) : (
+          <CompactTable label="Recent closed audit outcome history">
+            <thead>
+              <tr>
+                <th scope="col">Closed</th>
+                <th scope="col">Symbol</th>
+                <th scope="col">Strategy</th>
+                <th scope="col">Source</th>
+                <th scope="col">Profile</th>
+                <th scope="col">Financial result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {closedHistory.map((row) => (
+                <tr key={row.rowId}>
+                  <td>
+                    {row.closedAt
+                      ? new Date(row.closedAt).toLocaleString()
+                      : 'Unavailable'}
+                  </td>
+                  <td>{row.symbol}</td>
+                  <td>{strategyLabel(row.strategy as Strategy)}</td>
+                  <td>{row.source}</td>
+                  <td>
+                    {row.entryProfileId
+                      ? `${row.entryProfileId}${row.entryProfileVersion === null ? '' : ` · v${row.entryProfileVersion}`}`
+                      : 'Unavailable'}
+                  </td>
+                  <td>Unavailable pending independent reconciliation</td>
+                </tr>
+              ))}
+              {closedHistory.length === 0 && (
+                <tr>
+                  <td colSpan={6}>No closed audit history.</td>
+                </tr>
+              )}
+            </tbody>
+          </CompactTable>
+        ))}
+      {viewState.view === 'exit-policies' && (
+        <CompactTable label="Strategy profile exit parameters and validation provenance">
+          <thead>
+            <tr>
+              <th scope="col">Symbol</th>
+              <th scope="col">Strategy</th>
+              <th scope="col">Profile</th>
+              <th scope="col">Exit parameters reported by profile</th>
+              <th scope="col">Effective N</th>
+              <th scope="col">Validation</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profileRows.map((profile) => (
+              <tr key={`${profile.symbol}:${profile.strategy}`}>
+                <td>{profile.symbol}</td>
+                <td>{strategyLabel(profile.strategy as Strategy)}</td>
+                <td>{profile.profile ?? 'Unavailable'}</td>
+                <td>
+                  {profile.parameters.length
+                    ? profile.parameters
+                        .map(
+                          (parameter) =>
+                            `${parameter.label}: ${parameter.value === null ? 'Unavailable' : `${parameter.value} ${parameter.unit}`}`,
+                        )
+                        .join(' · ')
+                    : 'No exit parameters reported'}
+                </td>
+                <td>{profile.effectiveSamples ?? 'Unavailable'}</td>
+                <td>
+                  {profile.validation === 'validated'
+                    ? 'Validated by complete returned evidence'
+                    : profile.validation === 'not-validated'
+                      ? 'Not validated / incomplete evidence'
+                      : 'Unavailable'}
+                </td>
+              </tr>
+            ))}
+            {profileRows.length === 0 && (
+              <tr>
+                <td colSpan={6}>No strategy profile snapshot is available.</td>
+              </tr>
+            )}
+          </tbody>
+        </CompactTable>
+      )}
+      <details className="v35-strategy-performance__diagnostics">
+        <summary>Entry, status and Learning diagnostics</summary>
+        <div className="auto-trader-strategy-winrate-heading">
+          <strong className="auto-trader-strategy-winrate-title">
+            Strategy performance evidence
+          </strong>
+          <label>
             <input
               type="checkbox"
-              checked={visibleColumnGroups[id]}
+              checked={hideDisabledStrategies}
               onChange={(event) =>
-                updateColumnGroupVisibility(id, event.target.checked)
+                updateHideDisabledStrategies(event.target.checked)
               }
             />{' '}
-            {label}
+            Hide disabled strategies
           </label>
-        ))}
-      </div>
-      <div
-        className="auto-trader-strategy-winrate-note"
-        role="status"
-        aria-label="Strategy performance evidence status"
-      >
-        <strong>
-          {state.loading
-            ? 'Loading audit outcome evidence.'
-            : evidenceSummary.auditClosedRows === 0
-              ? 'No fully closed audit outcomes are available.'
-              : `${evidenceSummary.auditClosedRows} fully closed audit outcome row${evidenceSummary.auditClosedRows === 1 ? '' : 's'} available.`}
-        </strong>{' '}
-        Source rows: strict {evidenceSummary.strictRows}, exploratory{' '}
-        {evidenceSummary.exploratoryRows}, Scout {evidenceSummary.scoutRows},
-        carry {evidenceSummary.paperCarryRows}, unknown{' '}
-        {evidenceSummary.unknownSourceRows}. Independent financial
-        reconciliation is not exposed by the current outcomes contract, so no
-        validated profitability, expectancy, effective sample size, or strategy
-        ranking is reported here. Learning and Scout evidence below remain
-        separate from actual paper-trade outcome rows.
-      </div>
-      <p className="auto-trader-strategy-winrate-note">
-        “Today P&amp;L” is the source-reported AutoTrader realized-P&amp;L
-        field; it is not an independently reconciled figure. Raw closed counts
-        include only closed audit-derived outcomes. Strict, exploratory, Scout,
-        carry, and unknown source classifications are shown separately.
-      </p>
-      <div
-        ref={strategyGridWrapper}
-        className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"
-      >
-        <AgGridReact<StrategyWinRateRow>
-          rowData={strategyGridRows}
-          columnDefs={strategyColumns}
-          onRowClicked={({ data }) => {
-            if (!data || data.rowType === 'symbol') return;
-            if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
-              return;
-            model.toggleExpandedEntryStrategy(data.strategy);
-          }}
-          postSortRows={({ nodes }) => {
-            const symbolRowsByStrategy = new Map<string, typeof nodes>();
-            for (const node of nodes) {
-              if (node.data?.rowType !== 'symbol') continue;
-              const strategyRows =
-                symbolRowsByStrategy.get(node.data.strategy) ?? [];
-              strategyRows.push(node);
-              symbolRowsByStrategy.set(node.data.strategy, strategyRows);
-            }
-            const rowsInMasterDetailOrder = nodes
-              .filter((node) => node.data?.rowType !== 'symbol')
-              .flatMap((node) => [
-                node,
-                ...(node.data
-                  ? (symbolRowsByStrategy.get(node.data.strategy) ?? [])
-                  : []),
-              ]);
-            nodes.splice(0, nodes.length, ...rowsInMasterDetailOrder);
-          }}
-          rowClassRules={{
-            'auto-trader-entry-evidence-master-row': ({ data }) =>
-              data?.rowType === 'strategy' &&
-              Boolean(entryReturnProfilesByStrategy.get(data.strategy)?.length),
-            'auto-trader-entry-evidence-symbol-row': ({ data }) =>
-              data?.rowType === 'symbol',
-          }}
-          onGridReady={({ api }) => {
-            strategyGridApi.current = api;
-            try {
-              const saved = viewState.gridColumnStateJson;
-              if (saved) {
-                const parsed = JSON.parse(saved);
-                if (Array.isArray(parsed))
-                  api.applyColumnState({
-                    state: parsed.map((column) => ({ ...column, flex: 0 })),
-                    applyOrder: true,
-                  });
-              }
-            } catch {
-              // Ignore invalid or unavailable saved grid state.
-            }
-            for (const group of STRATEGY_COLUMN_GROUPS) {
-              api.setColumnsVisible(
-                group.children,
-                visibleColumnGroups[group.id],
-              );
-            }
-          }}
-          onColumnResized={({ api, finished }) => {
-            if (finished) saveStrategyGridState(api);
-          }}
-          onColumnMoved={({ api, finished }) => {
-            if (finished) saveStrategyGridState(api);
-          }}
-          onColumnVisible={({ api }) => {
-            saveStrategyGridState(api);
-          }}
-          onColumnPinned={({ api }) => saveStrategyGridState(api)}
-          onSortChanged={({ api }) => saveStrategyGridState(api)}
-          getRowId={strategyGridGetRowId}
-          defaultColDef={strategyGridDefaultColDef}
-          maintainColumnOrder
-          theme={theme}
-          domLayout="normal"
-          rowHeight={26}
-          headerHeight={28}
-        />
-      </div>
-      {visibleStrategyWinRates.length === 0 && !state.loading && (
-        <p className="positions-empty">
-          {hideDisabledStrategies
-            ? 'No enabled strategies to show.'
-            : 'No closed trades to calculate strategy win rates yet.'}
+        </div>
+        <div
+          className="auto-trader-strategy-column-group-controls"
+          aria-label="Visible column groups"
+        >
+          {STRATEGY_COLUMN_GROUPS.map(({ id, label }) => (
+            <label key={id}>
+              <input
+                type="checkbox"
+                checked={visibleColumnGroups[id]}
+                onChange={(event) =>
+                  updateColumnGroupVisibility(id, event.target.checked)
+                }
+              />{' '}
+              {label}
+            </label>
+          ))}
+        </div>
+        <div
+          className="auto-trader-strategy-winrate-note"
+          role="status"
+          aria-label="Strategy performance evidence status"
+        >
+          <strong>
+            {state.loading
+              ? 'Loading audit outcome evidence.'
+              : evidenceSummary.auditClosedRows === 0
+                ? 'No fully closed audit outcomes are available.'
+                : `${evidenceSummary.auditClosedRows} fully closed audit outcome row${evidenceSummary.auditClosedRows === 1 ? '' : 's'} available.`}
+          </strong>{' '}
+          Source rows: strict {evidenceSummary.strictRows}, exploratory{' '}
+          {evidenceSummary.exploratoryRows}, Scout {evidenceSummary.scoutRows},
+          carry {evidenceSummary.paperCarryRows}, unknown{' '}
+          {evidenceSummary.unknownSourceRows}. Independent financial
+          reconciliation is not exposed by the current outcomes contract, so no
+          validated profitability, expectancy, effective sample size, or
+          strategy ranking is reported here. Learning and Scout evidence below
+          remain separate from actual paper-trade outcome rows.
+        </div>
+        <p className="auto-trader-strategy-winrate-note">
+          “Today P&amp;L” is the source-reported AutoTrader realized-P&amp;L
+          field; it is not an independently reconciled figure. Raw closed counts
+          include only closed audit-derived outcomes. Strict, exploratory,
+          Scout, carry, and unknown source classifications are shown separately.
         </p>
-      )}
+        <div
+          ref={strategyGridWrapper}
+          className="data-grid-wrap signal-info-grid auto-trader-strategy-winrate-grid"
+        >
+          <AgGridReact<StrategyWinRateRow>
+            rowData={strategyGridRows}
+            columnDefs={strategyColumns}
+            onRowClicked={({ data }) => {
+              if (!data || data.rowType === 'symbol') return;
+              if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
+                return;
+              model.toggleExpandedEntryStrategy(data.strategy);
+            }}
+            postSortRows={({ nodes }) => {
+              const symbolRowsByStrategy = new Map<string, typeof nodes>();
+              for (const node of nodes) {
+                if (node.data?.rowType !== 'symbol') continue;
+                const strategyRows =
+                  symbolRowsByStrategy.get(node.data.strategy) ?? [];
+                strategyRows.push(node);
+                symbolRowsByStrategy.set(node.data.strategy, strategyRows);
+              }
+              const rowsInMasterDetailOrder = nodes
+                .filter((node) => node.data?.rowType !== 'symbol')
+                .flatMap((node) => [
+                  node,
+                  ...(node.data
+                    ? (symbolRowsByStrategy.get(node.data.strategy) ?? [])
+                    : []),
+                ]);
+              nodes.splice(0, nodes.length, ...rowsInMasterDetailOrder);
+            }}
+            rowClassRules={{
+              'auto-trader-entry-evidence-master-row': ({ data }) =>
+                data?.rowType === 'strategy' &&
+                Boolean(
+                  entryReturnProfilesByStrategy.get(data.strategy)?.length,
+                ),
+              'auto-trader-entry-evidence-symbol-row': ({ data }) =>
+                data?.rowType === 'symbol',
+            }}
+            onGridReady={({ api }) => {
+              strategyGridApi.current = api;
+              try {
+                const saved = viewState.gridColumnStateJson;
+                if (saved) {
+                  const parsed = JSON.parse(saved);
+                  if (Array.isArray(parsed))
+                    api.applyColumnState({
+                      state: parsed.map((column) => ({ ...column, flex: 0 })),
+                      applyOrder: true,
+                    });
+                }
+              } catch {
+                // Ignore invalid or unavailable saved grid state.
+              }
+              for (const group of STRATEGY_COLUMN_GROUPS) {
+                api.setColumnsVisible(
+                  group.children,
+                  visibleColumnGroups[group.id],
+                );
+              }
+            }}
+            onColumnResized={({ api, finished }) => {
+              if (finished) saveStrategyGridState(api);
+            }}
+            onColumnMoved={({ api, finished }) => {
+              if (finished) saveStrategyGridState(api);
+            }}
+            onColumnVisible={({ api }) => {
+              saveStrategyGridState(api);
+            }}
+            onColumnPinned={({ api }) => saveStrategyGridState(api)}
+            onSortChanged={({ api }) => saveStrategyGridState(api)}
+            getRowId={strategyGridGetRowId}
+            defaultColDef={strategyGridDefaultColDef}
+            maintainColumnOrder
+            theme={theme}
+            domLayout="normal"
+            rowHeight={26}
+            headerHeight={28}
+          />
+        </div>
+        {visibleStrategyWinRates.length === 0 && !state.loading && (
+          <p className="positions-empty">
+            {hideDisabledStrategies
+              ? 'No enabled strategies to show.'
+              : 'No closed trades to calculate strategy win rates yet.'}
+          </p>
+        )}
+      </details>
     </section>
   );
 }

@@ -525,9 +525,11 @@ mod strategy_pause_snapshot_tests {
             settings.profile_registration_outbox[0].profile.profile_id,
             profile.profile_id
         );
-        assert!(!settings
-            .registered_profile_ids
-            .contains(&profile.profile_id));
+        assert!(
+            !settings
+                .registered_profile_ids
+                .contains(&profile.profile_id)
+        );
         assert!(!queue_snapshot_profile_registration(
             &mut settings,
             &profile
@@ -831,12 +833,16 @@ mod strategy_pause_snapshot_tests {
             MissedFeedbackEnqueueResult::EvictedOldestMissed
         );
         assert_eq!(outbox.len(), FEEDBACK_OUTBOX_CAPACITY);
-        assert!(!outbox
-            .iter()
-            .any(|event| feedback_event_id(event) == "missed-0"));
-        assert!(outbox
-            .iter()
-            .any(|event| feedback_event_id(event) == "newest"));
+        assert!(
+            !outbox
+                .iter()
+                .any(|event| feedback_event_id(event) == "missed-0")
+        );
+        assert!(
+            outbox
+                .iter()
+                .any(|event| feedback_event_id(event) == "newest")
+        );
 
         outbox.clear();
         outbox.resize_with(FEEDBACK_OUTBOX_CAPACITY, || FeedbackEvent::TradeOutcome {
@@ -869,9 +875,11 @@ mod strategy_pause_snapshot_tests {
             MissedFeedbackEnqueueResult::DroppedOutcomeCapacity
         );
         assert_eq!(outbox.len(), FEEDBACK_OUTBOX_CAPACITY);
-        assert!(outbox
-            .iter()
-            .all(|event| matches!(event, FeedbackEvent::TradeOutcome { .. })));
+        assert!(
+            outbox
+                .iter()
+                .all(|event| matches!(event, FeedbackEvent::TradeOutcome { .. }))
+        );
     }
 }
 
@@ -1356,6 +1364,10 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
             axum::routing::put(update_settings),
         )
         .route("/positions/auto-trader/activity", get(get_activity))
+        .route(
+            "/positions/auto-trader/trade-price-path",
+            get(get_trade_price_path),
+        )
         .route("/internal/monitoring-metrics", get(get_monitoring_metrics))
         .route(
             "/internal/strategy/open-position-counts",

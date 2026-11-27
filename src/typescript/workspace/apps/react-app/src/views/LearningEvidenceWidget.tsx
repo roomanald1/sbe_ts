@@ -1,5 +1,10 @@
 import { useEffect, useMemo } from 'react';
-import { useBehaviorSnapshot } from '@workspace/ui-platform';
+import {
+  CompactTable,
+  OperatorMetricStrip,
+  OperatorTabBar,
+  useBehaviorSnapshot,
+} from '@workspace/ui-platform';
 import {
   LearningEvidenceWidgetModel,
   type LearningEvidenceWidgetView,
@@ -77,87 +82,114 @@ export function LearningEvidenceView({
   const scoutEvidence = state?.visibleScoutEvidence ?? view.scoutEvidence;
   const actualTradeEvidence =
     state?.visibleActualTradeEvidence ?? view.actualTradeEvidence;
-  const decisionBlockers =
-    state?.visibleDecisionBlockers ?? view.decisionBlockers;
+  const gapReasons = state?.visibleGapReasons ?? null;
   const tabs: Array<{ id: LearningEvidenceTab; label: string }> = [
     { id: 'evidence', label: 'Evidence' },
     { id: 'activity', label: 'Activity' },
     { id: 'history', label: 'History' },
     { id: 'promotion', label: 'Promotion' },
   ];
+  const metrics = [
+    {
+      label: 'Profiles',
+      value: numberOrUnavailable(view.profilesMonitored),
+    },
+    { label: 'Strict ready', value: 'Unavailable' },
+    {
+      label: 'Coverage cohorts',
+      value: numberOrUnavailable(view.cohortTotal),
+    },
+    {
+      label: 'Coverage gaps',
+      value: numberOrUnavailable(view.evidenceGaps),
+      tone:
+        view.evidenceGaps == null
+          ? ('neutral' as const)
+          : view.evidenceGaps > 0
+            ? ('warning' as const)
+            : ('positive' as const),
+    },
+    { label: 'Accepted gain / 24h', value: 'Unavailable' },
+  ];
+  const sourceDescription =
+    'Strict-ready profiles and accepted effective gains are not exposed by the current Learning contracts.';
+
   return (
     <section
-      className="auto-trader-evidence-coverage learning-evidence-widget v35-operator-card"
+      className="learning-evidence-widget operator-panel"
       aria-label="Learning and evidence acquisition"
     >
-      <header className="auto-trader-evidence-coverage-heading">
-        <div>
-          <strong>Learning and evidence acquisition</strong>
-          <small>
-            Learning-owned evidence requests and profile coverage. Scout
-            research evidence is reported separately from actual trading
-            outcomes.
-          </small>
-        </div>
-        <small>
-          {view.profilesMonitored == null
-            ? 'Profile data unavailable'
-            : `${view.profilesMonitored} profiles · ${numberOrUnavailable(view.strategiesMonitored)} ${view.strategiesMonitored === 1 ? 'strategy' : 'strategies'} monitored`}
-        </small>
-      </header>
+      <div className="learning-evidence-toolbar">
+        <span
+          className={
+            'learning-evidence-data-state' + (state?.stale ? ' is-warning' : '')
+          }
+          role={state?.stale ? 'status' : undefined}
+        >
+          {state?.stale
+            ? 'Stale evidence'
+            : state
+              ? 'Data ' + state.dataStatus
+              : 'Source-backed evidence'}
+        </span>
+        <span className="learning-evidence-profile-count">
+          {numberOrUnavailable(view.profilesMonitored)} profiles ·{' '}
+          {numberOrUnavailable(view.strategiesMonitored)} strategies
+        </span>
+        {state && (
+          <>
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={!onRefresh || state.refreshing}
+            >
+              {state.refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+            <small>
+              {state.lastRefreshAttemptAt == null
+                ? 'Refresh time unavailable'
+                : 'Updated ' + timeOrUnavailable(state.lastRefreshAttemptAt)}
+            </small>
+          </>
+        )}
+      </div>
 
-      {view.profileError && (
-        <p role="alert">Profile coverage unavailable: {view.profileError}</p>
-      )}
-      {view.coverageError && (
-        <p role="alert">
-          Evidence request coverage unavailable: {view.coverageError}
-        </p>
-      )}
-      {view.learningSummaryError && (
-        <p role="alert">
-          Learning summary unavailable: {view.learningSummaryError}
-        </p>
-      )}
-      {state?.refreshError && (
-        <p role="alert">Refresh failed: {state.refreshError}</p>
-      )}
-      {state && (
-        <div className="auto-trader-evidence-coverage-subheading">
-          <span role={state.stale ? 'status' : undefined}>
-            {state.stale
-              ? 'Stale evidence reported by source'
-              : `Evidence status: ${state.dataStatus}`}
-          </span>
-          <button
-            type="button"
-            onClick={onRefresh}
-            disabled={!onRefresh || state.refreshing}
-          >
-            {state.refreshing ? 'Refreshing…' : 'Refresh evidence'}
-          </button>
-          <small>
-            {state.lastRefreshAttemptAt == null
-              ? 'No refresh attempt recorded'
-              : `Last refresh attempt ${new Date(state.lastRefreshAttemptAt).toLocaleTimeString()}`}
-          </small>
+      <OperatorMetricStrip
+        label="Learning evidence summary"
+        metrics={metrics}
+      />
+
+      <OperatorTabBar
+        label="Learning evidence views"
+        selectedId={tab}
+        onSelect={(id) => onSelectTab?.(id as LearningEvidenceTab)}
+        tabs={tabs}
+      />
+
+      {(view.profileError ||
+        view.coverageError ||
+        view.learningSummaryError ||
+        state?.refreshError) && (
+        <div className="learning-evidence-errors" role="alert">
+          {view.profileError && (
+            <span>Profiles unavailable · {view.profileError}</span>
+          )}
+          {view.coverageError && (
+            <span>Evidence coverage unavailable · {view.coverageError}</span>
+          )}
+          {view.learningSummaryError && (
+            <span>
+              Learning summary unavailable · {view.learningSummaryError}
+            </span>
+          )}
+          {state?.refreshError && (
+            <span>Refresh failed · {state.refreshError}</span>
+          )}
         </div>
       )}
-      <nav aria-label="Learning evidence views" role="tablist">
-        {tabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            onClick={() => onSelectTab?.(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
+
       {state && (
-        <div className="auto-trader-execution-quality-filters">
+        <div className="learning-evidence-filters">
           <label>
             Symbol
             <select
@@ -195,268 +227,354 @@ export function LearningEvidenceView({
         </div>
       )}
 
-      {tab === 'activity' && (
-        <>
-          <div className="auto-trader-evidence-coverage-subheading">
-            <strong>Evidence acquisition</strong>
-            <small>
-              {view.requestTotal == null
-                ? 'Request totals unavailable'
-                : `${numberOrUnavailable(view.requestTotal)} total requests · ${numberOrUnavailable(view.omittedRequests)} omitted from this page`}
-            </small>
-          </div>
-          {view.requestStates == null ? (
-            <p>Request state is unavailable; no state counts are inferred.</p>
-          ) : view.requestStates.length === 0 ? (
-            <p>
-              No evidence requests were returned. This does not establish that
-              no evidence gaps exist.
-            </p>
-          ) : (
-            <ul aria-label="Evidence requests by reported state">
-              {view.requestStates.map(({ status, count }) => (
-                <li key={status}>
-                  {requestStatus(status)}: {count}
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
-
       {tab === 'evidence' && (
-        <>
-          {view.evidenceGaps == null ? (
-            <p>Evidence gap count unavailable.</p>
-          ) : (
-            <p>
-              {view.evidenceGaps} explicit missing, stale or reasoned coverage
-              gaps in the returned cohort page.
-            </p>
-          )}
-
-          <div className="auto-trader-evidence-coverage-subheading">
+        <div className="learning-evidence-tab">
+          <div className="learning-evidence-section-heading">
             <strong>Evidence coverage by profile</strong>
-            <small>
+            <span>
               {view.cohortTotal == null
-                ? 'Coverage cohorts unavailable'
-                : `${view.cohorts?.length ?? 0} / ${view.cohortTotal} cohorts returned${(view.omittedCohorts ?? 0) > 0 ? ` · ${view.omittedCohorts} omitted` : ''}`}
-            </small>
+                ? 'Coverage history unavailable'
+                : numberOrUnavailable(cohorts?.length ?? 0) +
+                  ' shown · ' +
+                  numberOrUnavailable(view.cohortTotal) +
+                  ' total' +
+                  ((view.omittedCohorts ?? 0) > 0
+                    ? ' · ' +
+                      numberOrUnavailable(view.omittedCohorts) +
+                      ' omitted'
+                    : '')}
+            </span>
           </div>
-          {view.cohorts == null ? (
-            <p>
+          {cohorts == null ? (
+            <p className="learning-evidence-message" role="status">
               Coverage is unavailable. Sample counts and eligibility are not
               assumed to be zero.
             </p>
-          ) : view.cohorts.length === 0 ? (
-            <p>
+          ) : cohorts.length === 0 ? (
+            <p className="learning-evidence-message" role="status">
               No coverage cohorts were returned. Completeness cannot be inferred
               from an empty page.
             </p>
           ) : (
-            <div className="auto-trader-evidence-request-list">
-              {cohorts!.slice(0, 100).map((cohort) => (
-                <article
-                  className="auto-trader-evidence-request"
-                  key={cohort.id}
-                >
-                  <header>
-                    <div>
+            <CompactTable label="Learning evidence coverage by profile">
+              <thead>
+                <tr>
+                  <th>Symbol · strategy · profile</th>
+                  <th>Raw N</th>
+                  <th>Effective N</th>
+                  <th>Coverage</th>
+                  <th>Last sample</th>
+                  <th>24h gain</th>
+                  <th>Blocker</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cohorts.slice(0, 100).map((cohort) => (
+                  <tr key={cohort.id}>
+                    <td
+                      title={
+                        cohort.symbol +
+                        ' · ' +
+                        cohort.strategy +
+                        ' · ' +
+                        cohort.profile
+                      }
+                    >
                       <strong>
                         {cohort.symbol} · {cohort.strategy}
                       </strong>
                       <small>Profile {cohort.profile}</small>
-                    </div>
-                    <span>{cohort.freshness ?? 'Freshness unavailable'}</span>
-                  </header>
-                  <dl>
-                    <div>
-                      <dt>Raw samples</dt>
-                      <dd>{numberOrUnavailable(cohort.rawSamples)}</dd>
-                    </div>
-                    <div>
-                      <dt>Effective samples</dt>
-                      <dd>{numberOrUnavailable(cohort.effectiveSamples, 2)}</dd>
-                    </div>
-                    <div>
-                      <dt>Required raw/effective samples</dt>
-                      <dd>Unavailable from this coverage contract</dd>
-                    </div>
-                    <div>
-                      <dt>Last sample</dt>
-                      <dd>{timeOrUnavailable(cohort.lastSampleAt)}</dd>
-                    </div>
-                    <div>
-                      <dt>Sample age</dt>
-                      <dd>
-                        {cohort.sampleAgeMs == null
-                          ? 'Unavailable'
-                          : `${numberOrUnavailable(cohort.sampleAgeMs / 1000, 0)} s`}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Regime · horizon</dt>
-                      <dd>
-                        {cohort.regime ?? 'Unavailable'} ·{' '}
-                        {cohort.horizon ?? 'Unavailable'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Coverage scope</dt>
-                      <dd>{cohort.coverageScope}</dd>
-                    </div>
-                  </dl>
-                  <p>{cohort.gapReason ?? 'No gap reason reported'}</p>
-                </article>
-              ))}
-            </div>
+                      <details className="learning-evidence-row-details">
+                        <summary>Details</summary>
+                        <dl>
+                          <div>
+                            <dt>Regime · horizon</dt>
+                            <dd>
+                              {cohort.regime ?? 'Unavailable'} ·{' '}
+                              {cohort.horizon ?? 'Unavailable'}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Coverage scope</dt>
+                            <dd>{cohort.coverageScope || 'Unavailable'}</dd>
+                          </div>
+                          <div>
+                            <dt>Sample age</dt>
+                            <dd>
+                              {cohort.sampleAgeMs == null
+                                ? 'Unavailable'
+                                : numberOrUnavailable(
+                                    cohort.sampleAgeMs / 1000,
+                                  ) + ' s'}
+                            </dd>
+                          </div>
+                        </dl>
+                      </details>
+                    </td>
+                    <td>{numberOrUnavailable(cohort.rawSamples)}</td>
+                    <td>{numberOrUnavailable(cohort.effectiveSamples, 2)}</td>
+                    <td data-status={cohort.freshness ?? 'unavailable'}>
+                      {cohort.freshness ?? 'Unavailable'}
+                    </td>
+                    <td>{timeOrUnavailable(cohort.lastSampleAt)}</td>
+                    <td>Unavailable</td>
+                    <td
+                      className="learning-evidence-blocker"
+                      title={cohort.gapReason ?? 'Gap reason unavailable'}
+                    >
+                      {cohort.gapReason ?? 'Unavailable'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </CompactTable>
           )}
-          <div className="auto-trader-evidence-coverage-subheading">
-            <strong>Recent strict-decision blockers</strong>
-            <small>
-              Only blockers returned by the current AutoTrader decision audit
-              are shown.
-            </small>
+
+          <div className="learning-evidence-lower-grid">
+            <section aria-label="Reported acquisition blockers">
+              <header>
+                <strong>Reported acquisition blockers</strong>
+                <span>Counts are cohort rows</span>
+              </header>
+              {gapReasons == null ? (
+                <p>Reason counts unavailable.</p>
+              ) : gapReasons.length === 0 ? (
+                <p>No explicit gap reasons reported.</p>
+              ) : (
+                <ul>
+                  {gapReasons.slice(0, 6).map((item) => (
+                    <li key={item.reason} title={item.reason}>
+                      <span>{item.reason}</span>
+                      <strong>{item.cohortRows.toLocaleString()}</strong>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section aria-label="Learning acquisition coverage">
+              <header>
+                <strong>Acquisition coverage</strong>
+                <span>Returned source fields</span>
+              </header>
+              <dl>
+                <div>
+                  <dt>Explicit coverage gaps</dt>
+                  <dd>{numberOrUnavailable(view.evidenceGaps)}</dd>
+                </div>
+                <div>
+                  <dt>Evidence requests</dt>
+                  <dd>{numberOrUnavailable(view.requestTotal)}</dd>
+                </div>
+                <div>
+                  <dt>Omitted requests</dt>
+                  <dd>{numberOrUnavailable(view.omittedRequests)}</dd>
+                </div>
+                <div>
+                  <dt>Accepted independent gain</dt>
+                  <dd>Unavailable</dd>
+                </div>
+              </dl>
+            </section>
           </div>
-          {decisionBlockers.length === 0 ? (
-            <p>
-              No recent blockers were reported, or the audit has no blocker
-              detail.
-            </p>
-          ) : (
-            <ul aria-label="Strict decision blockers">
-              {decisionBlockers.slice(0, 20).map((blocker, index) => (
-                <li key={`${blocker.strategy}:${blocker.symbol}:${index}`}>
-                  {blocker.strategy} · {blocker.symbol}: {blocker.reason}
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
+          <p className="learning-evidence-limitation">{sourceDescription}</p>
+        </div>
       )}
 
       {tab === 'activity' && (
-        <>
-          <div className="auto-trader-evidence-coverage-subheading">
-            <strong>Request detail</strong>
-            <small>
-              Completed acquisition work does not by itself mean evidence was
-              accepted.
-            </small>
+        <div className="learning-evidence-tab">
+          <div className="learning-evidence-section-heading">
+            <strong>Evidence acquisition requests</strong>
+            <span>
+              {view.requestTotal == null
+                ? 'Request totals unavailable'
+                : numberOrUnavailable(view.requestTotal) +
+                  ' total · ' +
+                  numberOrUnavailable(view.omittedRequests) +
+                  ' omitted'}
+            </span>
           </div>
-          {requests == null ? (
-            <p>Request details unavailable.</p>
-          ) : requests.length === 0 ? (
-            <p>No request details returned.</p>
+          {view.requestStates == null ? (
+            <p className="learning-evidence-message">
+              Request state is unavailable; no state counts are inferred.
+            </p>
           ) : (
-            <div className="auto-trader-evidence-request-list">
-              {requests.slice(0, 100).map((request) => (
-                <article
-                  className="auto-trader-evidence-request"
-                  key={request.id}
-                >
-                  <header>
-                    <strong>
-                      {request.symbol} · {request.strategy} · {request.profile}
-                    </strong>
-                    <span>{requestStatus(request.status)}</span>
-                  </header>
-                  <p>{request.reason ?? 'Request reason unavailable'}</p>
-                  <small>
-                    Target {request.regime} · {request.horizon} · attempts{' '}
-                    {numberOrUnavailable(request.attempts)} · updated{' '}
-                    {timeOrUnavailable(request.updatedAt)} · next attempt{' '}
-                    {timeOrUnavailable(request.nextAttemptAt)}
-                  </small>
-                </article>
-              ))}
-            </div>
+            <CompactTable label="Evidence request counts by reported state">
+              <thead>
+                <tr>
+                  <th>Reported state</th>
+                  <th>Requests</th>
+                </tr>
+              </thead>
+              <tbody>
+                {view.requestStates.map((item) => (
+                  <tr key={item.status}>
+                    <td>{requestStatus(item.status)}</td>
+                    <td>{item.count.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </CompactTable>
           )}
-        </>
+          {requests == null ? (
+            <p className="learning-evidence-message">
+              Request details unavailable.
+            </p>
+          ) : requests.length === 0 ? (
+            <p className="learning-evidence-message">
+              No request details returned. This does not establish that no
+              evidence gaps exist.
+            </p>
+          ) : (
+            <CompactTable label="Learning evidence acquisition request details">
+              <thead>
+                <tr>
+                  <th>Symbol · strategy · profile</th>
+                  <th>Status</th>
+                  <th>Attempts</th>
+                  <th>Updated</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.slice(0, 100).map((request) => (
+                  <tr key={request.id}>
+                    <td>
+                      <strong>
+                        {request.symbol} · {request.strategy}
+                      </strong>
+                      <small>
+                        {request.profile} · {request.regime} · {request.horizon}
+                      </small>
+                    </td>
+                    <td>{requestStatus(request.status)}</td>
+                    <td>{numberOrUnavailable(request.attempts)}</td>
+                    <td>{timeOrUnavailable(request.updatedAt)}</td>
+                    <td className="learning-evidence-blocker">
+                      {request.reason ?? 'Unavailable'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </CompactTable>
+          )}
+        </div>
       )}
 
       {tab === 'history' && (
-        <>
-          <div className="auto-trader-evidence-coverage-subheading">
-            <strong>Evidence and trading outcomes</strong>
-            <small>
-              Scout outcome totals have no reported interval and are not cadence
-              or accepted-gain measurements.
-            </small>
+        <div className="learning-evidence-tab">
+          <div className="learning-evidence-section-heading">
+            <strong>Research and actual trading outcomes</strong>
+            <span>Separate source populations</span>
           </div>
           {scoutEvidence == null ? (
-            <p>Scout outcome summary unavailable.</p>
+            <p className="learning-evidence-message">
+              Scout outcome summary unavailable.
+            </p>
           ) : scoutEvidence.length === 0 ? (
-            <p>
-              {state?.filters.symbol && view.scoutEvidence?.length
-                ? 'Scout aggregates are strategy-level; the source does not link them to this symbol.'
-                : 'No Scout outcome samples are reported.'}
+            <p className="learning-evidence-message">
+              No Scout outcome summary was returned.
             </p>
           ) : (
-            <ul aria-label="Scout research evidence">
-              {scoutEvidence.map((row) => (
-                <li key={row.strategy}>
-                  {row.strategy}: {row.samples} reported Scout outcomes ·
-                  positive rate{' '}
-                  {row.positiveRate == null
-                    ? 'unavailable'
-                    : `${(row.positiveRate * 100).toFixed(1)}%`}{' '}
-                  · Scout return{' '}
-                  {row.averageReturnPercent == null
-                    ? 'unavailable'
-                    : `${row.averageReturnPercent.toFixed(3)}%`}
-                </li>
-              ))}
-            </ul>
+            <>
+              <CompactTable label="Scout research outcomes reported to Learning">
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    <th>Reported outcomes</th>
+                    <th>Positive rate</th>
+                    <th>Mean return</th>
+                    <th>Independent acceptance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scoutEvidence.map((row) => (
+                    <tr key={row.strategy}>
+                      <td>{row.strategy}</td>
+                      <td>{row.samples.toLocaleString()}</td>
+                      <td>
+                        {row.positiveRate == null
+                          ? 'Unavailable'
+                          : (row.positiveRate * 100).toFixed(1) + '%'}
+                      </td>
+                      <td>
+                        {row.averageReturnPercent == null
+                          ? 'Unavailable'
+                          : row.averageReturnPercent.toFixed(3) + '%'}
+                      </td>
+                      <td>Unavailable · source aggregate is not acceptance</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </CompactTable>
+              <p className="learning-evidence-limitation">
+                Scout totals are source-reported counts with no common interval;
+                they are not accepted independent gain.
+              </p>
+            </>
           )}
           {actualTradeEvidence == null ? (
-            <p>Profile-linked actual-trade summary unavailable.</p>
+            <p className="learning-evidence-message">
+              Profile-linked actual-trade summary unavailable.
+            </p>
           ) : actualTradeEvidence.length === 0 ? (
-            <p>
-              {state?.filters.symbol && view.actualTradeEvidence?.length
-                ? 'Trade aggregates are strategy-level; the source does not link them to this symbol.'
-                : 'No profile-linked actual-trade sample fields were returned.'}
+            <p className="learning-evidence-message">
+              No profile-linked actual-trade summary was returned.
             </p>
           ) : (
-            <ul aria-label="Profile-linked actual trading outcomes">
-              {actualTradeEvidence.map((row) => (
-                <li key={row.strategy}>
-                  {row.strategy}: active profile {row.activeSamples} samples,
-                  mean net return{' '}
-                  {row.activeAverageReturnPercent == null
-                    ? 'unavailable'
-                    : `${row.activeAverageReturnPercent.toFixed(3)}%`}
-                  ; other profiles {row.otherSamples} samples, mean net return{' '}
-                  {row.otherAverageReturnPercent == null
-                    ? 'unavailable'
-                    : `${row.otherAverageReturnPercent.toFixed(3)}%`}
-                  .
-                </li>
-              ))}
-            </ul>
+            <>
+              <CompactTable label="Profile-linked actual trade outcome summaries">
+                <thead>
+                  <tr>
+                    <th>Strategy</th>
+                    <th>Active-profile N</th>
+                    <th>Active-profile mean</th>
+                    <th>Other-profile N</th>
+                    <th>Other-profile mean</th>
+                    <th>Independent reconciliation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {actualTradeEvidence.map((row) => (
+                    <tr key={row.strategy}>
+                      <td>{row.strategy}</td>
+                      <td>{row.activeSamples.toLocaleString()}</td>
+                      <td>
+                        {row.activeAverageReturnPercent == null
+                          ? 'Unavailable'
+                          : row.activeAverageReturnPercent.toFixed(3) + '%'}
+                      </td>
+                      <td>{row.otherSamples.toLocaleString()}</td>
+                      <td>
+                        {row.otherAverageReturnPercent == null
+                          ? 'Unavailable'
+                          : row.otherAverageReturnPercent.toFixed(3) + '%'}
+                      </td>
+                      <td>Unavailable in summary contract</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </CompactTable>
+              <p className="learning-evidence-limitation">
+                These are Learning-reported aggregates, not independently
+                reconciled event-level profitability.
+              </p>
+            </>
           )}
-          {actualTradeEvidence?.length ? (
-            <p>
-              These are Learning-reported aggregates. Event-level independent
-              financial reconciliation is not available in this summary.
-            </p>
-          ) : null}
-          <p>
-            Scout sample totals are cumulative or interval-unspecified source
-            counts. They do not show collection cadence, newly accepted
-            evidence, or effective gain over a selected period.
-          </p>
-        </>
+        </div>
       )}
 
       {tab === 'promotion' && (
-        <>
+        <section
+          className="learning-evidence-promotion"
+          aria-label="Promotion evidence"
+        >
+          <strong>Promotion status unavailable</strong>
           <p>
-            Accepted evidence gains and promotion history are unavailable here:
-            current contracts do not provide stable accepted-gain or promotion
-            event attribution. No promotion or profitability claim is inferred.
+            The current Learning summary does not expose accepted-gain,
+            validation-event or promotion-history attribution. No promotion or
+            profitability claim is inferred.
           </p>
-        </>
+        </section>
       )}
     </section>
   );

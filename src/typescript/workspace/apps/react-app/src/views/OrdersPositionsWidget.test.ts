@@ -28,6 +28,7 @@ const emptyState: OrdersPositionsState = {
   loading: false,
   pmAvailable: false,
   outcomesLoading: false,
+  operationalSummary: null,
   positions: [],
   closedPositions: [],
   activityOrders: [],
@@ -85,8 +86,14 @@ function render(
 
 describe('OrdersPositionsPanel compact operator redesign', () => {
   it('shows the compact summary, open/closed navigation and explicit empty state', () => {
-    const html = render(emptyState);
+    const html = render({
+      ...emptyState,
+      pmAvailable: true,
+      fetchedAtMs: 1_000,
+    });
     assert.match(html, /Orders &amp; positions/);
+    assert.doesNotMatch(html, /<h2[^>]*>Orders &amp; positions<\/h2>/);
+    assert.match(html, /Paper ledger ·/);
     assert.match(html, /Orders and positions summary/);
     assert.match(html, /No open positions reported/);
     assert.doesNotMatch(html, /Gross \/ net unrealised P&amp;L/);
@@ -112,20 +119,24 @@ describe('OrdersPositionsPanel compact operator redesign', () => {
     assert.match(html, /Entry value/);
     assert.match(html, /Mode/);
     assert.match(html, /Explore/);
-    assert.match(
-      html,
-      /Net mark unavailable · protection thresholds unavailable/,
-    );
+    assert.doesNotMatch(html, /—\s*<small> entry<\/small>/);
+    assert.match(html, /class="operator-net-pnl"/);
+    assert.match(html, /net return unavailable/);
+    assert.match(html, /Net breakeven unavailable/);
     assert.match(html, /Net unrealised/);
     assert.match(html, /Protection exceptions/);
-    assert.match(html, /Details · profile, protection and lineage/);
-    assert.match(html, /decision-1/);
-    assert.match(html, /btc-trend-v2 \/ — \/ exploratory/);
-    assert.match(html, /Position context for BTC-USDT/);
+    assert.match(html, /<summary>Details<\/summary>/);
+    assert.match(html, /Entry notional/);
     assert.match(
       html,
-      /Executable mark[\s\S]*?no executable quote in this position contract/,
+      /No unique canonical trade ID match; symbol-only match withheld/,
     );
+    assert.match(html, /Holding duration/);
+    assert.match(html, /Symbol \/ strategy[\s\S]*?BTC-USDT \/ trend-50-200/);
+    assert.match(html, /decision-1/);
+    assert.match(html, /btc-trend-v2 \/ — \/ exploratory/);
+    assert.doesNotMatch(html, /Position context for BTC-USDT/);
+    assert.match(html, /Executable mark[\s\S]*?—/);
   });
 
   it('plots only selected protection and exact PM trigger while withholding a missing executable close mark', () => {
@@ -152,14 +163,75 @@ describe('OrdersPositionsPanel compact operator redesign', () => {
           },
         ],
       },
+      operationalPosition: {
+        symbol: 'BTC-USDT',
+        quantity: 0.35,
+        average_entry_price: 100,
+        realized_pnl: 0,
+        entry_fees: 0.02,
+        fees_paid: 0.02,
+        estimated_exit_fee_rate: 0.001,
+        last_trade_timestamp: 1_000,
+        canonical_trade_ids: ['trade-btc'],
+        quote_currency: 'USDT',
+        entry_value_usd: 35,
+        entry_value_quote: 35,
+        executable_close_side: 'bid',
+        executable_mark: 100.32,
+        mark_age_ms: 250,
+        mark_source_record_id: 'mark-123',
+        gross_unrealized_quote: 0.112,
+        net_unrealized_quote: 0.08,
+        net_unrealized_usd: 0.08,
+        gross_exposure_usd: 35.112,
+        signed_exposure_usd: 35.112,
+        net_edge_vs_breakeven_percent: 0.32,
+        valuation_status: 'complete',
+        protection_status: 'active',
+        protection_exception: false,
+        protection_markers: [
+          {
+            barrier_id: 'barrier-a',
+            order_kind: 'trailing-stop',
+            status: 'armed',
+            trigger_price: 99.58,
+            projected_net_return_percent: -0.42,
+          },
+        ],
+      },
     });
     const html = render({ ...emptyState, positions: [row] });
-    assert.match(html, /SL -0\.40%/);
-    assert.match(html, /TP \+0\.90%/);
+    assert.match(html, /\$35\.00<small> entry<\/small>/);
     assert.match(html, /PM trailing-stop/);
-    assert.match(html, /Close now — · executable net mark unavailable/);
-    assert.doesNotMatch(html, /Close now \$0/);
+    assert.match(html, /Close now \+0\.32% · \$0\.08/);
+    assert.match(html, /Net breakeven 0\.000%/);
+    assert.match(
+      html,
+      /Executable mark[\s\S]*?bid 100\.32 USDT · 250 ms old · mark-123/,
+    );
+    assert.match(
+      html,
+      /Gross \/ net unrealised[\s\S]*?0\.112 USDT \/ 0\.08 USDT \(\$0\.08\)/,
+    );
+    assert.match(html, /Protection exception[\s\S]*?active/);
     assert.match(html, /barrier-a · armed · trigger 99\.58/);
+  });
+
+  it('renders only backend operational aggregates in the summary strip', () => {
+    const html = render({
+      ...emptyState,
+      operationalSummary: {
+        capturedAtMs: 2_000,
+        grossExposureUsd: 35.112,
+        netUnrealizedUsd: 0.08,
+        protectionExceptionCount: 1,
+        valuationStatus: 'complete',
+        valuationReasons: [],
+      },
+    });
+    assert.match(html, /Exposure[\s\S]*?\$35\.11/);
+    assert.match(html, /Net unrealised[\s\S]*?\$0\.08/);
+    assert.match(html, /Protection exceptions[\s\S]*?>1<\/dd>/);
   });
 
   it('labels signal-managed exits without inventing a fixed protective threshold', () => {
@@ -191,7 +263,7 @@ describe('OrdersPositionsPanel compact operator redesign', () => {
       /Selected stop \/ target[\s\S]*?Inactive · signal-managed exit contract \/ Inactive · signal-managed exit contract/,
     );
     assert.doesNotMatch(html, /SL -0\.50%|TP \+0\.75%/);
-    assert.match(html, /PM trigger entry-price move -0\.40%/);
+    assert.doesNotMatch(html, /PM trigger entry-price move/);
     assert.match(html, /signal-managed-barrier/);
   });
 
@@ -217,6 +289,7 @@ describe('OrdersPositionsPanel compact operator redesign', () => {
       fillDetails: [],
     };
     const html = render({ ...emptyState, closedPositions: [closed] }, 'closed');
+    assert.doesNotMatch(html, /<h2[^>]*>Orders &amp; positions · closed<\/h2>/);
     assert.match(html, /Closed positions/);
     assert.match(html, /Net P&amp;L/);
     assert.match(html, /\$1\.25/);
@@ -229,7 +302,14 @@ describe('OrdersPositionsPanel compact operator redesign', () => {
     assert.match(html, /Evidence/);
     assert.match(html, /Net realised/);
     assert.match(html, /aria-sort="descending"/);
-    assert.match(html, /Details · ledger and attribution/);
+    assert.match(html, /<summary>Details<\/summary>/);
+    assert.match(
+      html,
+      /Net return[\s\S]*?Unavailable in this position contract/,
+    );
+    assert.match(html, /Realised R multiple/);
+    assert.match(html, /Executable path evidence/);
+    assert.match(html, /Symbol \/ strategy[\s\S]*?BTC-USDT \/ trend-50-200/);
     assert.match(html, /trade-1/);
     assert.match(html, /Incomplete executable path/);
   });

@@ -43,6 +43,14 @@ export function setAutoTraderSocketFactoryForTests(
   sharedSocket = undefined;
 }
 
+function closeAutoTraderSocket(client: AutoTraderSocket | undefined) {
+  try {
+    client?.close?.();
+  } catch {
+    // Preserve the request/connection error that caused invalidation.
+  }
+}
+
 function getSocket() {
   if (!sharedSocket) {
     const generation = ++socketGeneration;
@@ -79,12 +87,12 @@ function getSocket() {
               socketGeneration === generation
             ) {
               sharedSocket = undefined;
-              client.close();
+              closeAutoTraderSocket(client);
             }
           },
           onError: () => {
             if (socketGeneration === generation) sharedSocket = undefined;
-            client.close();
+            closeAutoTraderSocket(client);
           },
         });
         return client;
@@ -182,7 +190,7 @@ async function performAutoTraderRpc(
     });
   } catch (error) {
     if (sharedSocket === socket) sharedSocket = undefined;
-    client.close();
+    closeAutoTraderSocket(client);
     throw error;
   }
   const response = JSON.parse(Buffer.from(reply).toString()) as {
@@ -238,7 +246,7 @@ export async function autoTraderRequestStream(
     if (cancelled) return;
     cancelled = true;
     if (sharedSocket === socketPromise) sharedSocket = undefined;
-    connectedClient?.close();
+    closeAutoTraderSocket(connectedClient);
     if (pollTimer !== undefined) clearTimeout(pollTimer);
     if (pollTimeout !== undefined) clearTimeout(pollTimeout);
     cancelRequest?.();

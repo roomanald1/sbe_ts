@@ -104,6 +104,20 @@ struct PositionTrade {
     paper_exchange_source_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     paper_exchange_source_complete: Option<bool>,
+    /// Independent Paper Exchange fee evidence. PM's fee accounting fields
+    /// remain the PM ledger projection and are not overwritten by this source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_amount: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_schedule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_schedule_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_order_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paper_exchange_fee_schedule_evidence: Option<serde_json::Value>,
     symbol: String,
     side: TradeSide,
     quantity: f64,
@@ -167,6 +181,18 @@ struct PositionTradeWire {
     paper_exchange_source_price: Option<f64>,
     #[serde(default)]
     paper_exchange_source_complete: Option<bool>,
+    #[serde(default)]
+    paper_exchange_fee_amount: Option<f64>,
+    #[serde(default)]
+    paper_exchange_fee_currency: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_id: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_version: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_order_class: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_evidence: Option<serde_json::Value>,
     symbol: String,
     side: TradeSide,
     quantity: f64,
@@ -228,6 +254,12 @@ impl<'de> Deserialize<'de> for PositionTrade {
             paper_exchange_source_quantity: wire.paper_exchange_source_quantity,
             paper_exchange_source_price: wire.paper_exchange_source_price,
             paper_exchange_source_complete: wire.paper_exchange_source_complete,
+            paper_exchange_fee_amount: wire.paper_exchange_fee_amount,
+            paper_exchange_fee_currency: wire.paper_exchange_fee_currency,
+            paper_exchange_fee_schedule_id: wire.paper_exchange_fee_schedule_id,
+            paper_exchange_fee_schedule_version: wire.paper_exchange_fee_schedule_version,
+            paper_exchange_fee_order_class: wire.paper_exchange_fee_order_class,
+            paper_exchange_fee_schedule_evidence: wire.paper_exchange_fee_schedule_evidence,
             symbol: wire.symbol,
             side: wire.side,
             quantity: wire.quantity,

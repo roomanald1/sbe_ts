@@ -275,6 +275,7 @@ export type AutoTraderOutcome = {
   lifecycleSource?: string;
   exitParameterProvenance?: ExitParameterProvenance;
   currentPmBarrier?: PmProtectiveBarrier;
+  operationalPosition?: OperationalPosition;
   selectedStopLossPercent?: number;
   selectedTakeProfitPercent?: number;
   selectedStopLossSource?: string;
@@ -712,7 +713,101 @@ type DecisionParametersResponse = {
     parameters?: Array<{ key?: string; default_value?: number }>;
   }>;
 };
-type PositionsResponse = { positions?: Position[] };
+export type OperationalPosition = Position & {
+  position_identity?: string | null;
+  canonical_trade_ids?: string[];
+  quote_currency?: string | null;
+  entry_value_quote?: number | null;
+  entry_value_usd?: number | null;
+  quote_fx_rate?: number | null;
+  quote_fx_updated_at_ms?: number | null;
+  quote_fx_source_record_id?: string | null;
+  executable_close_side?: string | null;
+  executable_mark?: number | null;
+  mark_age_ms?: number | null;
+  mark_source_system?: string | null;
+  mark_source_epoch?: string | null;
+  mark_source_cursor?: number | null;
+  mark_source_record_id?: string | null;
+  mark_updated_at_ms?: number | null;
+  gross_unrealized_quote?: number | null;
+  net_unrealized_quote?: number | null;
+  net_unrealized_usd?: number | null;
+  net_pnl_cost_scope?: string;
+  entry_fees_quote?: number | null;
+  estimated_exit_fee_rate?: number | null;
+  projected_exit_fee_rate?: number | null;
+  fee_schedule_status?: string;
+  exit_fee_schedule_id?: string | null;
+  exit_fee_schedule_version?: string | null;
+  exit_fee_schedule_source_epoch?: string | null;
+  exit_fee_schedule_source_cursor?: number | null;
+  exit_fee_schedule_source_record_id?: string | null;
+  exit_fee_schedule_source_timestamp_ms?: number | null;
+  known_fee_fills?: number;
+  unknown_fee_fills?: number;
+  signed_exposure_quote?: number | null;
+  gross_exposure_quote?: number | null;
+  signed_exposure_usd?: number | null;
+  gross_exposure_usd?: number | null;
+  breakeven_price?: number | null;
+  net_edge_vs_breakeven_quote?: number | null;
+  net_edge_vs_breakeven_percent?: number | null;
+  protection_markers?: Array<{
+    barrier_id?: string | null;
+    order_kind?: string | null;
+    status?: string | null;
+    trigger_price?: number | null;
+    projected_net_return_percent?: number | null;
+  }>;
+  valuation_status?: string;
+  valuation_reasons?: string[];
+  protection_status?: string;
+  protection_exception?: boolean | null;
+  protection_orders?: Array<
+    PmProtectiveBarrier & {
+      order_kind?: string | null;
+      error?: string | null;
+    }
+  >;
+};
+export type OperationalPositionsSummary = {
+  capturedAtMs?: number;
+  stale?: boolean;
+  grossExposureUsd?: number | null;
+  netUnrealizedUsd?: number | null;
+  protectionExceptionCount?: number | null;
+  valuationStatus?: string;
+  valuationReasons?: string[];
+  error?: string;
+};
+type PositionsResponse = {
+  schema_version?: number;
+  positions?: OperationalPosition[];
+  trade_count?: number;
+  captured_at_ms?: number;
+  gross_exposure_usd?: number | null;
+  net_unrealized_usd?: number | null;
+  protection_exception_count?: number;
+  aggregate_valuation_status?: string;
+  aggregate_valuation_reasons?: string[];
+};
+
+/** Join an operational PM row only through one unambiguous canonical trade ID. */
+export function operationalPositionForTrade(
+  positions: readonly OperationalPosition[],
+  tradeId: string | undefined,
+  tradeIdOccurrenceCount = 1,
+): OperationalPosition | undefined {
+  if (!tradeId || tradeIdOccurrenceCount !== 1) return undefined;
+  const matches = positions.filter(
+    (position) =>
+      Array.isArray(position.canonical_trade_ids) &&
+      position.canonical_trade_ids.length === 1 &&
+      position.canonical_trade_ids[0] === tradeId,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
 type TradesResponse = {
   trades?: PositionTrade[];
   total?: number;
@@ -1074,6 +1169,7 @@ type OpenPositionLot = {
   initial_risk_reference?: OpenStrategyPosition['initial_risk_reference'];
   initial_risk_evidence_status?: string | null;
   carry_details?: DatedCarryPosition;
+  operational_position?: OperationalPosition;
 };
 type AutoTraderLearningResponse = {
   enabled?: boolean;
@@ -1132,6 +1228,7 @@ export class AutoTraderOutcomesModel {
   readonly state$ = new BehaviorSubject<{
     rows: AutoTraderOutcome[];
     closedLedgerRows: AutoTraderOutcome[];
+    operationalSummary: OperationalPositionsSummary | null;
     learningSummary: Record<string, LearningSummary>;
     learningSummaryStatus: LearningSummaryStatus;
     strategyLearning: Record<string, StrategyLearning>;
@@ -1164,6 +1261,7 @@ export class AutoTraderOutcomesModel {
   }>({
     rows: [],
     closedLedgerRows: [],
+    operationalSummary: null,
     learningSummary: {},
     learningSummaryStatus: 'unavailable',
     strategyLearning: {},
@@ -1471,7 +1569,7 @@ export class AutoTraderOutcomesModel {
         // The stream can lag the activity snapshot after a new AutoTrader
         // entry. Fetch the HTTP snapshot as well so a symbol missing from the
         // stream is not dropped from the live positions view.
-        sharedGet('/positions?source=auto').catch(() => undefined),
+        sharedGet('/positions/operational?source=auto').catch(() => undefined),
         // Fills remain useful for open position slippage; closed rows come
         // from the backend activity contract.
         refreshRecentTrades
@@ -1493,18 +1591,28 @@ export class AutoTraderOutcomesModel {
       const strategyEvaluationRecords =
         this.strategyEvaluationAuditCache.records;
       const streamedPositions = streamSnapshot?.auto_positions.positions ?? [];
-      const httpPositions = positionsResponse?.ok
-        ? (((await positionsResponse.json()) as PositionsResponse).positions ??
-          [])
-        : [];
+      const operationalPayload = positionsResponse?.ok
+        ? ((await positionsResponse.json()) as PositionsResponse)
+        : {};
+      if (
+        positionsResponse?.ok &&
+        (operationalPayload.schema_version !== 1 ||
+          !Array.isArray(operationalPayload.positions))
+      )
+        throw new Error('PM operational positions contract unavailable');
+      const httpPositions = operationalPayload.positions ?? [];
       const positionsBySymbol = new Map(
         httpPositions.map((position) => [position.symbol, position]),
       );
-      // Prefer the stream's fresher values for symbols it has, but retain
-      // HTTP-only symbols while the stream catches up with a new position.
-      for (const position of streamedPositions)
-        positionsBySymbol.set(position.symbol, position);
+      // Keep the Position Management operational projection authoritative for
+      // valuation fields; use the stream only to retain symbols absent from
+      // that snapshot while its position stream catches up.
+      for (const position of streamedPositions) {
+        if (!positionsBySymbol.has(position.symbol))
+          positionsBySymbol.set(position.symbol, position);
+      }
       const positionsData: PositionsResponse = {
+        ...operationalPayload,
         positions: [...positionsBySymbol.values()],
       };
       if (tradesResponse?.ok) {
@@ -2230,6 +2338,15 @@ export class AutoTraderOutcomesModel {
       const strategyLots = (activityData.strategy_positions ?? []).filter(
         (position) => Math.abs(position.quantity) > 1e-12,
       );
+      const strategyTradeIdCounts = new Map<string, number>();
+      for (const lot of strategyLots) {
+        const tradeId = lot.lifecycle?.trade_id;
+        if (typeof tradeId !== 'string' || !tradeId) continue;
+        strategyTradeIdCounts.set(
+          tradeId,
+          (strategyTradeIdCounts.get(tradeId) ?? 0) + 1,
+        );
+      }
       const strategyPositionSymbols = new Set(
         strategyLots.map((position) => position.symbol),
       );
@@ -2273,6 +2390,12 @@ export class AutoTraderOutcomesModel {
             initial_risk_reference: position.initial_risk_reference,
             initial_risk_evidence_status: position.initial_risk_evidence_status,
             carry_details: position.carry_details,
+            operational_position: operationalPositionForTrade(
+              positionsData.positions ?? [],
+              position.lifecycle?.trade_id ?? undefined,
+              strategyTradeIdCounts.get(position.lifecycle?.trade_id ?? '') ??
+                1,
+            ),
           };
         }),
         ...(positionsData.positions ?? [])
@@ -2283,6 +2406,7 @@ export class AutoTraderOutcomesModel {
           )
           .map((position) => ({
             ...position,
+            operational_position: position,
             strategy: openPositionAttributions.get(position.symbol)?.strategy,
             decision_id: openPositionAttributions.get(position.symbol)
               ?.decision_id,
@@ -2518,6 +2642,13 @@ export class AutoTraderOutcomesModel {
           exitParameterProvenance:
             position.exit_parameter_provenance ?? undefined,
           currentPmBarrier: position.protective_barrier ?? undefined,
+          operationalPosition: position.operational_position,
+          entryNotionalUsd:
+            typeof position.operational_position?.entry_value_usd ===
+              'number' &&
+            Number.isFinite(position.operational_position.entry_value_usd)
+              ? position.operational_position.entry_value_usd
+              : undefined,
           initialRiskEvidence: rawInitialRisk,
           executablePricePathEvidence:
             executablePathFromAudit(initialRiskAudit),
@@ -2558,6 +2689,22 @@ export class AutoTraderOutcomesModel {
         ...this.state$.value,
         rows,
         closedLedgerRows: this.ledgerRowsCache,
+        operationalSummary: {
+          error: positionsResponse?.ok
+            ? undefined
+            : positionsResponse
+              ? `PM operational positions unavailable (HTTP ${positionsResponse.status})`
+              : 'PM operational positions route unavailable',
+          capturedAtMs:
+            typeof positionsData.captured_at_ms === 'number'
+              ? positionsData.captured_at_ms
+              : undefined,
+          grossExposureUsd: positionsData.gross_exposure_usd,
+          netUnrealizedUsd: positionsData.net_unrealized_usd,
+          protectionExceptionCount: positionsData.protection_exception_count,
+          valuationStatus: positionsData.aggregate_valuation_status,
+          valuationReasons: positionsData.aggregate_valuation_reasons,
+        },
         learningSummary,
         learningSummaryStatus: learningSummaryResponse?.ok
           ? parsedLearningSummary.status
@@ -2592,6 +2739,14 @@ export class AutoTraderOutcomesModel {
     } catch {
       this.state$.next({
         ...this.state$.value,
+        operationalSummary: this.state$.value.operationalSummary
+          ? {
+              ...this.state$.value.operationalSummary,
+              stale: true,
+              error:
+                'Latest outcomes refresh failed; displayed operational values may be stale',
+            }
+          : null,
         loading: false,
         error: 'AutoTrader positions or closed trade audit are unavailable.',
       });

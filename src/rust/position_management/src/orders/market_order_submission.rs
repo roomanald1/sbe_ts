@@ -256,6 +256,7 @@ async fn submit_order_inner(
     };
     let source_evidence = paper_exchange_fill_evidence(
         &matched,
+        &symbol,
         request.client_order_id.as_deref(),
         matcher_requested_quantity,
     );
@@ -300,6 +301,12 @@ async fn submit_order_inner(
             paper_exchange_source_quantity: source_evidence.source_quantity,
             paper_exchange_source_price: source_evidence.source_price,
             paper_exchange_source_complete: source_evidence.complete,
+            paper_exchange_fee_amount: source_evidence.fee,
+            paper_exchange_fee_currency: source_evidence.fee_currency,
+            paper_exchange_fee_schedule_id: source_evidence.fee_schedule_id,
+            paper_exchange_fee_schedule_version: source_evidence.fee_schedule_version,
+            paper_exchange_fee_order_class: source_evidence.fee_order_class,
+            paper_exchange_fee_schedule_evidence: source_evidence.fee_schedule_evidence,
             symbol: symbol.clone(),
             side: request.side.clone(),
             quantity,
@@ -676,6 +683,7 @@ mod order_ledger_contention_tests {
                 recorded_at_utc_ms: Some(1),
                 source_price: Some(100.0),
                 source_quantity: Some(0.5),
+                ..MatcherFill::default()
             }],
             remaining_quantity: 0.0,
             filled_quantity: 0.5,
@@ -712,6 +720,7 @@ mod order_ledger_contention_tests {
                             recorded_at_utc_ms: Some(2),
                             source_price: Some(100.0),
                             source_quantity: Some(filled),
+                            ..MatcherFill::default()
                         }]
                     })
                     .unwrap_or_default(),
@@ -965,8 +974,12 @@ mod order_ledger_contention_tests {
             Some(barrier_id),
             0.5
         ));
-        let mismatched_evidence =
-            paper_exchange_fill_evidence(&mismatched_parent, Some(barrier_id), 0.5);
+        let mismatched_evidence = paper_exchange_fill_evidence(
+            &mismatched_parent,
+            "BTC-USDT",
+            Some(barrier_id),
+            0.5,
+        );
         assert_eq!(mismatched_evidence[0].complete, Some(false));
         assert_eq!(mismatched_evidence[0].execution_id, None);
 
@@ -978,6 +991,54 @@ mod order_ledger_contention_tests {
             Some(barrier_id),
             0.5
         ));
+    }
+
+    #[test]
+    fn paper_exchange_fee_schedule_provenance_is_retained_only_when_exact() {
+        let mut response = complete_paper_match_fixture();
+        response.fills[0].fee = Some(-0.05);
+        response.fills[0].fee_currency = Some("USDT".into());
+        response.fills[0].fee_schedule_id = Some("spot-fees".into());
+        response.fills[0].fee_schedule_version = Some("v1".into());
+        response.fills[0].fee_order_class = Some("taker".into());
+        response.fills[0].fee_schedule_evidence = Some(serde_json::json!({
+            "schema_version":"paper_exchange_financial_evidence:v1",
+            "event_id":"paper-fee-schedule:spot-fees:v1:BTC-USDT",
+            "source_system":"paper_exchange_simulator_configuration",
+            "source_epoch":"financial-epoch-1",
+            "source_cursor":1,
+            "source_record_id":"configured-fee-schedule:spot-fees:v1:BTC-USDT",
+            "source_timestamp_utc_ms":1,
+            "event_type":"fee_schedule",
+            "fee_schedule_id":"spot-fees",
+            "fee_schedule_version":"v1",
+            "symbol":"BTC-USDT",
+            "effective_from_utc_ms":1,
+            "effective_to_utc_ms":null,
+            "maker_rate":0.0008,
+            "taker_rate":0.001
+        }));
+
+        let evidence = paper_exchange_fill_evidence(&response, "BTC-USDT", Some("order-1"), 0.5);
+        assert_eq!(evidence[0].fee, Some(-0.05));
+        assert_eq!(evidence[0].fee_currency.as_deref(), Some("USDT"));
+        assert_eq!(evidence[0].fee_schedule_id.as_deref(), Some("spot-fees"));
+        assert_eq!(evidence[0].fee_schedule_version.as_deref(), Some("v1"));
+        assert_eq!(evidence[0].fee_order_class.as_deref(), Some("taker"));
+        assert!(evidence[0].fee_schedule_evidence.is_some());
+
+        let mut wrong_symbol = response.clone();
+        wrong_symbol.fills[0].fee_schedule_evidence.as_mut().unwrap()["symbol"] =
+            serde_json::json!("ETH-USDT");
+        let evidence =
+            paper_exchange_fill_evidence(&wrong_symbol, "BTC-USDT", Some("order-1"), 0.5);
+        assert!(evidence[0].fee_schedule_evidence.is_none());
+
+        let mut wrong_amount = response;
+        wrong_amount.fills[0].fee = Some(-0.04);
+        let evidence =
+            paper_exchange_fill_evidence(&wrong_amount, "BTC-USDT", Some("order-1"), 0.5);
+        assert!(evidence[0].fee_schedule_evidence.is_none());
     }
 
     #[tokio::test]
@@ -1193,6 +1254,7 @@ mod order_ledger_contention_tests {
                     recorded_at_utc_ms: Some(2),
                     source_price: Some(110.0),
                     source_quantity: Some(0.25),
+                    ..MatcherFill::default()
                 }],
                 remaining_quantity: 0.0,
                 filled_quantity: 0.25,

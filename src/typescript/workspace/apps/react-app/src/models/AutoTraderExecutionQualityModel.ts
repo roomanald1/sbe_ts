@@ -95,6 +95,11 @@ export type ExecutionOutcome =
   | 'rejected'
   | 'terminal_no_fill'
   | 'unknown';
+export type ExecutionOrderSortField =
+  | 'timestamp'
+  | 'symbol'
+  | 'strategy'
+  | 'outcome';
 
 export type ExecutionOrderRow = {
   key: string;
@@ -112,6 +117,19 @@ export type ExecutionOrderRow = {
 export type ExecutionQualitySnapshot = {
   rows: ExecutionOrderRow[];
   visibleRows: ExecutionOrderRow[];
+  selectedOrder: ExecutionOrderRow | null;
+  view: 'overview' | 'orders' | 'history';
+  sort: { field: ExecutionOrderSortField; direction: 'asc' | 'desc' };
+  outcomeCounts: Record<ExecutionOutcome, number>;
+  strategyRows: Array<{
+    strategy: string;
+    orderCount: number;
+    filledCount: number;
+    fillRatePercent: number | null;
+    feeEvidenceCount: number;
+    terminalAgeSamples: number;
+    averageTerminalLifetimeMs: number | null;
+  }>;
   symbols: string[];
   filters: { symbol: string; outcome: ExecutionOutcome | '' };
   availableOrderCount: number;
@@ -420,9 +438,90 @@ export function buildExecutionQualitySnapshot(
   pathEvidence: ExecutionPathData = emptyPathData,
 ): ExecutionQualitySnapshot {
   const joined = joinMarketPathsToOrders(orders, pathEvidence);
+  const outcomeCounts: Record<ExecutionOutcome, number> = {
+    filled: 0,
+    partially_filled: 0,
+    pending: 0,
+    post_only_cross_rejection: 0,
+    passive_expiry: 0,
+    cancelled: 0,
+    rejected: 0,
+    terminal_no_fill: 0,
+    unknown: 0,
+  };
+  const strategyTotals = new Map<
+    string,
+    {
+      orderCount: number;
+      filledCount: number;
+      feeEvidenceCount: number;
+      terminalAgeTotalMs: number;
+      terminalAgeSamples: number;
+    }
+  >();
+  for (const row of joined.rows) {
+    outcomeCounts[row.outcome] += 1;
+    const strategy = row.order.strategy?.trim() || 'Attribution unavailable';
+    const totals = strategyTotals.get(strategy) ?? {
+      orderCount: 0,
+      filledCount: 0,
+      feeEvidenceCount: 0,
+      terminalAgeTotalMs: 0,
+      terminalAgeSamples: 0,
+    };
+    totals.orderCount += 1;
+    if (row.outcome === 'filled' || row.outcome === 'partially_filled')
+      totals.filledCount += 1;
+    if (
+      typeof row.order.fees_paid === 'number' &&
+      Number.isFinite(row.order.fees_paid) &&
+      row.order.fees_paid >= 0
+    )
+      totals.feeEvidenceCount += 1;
+    const terminalAt = row.marketPaths.find(
+      (path) =>
+        path.source === 'terminal_history' && path.terminalAtMs !== null,
+    )?.terminalAtMs;
+    if (
+      typeof terminalAt === 'number' &&
+      Number.isFinite(terminalAt) &&
+      Number.isFinite(row.order.timestamp) &&
+      terminalAt >= row.order.timestamp
+    ) {
+      totals.terminalAgeTotalMs += terminalAt - row.order.timestamp;
+      totals.terminalAgeSamples += 1;
+    }
+    strategyTotals.set(strategy, totals);
+  }
+  const strategyRows = [...strategyTotals]
+    .map(([strategy, totals]) => ({
+      strategy,
+      orderCount: totals.orderCount,
+      filledCount: totals.filledCount,
+      feeEvidenceCount: totals.feeEvidenceCount,
+      terminalAgeSamples: totals.terminalAgeSamples,
+      averageTerminalLifetimeMs:
+        totals.terminalAgeSamples > 0
+          ? totals.terminalAgeTotalMs / totals.terminalAgeSamples
+          : null,
+      fillRatePercent:
+        totals.orderCount > 0
+          ? (totals.filledCount / totals.orderCount) * 100
+          : null,
+    }))
+    .sort(
+      (left, right) =>
+        right.orderCount - left.orderCount ||
+        left.strategy.localeCompare(right.strategy),
+    );
   return {
     rows: joined.rows,
     visibleRows: joined.rows,
+    selectedOrder: null,
+    view: 'overview',
+    sort: { field: 'timestamp', direction: 'desc' },
+    outcomeCounts,
+    strategyRows,
     symbols: [...new Set(joined.rows.map(({ order }) => order.symbol))].sort(),
     filters: { symbol: '', outcome: '' },
     availableOrderCount: orders.length,
@@ -459,6 +558,12 @@ export class AutoTraderExecutionQualityModel {
     outcome: '',
   };
   private nowMs = Date.now();
+  private view: ExecutionQualitySnapshot['view'] = 'overview';
+  private sort: ExecutionQualitySnapshot['sort'] = {
+    field: 'timestamp',
+    direction: 'desc',
+  };
+  private selectedOrderKey: string | null = null;
 
   constructor(
     source: AutoTraderModel = new AutoTraderModel(),
@@ -510,6 +615,27 @@ export class AutoTraderExecutionQualityModel {
     this.state$.next(this.project());
   }
 
+  setView(view: ExecutionQualitySnapshot['view']) {
+    this.view = view;
+    this.state$.next(this.project());
+  }
+
+  setSort(field: ExecutionOrderSortField) {
+    this.sort = {
+      field,
+      direction:
+        this.sort.field === field && this.sort.direction === 'asc'
+          ? 'desc'
+          : 'asc',
+    };
+    this.state$.next(this.project());
+  }
+
+  selectOrder(key: string | null) {
+    this.selectedOrderKey = key;
+    this.state$.next(this.project());
+  }
+
   async refresh(): Promise<void> {
     if (!this.started) return;
     if (this.pathRequest) return this.pathRequest;
@@ -539,9 +665,34 @@ export class AutoTraderExecutionQualityModel {
         (!this.filters.symbol || order.symbol === this.filters.symbol) &&
         (!this.filters.outcome || outcome === this.filters.outcome),
     );
+    const sortedVisibleRows = visibleRows.slice().sort((left, right) => {
+      let comparison = 0;
+      switch (this.sort.field) {
+        case 'symbol':
+          comparison = left.order.symbol.localeCompare(right.order.symbol);
+          break;
+        case 'strategy':
+          comparison = (left.order.strategy ?? '').localeCompare(
+            right.order.strategy ?? '',
+          );
+          break;
+        case 'outcome':
+          comparison = left.outcome.localeCompare(right.outcome);
+          break;
+        case 'timestamp':
+          comparison = left.order.timestamp - right.order.timestamp;
+          break;
+      }
+      return this.sort.direction === 'asc' ? comparison : -comparison;
+    });
     return {
       ...base,
-      visibleRows,
+      visibleRows: sortedVisibleRows,
+      view: this.view,
+      sort: this.sort,
+      selectedOrder:
+        sortedVisibleRows.find((row) => row.key === this.selectedOrderKey) ??
+        null,
       filters: this.filters,
       nowMs: this.nowMs,
       pathEvidenceStatus: this.pathEvidenceLoaded

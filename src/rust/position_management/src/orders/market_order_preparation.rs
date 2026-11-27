@@ -78,6 +78,12 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
                 source_cursor: fill.source_cursor,
                 source_cursor_kind: fill.source_cursor_kind,
                 recorded_at_utc_ms: fill.recorded_at_utc_ms,
+                fee: fill.fee,
+                fee_currency: fill.fee_currency,
+                fee_schedule_id: fill.fee_schedule_id,
+                fee_schedule_version: fill.fee_schedule_version,
+                fee_order_class: fill.fee_order_class,
+                fee_schedule_evidence: fill.fee_schedule_evidence,
                 source_price: fill.source_price.or(Some(fill.price)),
                 source_quantity: fill.source_quantity.or(Some(fill.quantity)),
             });
@@ -210,6 +216,7 @@ fn source_match_is_complete(
 
 fn paper_exchange_fill_evidence(
     result: &MatcherResponse,
+    expected_symbol: &str,
     requested_order_id: Option<&str>,
     requested_quantity: f64,
 ) -> Vec<PaperExchangeFillEvidence> {
@@ -259,9 +266,81 @@ fn paper_exchange_fill_evidence(
                 source_quantity: linked.then_some(fill.source_quantity).flatten(),
                 source_price: linked.then_some(fill.source_price).flatten(),
                 complete: Some(complete),
+                fee: linked.then_some(fill.fee).flatten().filter(|fee| fee.is_finite()),
+                fee_currency: linked
+                    .then(|| fill.fee_currency.clone())
+                    .flatten()
+                    .filter(|currency| !currency.trim().is_empty()),
+                fee_schedule_id: linked.then(|| fill.fee_schedule_id.clone()).flatten(),
+                fee_schedule_version: linked
+                    .then(|| fill.fee_schedule_version.clone())
+                    .flatten(),
+                fee_order_class: linked.then(|| fill.fee_order_class.clone()).flatten(),
+                fee_schedule_evidence: linked
+                    .then(|| fill.fee_schedule_evidence.clone())
+                    .flatten()
+                    .filter(|event| {
+                        paper_exchange_fee_schedule_evidence_matches(
+                            event,
+                            fill,
+                            expected_symbol,
+                        )
+                    }),
             }
         })
         .collect()
+}
+
+fn paper_exchange_fee_schedule_evidence_matches(
+    event: &serde_json::Value,
+    fill: &MatcherFill,
+    expected_symbol: &str,
+) -> bool {
+    let quote_currency = expected_symbol
+        .rsplit_once('-')
+        .map(|(_, quote)| quote)
+        .unwrap_or_default();
+    let fee_currency = fill.fee_currency.as_deref().unwrap_or_default();
+    let fee = fill.fee.unwrap_or(f64::NAN);
+    let quantity = fill.quantity;
+    let price = fill.price;
+    let recorded_at = fill.recorded_at_utc_ms.unwrap_or_default();
+    let schedule_id = fill.fee_schedule_id.as_deref().unwrap_or_default();
+    let schedule_version = fill.fee_schedule_version.as_deref().unwrap_or_default();
+    let order_class = fill.fee_order_class.as_deref().unwrap_or_default();
+    let maker_rate = event["maker_rate"].as_f64().unwrap_or(f64::NAN);
+    let taker_rate = event["taker_rate"].as_f64().unwrap_or(f64::NAN);
+    let applied_rate = match order_class {
+        "maker" => maker_rate,
+        "taker" => taker_rate,
+        _ => return false,
+    };
+    let effective_from = event["effective_from_utc_ms"].as_u64().unwrap_or(u64::MAX);
+    let effective_to = event["effective_to_utc_ms"].as_u64();
+    let expected_fee = -(quantity * price * applied_rate);
+    event["event_type"] == "fee_schedule"
+        && event["source_system"].as_str().is_some_and(|value| !value.trim().is_empty())
+        && event["source_epoch"].as_str().is_some_and(|value| !value.trim().is_empty())
+        && event["source_record_id"]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        && event["source_cursor"].as_u64().is_some_and(|cursor| cursor > 0)
+        && event["source_timestamp_utc_ms"].as_u64().is_some_and(|timestamp| timestamp > 0)
+        && event["symbol"] == expected_symbol
+        && event["fee_schedule_id"] == schedule_id
+        && event["fee_schedule_version"] == schedule_version
+        && !schedule_id.trim().is_empty()
+        && !schedule_version.trim().is_empty()
+        && fee_currency == quote_currency
+        && effective_from <= recorded_at
+        && effective_to.is_none_or(|end| recorded_at < end)
+        && maker_rate.is_finite()
+        && (0.0..=0.1).contains(&maker_rate)
+        && taker_rate.is_finite()
+        && (0.0..=0.1).contains(&taker_rate)
+        && fee.is_finite()
+        && expected_fee.is_finite()
+        && (fee - expected_fee).abs() <= 1e-9 * fee.abs().max(expected_fee.abs()).max(1.0)
 }
 
 async fn paper_exchange_match(

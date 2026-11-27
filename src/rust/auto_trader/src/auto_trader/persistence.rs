@@ -283,6 +283,7 @@ fn mark_restored_price_paths_interrupted(settings: &mut Settings) {
     for position in settings.positions.values_mut() {
         if position.quantity.abs() > 1e-12 {
             position.price_path_restart_interrupted = true;
+            position.price_path_event_metrics_complete = false;
             let epoch = next_epoch(position);
             position.price_path_epoch = Some(epoch);
         }
@@ -291,6 +292,7 @@ fn mark_restored_price_paths_interrupted(settings: &mut Settings) {
         for position in lots.values_mut() {
             if position.quantity.abs() > 1e-12 {
                 position.price_path_restart_interrupted = true;
+                position.price_path_event_metrics_complete = false;
                 let epoch = next_epoch(position);
                 position.price_path_epoch = Some(epoch);
             }
@@ -325,6 +327,7 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
                 )
             })?;
             merge_durable_entry_reservations(&connection, &mut settings)?;
+            hydrate_persisted_trade_paths(&connection, &mut settings)?;
             mark_restored_price_paths_interrupted(&mut settings);
             return Ok(Some(settings));
         }
@@ -384,6 +387,7 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
                 )
             })?;
         merge_durable_entry_reservations(&connection, &mut settings)?;
+        hydrate_persisted_trade_paths(&connection, &mut settings)?;
         mark_restored_price_paths_interrupted(&mut settings);
         return Ok(Some(settings));
     }
@@ -400,6 +404,7 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
         })?;
         let mut settings = settings;
         merge_durable_entry_reservations(&connection, &mut settings)?;
+        hydrate_persisted_trade_paths(&connection, &mut settings)?;
         mark_restored_price_paths_interrupted(&mut settings);
         return Ok(Some(settings));
     }
@@ -414,6 +419,301 @@ fn read_settings_database(path: &PathBuf) -> rusqlite::Result<Option<Settings>> 
         return Ok(Some(settings));
     }
     Ok(None)
+}
+
+fn hydrate_persisted_trade_paths(
+    connection: &rusqlite::Connection,
+    settings: &mut Settings,
+) -> rusqlite::Result<()> {
+    const MEMORY_WINDOW: usize = 4_096;
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_price_path_samples')",
+        [], |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(());
+    }
+    fn hydrate_one(
+        connection: &rusqlite::Connection,
+        position: &mut TraderPosition,
+        memory_window: usize,
+    ) -> rusqlite::Result<()> {
+        let Some(trade_id) = position
+            .trade_id
+            .as_deref()
+            .filter(|trade_id| !trade_id.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let total_rows: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id=?1",
+            [trade_id],
+            |row| row.get(0),
+        )?;
+        if total_rows == 0 {
+            return Ok(());
+        }
+        let mut statement = connection.prepare(
+            "SELECT sample_json FROM trade_price_path_samples WHERE trade_id=?1 ORDER BY sample_cursor DESC LIMIT ?2",
+        )?;
+        let newest = statement
+            .query_map(
+                rusqlite::params![trade_id, i64::try_from(memory_window).unwrap_or(i64::MAX)],
+                |row| {
+                    let payload: String = row.get(0)?;
+                    serde_json::from_str::<TradePriceSample>(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut samples = position
+            .price_path
+            .drain(..)
+            .map(|sample| ((sample.epoch.clone(), sample.sequence), sample))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for sample in newest.into_iter().rev() {
+            samples
+                .entry((sample.epoch.clone(), sample.sequence))
+                .or_insert(sample);
+        }
+        let mut samples = samples.into_values().collect::<Vec<_>>();
+        samples.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        if samples.len() > memory_window {
+            samples.drain(..samples.len() - memory_window);
+        }
+        position.price_path_total_samples = position.price_path_total_samples.max(
+            samples
+                .iter()
+                .map(|sample| sample.sequence)
+                .max()
+                .unwrap_or_default(),
+        );
+        position.price_path_memory_window_truncated =
+            i64::try_from(total_rows).unwrap_or(i64::MAX) > samples.len() as i64;
+        position.price_path = samples;
+        Ok(())
+    }
+    for position in settings.positions.values_mut() {
+        hydrate_one(connection, position, MEMORY_WINDOW)?;
+    }
+    for positions in settings.strategy_positions.values_mut() {
+        for position in positions.values_mut() {
+            hydrate_one(connection, position, MEMORY_WINDOW)?;
+        }
+    }
+    for observation in &mut settings.post_exit_observations {
+        // Pending post-exit observations are the durable owner after an exit.
+        // A process restart breaks the 1s continuity contract even when the
+        // next quote arrives quickly, so never bridge it as a complete path.
+        observation["path_restart_interrupted"] = serde_json::Value::Bool(true);
+    }
+    Ok(())
+}
+
+fn read_trade_price_path_page(
+    path: &PathBuf,
+    trade_id: &str,
+    after_timestamp_ms: Option<u64>,
+    after_cursor: Option<i64>,
+    limit: usize,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_price_path_samples')",
+        [], |row| row.get(0),
+    ).map_err(settings_persistence_error)?;
+    if !table_exists {
+        return Ok(serde_json::json!({
+            "schema_version": 1, "trade_id": trade_id, "coverage_status": "no_durable_path",
+            "history_complete": false, "total_sample_count": 0, "segments": [], "samples": [],
+            "next_timestamp_ms": null, "next_cursor": null, "has_more": false
+        }));
+    }
+    let total_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id=?1",
+            [trade_id],
+            |row| row.get::<_, i64>(0).map(|value| value.max(0) as u64),
+        )
+        .map_err(settings_persistence_error)?;
+    let mut segments = Vec::new();
+    let mut segment_count_total = 0_u64;
+    {
+        let mut statement = connection.prepare(
+            "SELECT path_epoch,first_sequence,last_sequence,sample_count,first_timestamp_ms,last_timestamp_ms,
+                    maximum_gap_ms,complete,missing_reasons_json
+             FROM trade_price_path_segments WHERE trade_id=?1 ORDER BY first_timestamp_ms,path_epoch",
+        ).map_err(settings_persistence_error)?;
+        let rows = statement
+            .query_map([trade_id], |row| {
+                let reasons_json: String = row.get(8)?;
+                let reasons =
+                    serde_json::from_str::<Vec<String>>(&reasons_json).unwrap_or_default();
+                Ok(serde_json::json!({
+                    "path_epoch":row.get::<_,String>(0)?,
+                    "first_sequence":row.get::<_,i64>(1)?,
+                    "last_sequence":row.get::<_,i64>(2)?,
+                    "sample_count":row.get::<_,i64>(3)?,
+                    "first_timestamp_ms":row.get::<_,i64>(4)?,
+                    "last_timestamp_ms":row.get::<_,i64>(5)?,
+                    "maximum_gap_ms":row.get::<_,i64>(6)?,
+                    "complete":row.get::<_,i64>(7)? != 0,
+                    "missing_reasons":reasons
+                }))
+            })
+            .map_err(settings_persistence_error)?;
+        for row in rows {
+            let segment = row.map_err(settings_persistence_error)?;
+            segment_count_total = segment_count_total
+                .saturating_add(segment["sample_count"].as_u64().unwrap_or_default());
+            segments.push(segment);
+        }
+    }
+    let query_limit = limit.saturating_add(1);
+    let mut statement = if after_timestamp_ms.is_some() && after_cursor.is_some() {
+        connection.prepare(
+            "SELECT sample_cursor,path_epoch,sequence,timestamp_ms,sample_json FROM trade_price_path_samples
+             WHERE trade_id=?1 AND (timestamp_ms>?2 OR (timestamp_ms=?2 AND sample_cursor>?3))
+             ORDER BY timestamp_ms,sample_cursor LIMIT ?4",
+        )
+    } else if after_timestamp_ms.is_none() && after_cursor.is_none() {
+        connection.prepare(
+            "SELECT sample_cursor,path_epoch,sequence,timestamp_ms,sample_json FROM trade_price_path_samples
+             WHERE trade_id=?1 ORDER BY timestamp_ms,sample_cursor LIMIT ?2",
+        )
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "after_timestamp_ms and after_cursor must be supplied together".into()));
+    }.map_err(settings_persistence_error)?;
+    let rows = if let (Some(timestamp), Some(cursor)) = (after_timestamp_ms, after_cursor) {
+        statement
+            .query_map(
+                rusqlite::params![
+                    trade_id,
+                    i64::try_from(timestamp).map_err(settings_persistence_error)?,
+                    cursor,
+                    i64::try_from(query_limit).map_err(settings_persistence_error)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .map_err(settings_persistence_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(settings_persistence_error)?
+    } else {
+        statement
+            .query_map(
+                rusqlite::params![
+                    trade_id,
+                    i64::try_from(query_limit).map_err(settings_persistence_error)?
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .map_err(settings_persistence_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(settings_persistence_error)?
+    };
+    let has_more = rows.len() > limit;
+    let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+    let mut samples = Vec::with_capacity(rows.len());
+    for (cursor, epoch, sequence, timestamp, payload) in rows {
+        let sample: serde_json::Value =
+            serde_json::from_str(&payload).map_err(settings_persistence_error)?;
+        samples.push(serde_json::json!({
+            "cursor":cursor,"path_epoch":epoch,"sequence":sequence,"timestamp_ms":timestamp,"sample":sample
+        }));
+    }
+    let tail = samples.last();
+    let next_timestamp_ms = tail.and_then(|row| row["timestamp_ms"].as_u64());
+    let next_cursor = tail.and_then(|row| row["cursor"].as_i64());
+    let history_complete = segments.len() == 1
+        && segment_count_total == total_count
+        && segments
+            .first()
+            .is_some_and(|segment| segment["complete"].as_bool() == Some(true));
+    let mut missing_reasons = segments
+        .iter()
+        .flat_map(|segment| {
+            segment["missing_reasons"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if segments.len() > 1 {
+        missing_reasons.insert("path_spans_process_or_position_epochs".into());
+    }
+    if segment_count_total != total_count {
+        missing_reasons.insert("segment_sample_count_mismatch".into());
+    }
+    Ok(serde_json::json!({
+        "schema_version":1,"trade_id":trade_id,
+        "coverage_status":if history_complete {"complete"} else if total_count==0 {"no_durable_path"} else {"incomplete"},
+        "history_complete":history_complete,"total_sample_count":total_count,
+        "segments":segments,"missing_reasons":missing_reasons,
+        "samples":samples,"next_timestamp_ms":if has_more {next_timestamp_ms} else {None},
+        "next_cursor":if has_more {next_cursor} else {None},"has_more":has_more
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct TradePricePathQuery {
+    trade_id: String,
+    after_timestamp_ms: Option<u64>,
+    after_cursor: Option<i64>,
+    limit: Option<usize>,
+}
+
+async fn get_trade_price_path(
+    State(state): State<AutoTraderState>,
+    axum::extract::Query(query): axum::extract::Query<TradePricePathQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if query.trade_id.trim().is_empty()
+        || query.trade_id.len() > 256
+        || query.trade_id.chars().any(char::is_control)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A stable trade_id is required".into(),
+        ));
+    }
+    let limit = query.limit.unwrap_or(250).clamp(1, 1_000);
+    let path = settings_database_path(&state.settings_path);
+    let trade_id = query.trade_id;
+    let after_timestamp = query.after_timestamp_ms;
+    let after_cursor = query.after_cursor;
+    let page = tokio::task::spawn_blocking(move || {
+        read_trade_price_path_page(&path, &trade_id, after_timestamp, after_cursor, limit)
+    })
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(page))
 }
 
 fn persist_settings_snapshot(
@@ -453,6 +753,7 @@ fn persist_settings_snapshot(
     let transaction = connection
         .unchecked_transaction()
         .map_err(settings_persistence_error)?;
+    persist_trade_price_path_samples(&transaction, settings)?;
     for (field, value) in object {
         if committed.as_ref().and_then(|snapshot| snapshot.get(field)) == Some(value) {
             continue;
@@ -483,6 +784,313 @@ fn persist_settings_snapshot(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(path.clone(), object.clone());
+    Ok(())
+}
+
+#[derive(Default)]
+struct PersistedPathSegmentProgress {
+    first_sequence: u64,
+    last_sequence: u64,
+    sample_count: u64,
+    first_timestamp_ms: u64,
+    last_timestamp_ms: u64,
+    maximum_gap_ms: u64,
+    complete: bool,
+    missing_reasons: std::collections::BTreeSet<String>,
+}
+
+fn persist_trade_price_path_samples(
+    transaction: &rusqlite::Transaction<'_>,
+    settings: &Settings,
+) -> Result<(), (StatusCode, String)> {
+    const MAX_PATH_GAP_MS: u64 = 1_000;
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS trade_price_path_samples (
+             sample_cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+             trade_id TEXT NOT NULL,
+             path_epoch TEXT NOT NULL,
+             sequence INTEGER NOT NULL,
+             timestamp_ms INTEGER NOT NULL,
+             sample_json TEXT NOT NULL,
+             UNIQUE(trade_id,path_epoch,sequence)
+         );
+         CREATE INDEX IF NOT EXISTS trade_price_path_samples_page
+             ON trade_price_path_samples(trade_id,sample_cursor);
+         CREATE INDEX IF NOT EXISTS trade_price_path_samples_chronological_page
+             ON trade_price_path_samples(trade_id,timestamp_ms,sample_cursor);
+         CREATE TABLE IF NOT EXISTS trade_price_path_segments (
+             trade_id TEXT NOT NULL,
+             path_epoch TEXT NOT NULL,
+             first_sequence INTEGER NOT NULL,
+             last_sequence INTEGER NOT NULL,
+             sample_count INTEGER NOT NULL,
+             first_timestamp_ms INTEGER NOT NULL,
+             last_timestamp_ms INTEGER NOT NULL,
+             maximum_gap_ms INTEGER NOT NULL,
+             complete INTEGER NOT NULL,
+             missing_reasons_json TEXT NOT NULL,
+             PRIMARY KEY(trade_id,path_epoch)
+         );",
+        )
+        .map_err(settings_persistence_error)?;
+
+    for position in settings
+        .strategy_positions
+        .values()
+        .flat_map(|lots| lots.values())
+    {
+        let (Some(trade_id), Some(active_epoch)) = (
+            position
+                .trade_id
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+            position
+                .price_path_epoch
+                .as_deref()
+                .filter(|value| !value.trim().is_empty()),
+        ) else {
+            continue;
+        };
+        let epochs = position
+            .price_path
+            .iter()
+            .filter_map(|sample| sample.epoch.as_deref())
+            .collect::<std::collections::BTreeSet<_>>();
+        for epoch in epochs {
+            let mut progress = transaction.query_row(
+                "SELECT first_sequence,last_sequence,sample_count,first_timestamp_ms,last_timestamp_ms,
+                        maximum_gap_ms,complete,missing_reasons_json
+                 FROM trade_price_path_segments WHERE trade_id=?1 AND path_epoch=?2",
+                rusqlite::params![trade_id, epoch],
+                |row| {
+                    let reasons_json: String = row.get(7)?;
+                    let reasons = serde_json::from_str::<Vec<String>>(&reasons_json)
+                        .unwrap_or_default().into_iter().collect::<std::collections::BTreeSet<_>>();
+                    Ok(PersistedPathSegmentProgress {
+                        first_sequence: row.get::<_, i64>(0)? as u64,
+                        last_sequence: row.get::<_, i64>(1)? as u64,
+                        sample_count: row.get::<_, i64>(2)? as u64,
+                        first_timestamp_ms: row.get::<_, i64>(3)? as u64,
+                        last_timestamp_ms: row.get::<_, i64>(4)? as u64,
+                        maximum_gap_ms: row.get::<_, i64>(5)? as u64,
+                        complete: row.get::<_, i64>(6)? != 0,
+                        missing_reasons: reasons,
+                    })
+                },
+            ).optional().map_err(settings_persistence_error)?.unwrap_or_default();
+            if progress.sample_count == 0 {
+                progress.complete = true;
+            }
+            let mut samples = position
+                .price_path
+                .iter()
+                .filter(|sample| sample.epoch.as_deref() == Some(epoch))
+                .collect::<Vec<_>>();
+            samples.sort_by_key(|sample| sample.sequence);
+            let persisted_last_sequence = progress.last_sequence;
+            for sample in samples
+                .into_iter()
+                .filter(|sample| sample.sequence > persisted_last_sequence)
+            {
+                let quote_identity_complete = sample
+                    .quote_source_system
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && sample
+                        .quote_source_epoch
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && sample.quote_source_cursor.is_some_and(|cursor| cursor > 0)
+                    && sample
+                        .quote_source_record_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty());
+                let source_fresh = sample.source_fresh == Some(true)
+                    && sample.freshness_contract_version == Some(1)
+                    && sample.freshness_max_age_ms.is_some()
+                    && sample.source_updated_at_ms.is_some();
+                if progress.sample_count == 0 {
+                    progress.first_sequence = sample.sequence;
+                    progress.first_timestamp_ms = sample.timestamp;
+                    if sample.sequence != 1
+                        && epoch == active_epoch
+                        && !position.price_path_restart_interrupted
+                    {
+                        progress
+                            .missing_reasons
+                            .insert("initial_sequence_missing".to_owned());
+                    }
+                    if !position.price_path_restart_interrupted
+                        && position.entry_timestamp_ms > 0
+                        && (sample.timestamp < position.entry_timestamp_ms
+                            || sample.timestamp.saturating_sub(position.entry_timestamp_ms)
+                                > MAX_PATH_GAP_MS)
+                    {
+                        progress
+                            .missing_reasons
+                            .insert("entry_to_first_sample_gap_exceeds_bound".to_owned());
+                    }
+                } else {
+                    let gap = sample.timestamp.saturating_sub(progress.last_timestamp_ms);
+                    progress.maximum_gap_ms = progress.maximum_gap_ms.max(gap);
+                    if sample.sequence != progress.last_sequence.saturating_add(1) {
+                        progress
+                            .missing_reasons
+                            .insert("path_sequence_gap".to_owned());
+                    }
+                    if sample.timestamp <= progress.last_timestamp_ms || gap > MAX_PATH_GAP_MS {
+                        progress
+                            .missing_reasons
+                            .insert("path_time_gap_exceeds_bound".to_owned());
+                    }
+                }
+                if !source_fresh {
+                    progress
+                        .missing_reasons
+                        .insert("source_freshness_incomplete".to_owned());
+                }
+                if !quote_identity_complete {
+                    progress
+                        .missing_reasons
+                        .insert("quote_source_identity_missing".to_owned());
+                }
+                if position.price_path_restart_interrupted {
+                    progress
+                        .missing_reasons
+                        .insert("process_restart_interrupted".to_owned());
+                }
+                if position.price_path_truncated {
+                    progress
+                        .missing_reasons
+                        .insert("legacy_raw_path_truncated".to_owned());
+                }
+                transaction.execute(
+                    "INSERT OR IGNORE INTO trade_price_path_samples(trade_id,path_epoch,sequence,timestamp_ms,sample_json)
+                     VALUES(?1,?2,?3,?4,?5)",
+                    rusqlite::params![trade_id, epoch, i64::try_from(sample.sequence).map_err(settings_persistence_error)?,
+                        i64::try_from(sample.timestamp).map_err(settings_persistence_error)?,
+                        serde_json::to_string(sample).map_err(settings_persistence_error)?],
+                ).map_err(settings_persistence_error)?;
+                progress.last_sequence = sample.sequence;
+                progress.last_timestamp_ms = sample.timestamp;
+                progress.sample_count = progress.sample_count.saturating_add(1);
+            }
+            if position.price_path_restart_interrupted {
+                progress
+                    .missing_reasons
+                    .insert("process_restart_interrupted".to_owned());
+            }
+            if position.price_path_truncated {
+                progress
+                    .missing_reasons
+                    .insert("legacy_raw_path_truncated".to_owned());
+            }
+            if position.price_path_finalized {
+                progress
+                    .missing_reasons
+                    .remove("post_exit_observation_pending");
+            } else {
+                progress
+                    .missing_reasons
+                    .insert("post_exit_observation_pending".to_owned());
+            }
+            progress.complete =
+                progress.missing_reasons.is_empty() && position.price_path_finalized;
+            transaction.execute(
+                "INSERT INTO trade_price_path_segments(trade_id,path_epoch,first_sequence,last_sequence,
+                     sample_count,first_timestamp_ms,last_timestamp_ms,maximum_gap_ms,complete,missing_reasons_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(trade_id,path_epoch) DO UPDATE SET
+                     last_sequence=excluded.last_sequence,sample_count=excluded.sample_count,
+                     last_timestamp_ms=excluded.last_timestamp_ms,maximum_gap_ms=excluded.maximum_gap_ms,
+                     complete=excluded.complete,missing_reasons_json=excluded.missing_reasons_json",
+                rusqlite::params![trade_id, epoch, i64::try_from(progress.first_sequence).map_err(settings_persistence_error)?,
+                    i64::try_from(progress.last_sequence).map_err(settings_persistence_error)?,
+                    i64::try_from(progress.sample_count).map_err(settings_persistence_error)?,
+                    i64::try_from(progress.first_timestamp_ms).map_err(settings_persistence_error)?,
+                    i64::try_from(progress.last_timestamp_ms).map_err(settings_persistence_error)?,
+                    i64::try_from(progress.maximum_gap_ms).map_err(settings_persistence_error)?,
+                    if progress.complete { 1_i64 } else { 0_i64 },
+                    serde_json::to_string(&progress.missing_reasons.into_iter().collect::<Vec<_>>()).map_err(settings_persistence_error)?],
+            ).map_err(settings_persistence_error)?;
+        }
+    }
+    // A closed position is removed from strategy_positions during fill
+    // accounting. Its existing post-exit observation retains the captured
+    // pre-exit window and post-exit samples until the worker finishes; append
+    // those rows through the same transaction and segment validator.
+    for observation in &settings.post_exit_observations {
+        let Some(trade_id) = observation["trade_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let mut samples = Vec::new();
+        for value in observation["pre_exit_price_path"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(observation["price_path"].as_array().into_iter().flatten())
+        {
+            if let Ok(sample) = serde_json::from_value::<TradePriceSample>(value.clone()) {
+                samples.push(sample);
+            }
+        }
+        if samples.is_empty() {
+            continue;
+        }
+        let path_epoch = observation["pre_exit_price_path_evidence"]["path_epochs"]
+            .as_array()
+            .and_then(|epochs| epochs.first())
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| samples.iter().find_map(|sample| sample.epoch.as_deref()));
+        let Some(path_epoch) = path_epoch else {
+            continue;
+        };
+        let mut pending = Settings::default();
+        let mut position = TraderPosition::default();
+        position.trade_id = Some(trade_id.to_owned());
+        position.price_path_epoch = Some(path_epoch.to_owned());
+        position.entry_timestamp_ms = observation["entry_context"]["timestamp_ms"]
+            .as_u64()
+            .unwrap_or_default();
+        position.price_path_total_samples =
+            observation["pre_exit_price_path_evidence"]["total_sample_count"]
+                .as_u64()
+                .unwrap_or(samples.len() as u64);
+        position.price_path_truncated =
+            observation["pre_exit_price_path_evidence"]["missing_coverage"]
+                .as_array()
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason == "price_path_retention_truncated")
+                });
+        position.price_path_restart_interrupted =
+            observation["path_restart_interrupted"].as_bool() == Some(true);
+        position.price_path_finalized =
+            observation["completion_pending_durable"].as_bool() == Some(true);
+        position.price_path = samples;
+        pending
+            .strategy_positions
+            .entry(
+                observation["symbol"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            )
+            .or_default()
+            .insert(
+                observation["strategy"]
+                    .as_str()
+                    .unwrap_or("post-exit")
+                    .to_owned(),
+                position,
+            );
+        persist_trade_price_path_samples(transaction, &pending)?;
+    }
     Ok(())
 }
 
@@ -548,6 +1156,7 @@ fn persist_durable_settings_snapshot(
     let transaction = connection
         .unchecked_transaction()
         .map_err(settings_persistence_error)?;
+    persist_trade_price_path_samples(&transaction, settings)?;
     transaction
         .execute(
             "INSERT INTO auto_trader_durable_snapshot(id,payload) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
@@ -938,6 +1547,7 @@ mod sqlite_state_tests {
                 freshness_contract_version: Some(1),
                 freshness_max_age_ms: Some(5_000),
                 source_fresh: Some(true),
+                ..TradePriceSample::default()
             }],
             price_path_total_samples: 1,
             price_path_truncated: false,
@@ -1360,9 +1970,9 @@ async fn persist_settings_snapshot_durable(
     result
 }
 
-// Match the 5-second executable-mark sampling cadence. This is a request to
-// the existing coalescing settings writer, not a synchronous write in the
-// protective-exit loop; exit submission remains independent of telemetry IO.
+// Coalesce 1-second path samples into the existing 5-second Settings snapshot
+// writer. Restart continuity remains fail-closed because a crash can leave a
+// gap between the last in-memory sample and this checkpoint.
 const PRICE_PATH_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
 const SETTINGS_PERSIST_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 const SETTINGS_NORMALIZED_PROJECTION_INTERVAL: Duration = Duration::from_secs(60);
@@ -2320,5 +2930,211 @@ mod persistence_allocation_tests {
         );
         assert!(!is_independent_daily_strategy("live-momentum"));
         assert!(is_independent_daily_strategy("donchian-20-btc200"));
+    }
+}
+
+#[cfg(test)]
+mod trade_price_path_persistence_tests {
+    use super::*;
+
+    fn temporary_database_path() -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("auto-trader-price-path-{nonce}.sqlite"))
+    }
+
+    fn sample(sequence: u64, timestamp: u64, epoch: &str) -> TradePriceSample {
+        TradePriceSample {
+            timestamp,
+            bid: 99.0 + sequence as f64 / 10_000.0,
+            ask: 100.0 + sequence as f64 / 10_000.0,
+            sequence,
+            epoch: Some(epoch.to_owned()),
+            source_updated_at_ms: Some(timestamp),
+            freshness_contract_version: Some(1),
+            freshness_max_age_ms: Some(1_000),
+            source_fresh: Some(true),
+            quote_source_system: Some("paper_exchange".into()),
+            quote_source_epoch: Some("pex-epoch".into()),
+            quote_source_cursor: Some(sequence),
+            quote_source_record_id: Some(format!("quote-{sequence}")),
+        }
+    }
+
+    fn position_with_samples(samples: Vec<TradePriceSample>, finalized: bool) -> Settings {
+        let mut settings = Settings::default();
+        let mut position = TraderPosition::default();
+        position.trade_id = Some("trade-path-test".into());
+        position.price_path_epoch = Some("path-epoch-1".into());
+        position.entry_timestamp_ms = 1_000;
+        position.price_path_total_samples = samples.last().map_or(0, |sample| sample.sequence);
+        position.price_path_finalized = finalized;
+        position.price_path = samples;
+        settings
+            .strategy_positions
+            .entry("BTC-USDT".into())
+            .or_default()
+            .insert("live-momentum".into(), position);
+        settings
+    }
+
+    fn append_snapshot(connection: &rusqlite::Connection, settings: &Settings) {
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_trade_price_path_samples(&transaction, settings).unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn path_appends_are_idempotent_and_paged_chronologically() {
+        let path = temporary_database_path();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let settings = position_with_samples(
+            (1..=3)
+                .map(|sequence| sample(sequence, 1_000 + sequence * 1_000, "path-epoch-1"))
+                .collect(),
+            true,
+        );
+        append_snapshot(&connection, &settings);
+        append_snapshot(&connection, &settings);
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id='trade-path-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 3,
+            "repeated Settings snapshots must not duplicate samples"
+        );
+        drop(connection);
+
+        let first = read_trade_price_path_page(&path, "trade-path-test", None, None, 2).unwrap();
+        assert_eq!(first["coverage_status"], "complete");
+        assert_eq!(first["has_more"], true);
+        assert_eq!(first["samples"][0]["timestamp_ms"], 2_000);
+        assert_eq!(first["samples"][1]["timestamp_ms"], 3_000);
+        let second = read_trade_price_path_page(
+            &path,
+            "trade-path-test",
+            first["next_timestamp_ms"].as_u64(),
+            first["next_cursor"].as_i64(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(second["samples"].as_array().unwrap().len(), 1);
+        assert_eq!(second["samples"][0]["timestamp_ms"], 4_000);
+        assert_eq!(second["has_more"], false);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn close_before_checkpoint_is_recovered_from_pending_post_exit_path_and_restart_fails_closed() {
+        let path = temporary_database_path();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let path_samples = vec![
+            sample(1, 2_000, "path-epoch-1"),
+            sample(2, 3_000, "path-epoch-1"),
+        ];
+        let mut settings = Settings::default();
+        settings.post_exit_observations.push(serde_json::json!({
+            "event_id":"exit-timing:trade-path-test",
+            "trade_id":"trade-path-test",
+            "symbol":"BTC-USDT",
+            "strategy":"live-momentum",
+            "entry_context":{"timestamp_ms":1_000},
+            "pre_exit_price_path":path_samples,
+            "price_path":[],
+            "pre_exit_price_path_evidence":{
+                "path_epochs":["path-epoch-1"],"total_sample_count":2,"missing_coverage":[]
+            },
+            "completion_pending_durable":false
+        }));
+        append_snapshot(&connection, &settings);
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id='trade-path-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "closed path survives removal from active positions"
+        );
+        let incomplete =
+            read_trade_price_path_page(&path, "trade-path-test", None, None, 10).unwrap();
+        assert_eq!(
+            incomplete["history_complete"], false,
+            "pending post-exit observation is not finalized"
+        );
+
+        settings.post_exit_observations[0]["completion_pending_durable"] =
+            serde_json::Value::Bool(true);
+        append_snapshot(&connection, &settings);
+        let complete =
+            read_trade_price_path_page(&path, "trade-path-test", None, None, 10).unwrap();
+        assert_eq!(
+            complete["history_complete"], true,
+            "completion follows the durable final batch"
+        );
+        settings.post_exit_observations[0]["path_restart_interrupted"] =
+            serde_json::Value::Bool(true);
+        append_snapshot(&connection, &settings);
+        let restarted =
+            read_trade_price_path_page(&path, "trade-path-test", None, None, 10).unwrap();
+        assert_eq!(
+            restarted["history_complete"], false,
+            "restart gaps cannot remain complete"
+        );
+        assert!(
+            restarted["missing_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "process_restart_interrupted")
+        );
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn durable_rows_exceed_memory_window_without_pruning() {
+        let path = temporary_database_path();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let settings = position_with_samples(
+            (1..=4_100)
+                .map(|sequence| sample(sequence, 1_000 + sequence * 1_000, "path-epoch-1"))
+                .collect(),
+            false,
+        );
+        append_snapshot(&connection, &settings);
+        let mut restored = Settings::default();
+        restored.strategy_positions = settings.strategy_positions.clone();
+        hydrate_persisted_trade_paths(&connection, &mut restored).unwrap();
+        let position = &restored.strategy_positions["BTC-USDT"]["live-momentum"];
+        assert_eq!(position.price_path.len(), 4_096);
+        assert!(position.price_path_memory_window_truncated);
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id='trade-path-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 4_100,
+            "memory hydration must not cap durable history"
+        );
+        drop(connection);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 }

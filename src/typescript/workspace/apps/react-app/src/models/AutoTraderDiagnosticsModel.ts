@@ -35,6 +35,24 @@ export type CandidateFunnelGroup = {
   records: CandidateFunnelRecord[];
 };
 
+export type DecisionFunnelViewState = {
+  tab: 'funnel' | 'heatmap';
+  dimension: 'strategy' | 'symbol' | 'pair';
+  eligibilityMode: 'strictEligibility' | 'exploratoryEligibility';
+  symbolFilter: string;
+  strategyFilter: string;
+  cycleFilter: string;
+};
+
+const initialDecisionFunnelViewState: DecisionFunnelViewState = {
+  tab: 'funnel',
+  dimension: 'strategy',
+  eligibilityMode: 'strictEligibility',
+  symbolFilter: '',
+  strategyFilter: '',
+  cycleFilter: 'all',
+};
+
 export const MAX_FUNNEL_CYCLES = 35;
 
 export function boundedFunnelHistory(
@@ -121,7 +139,15 @@ export type AutoTraderDiagnosticsState = AutoTraderState & {
   funnelHistory: FunnelCycle[];
   availableFromApiCount: number;
   displayedCycleCount: number;
+  funnelView: DecisionFunnelViewState;
+  nowMs: number;
 };
+
+type IntervalScheduler = (
+  callback: () => void,
+  intervalMs: number,
+) => ReturnType<typeof setInterval>;
+type IntervalCanceller = (timer: ReturnType<typeof setInterval>) => void;
 
 export function buildAutoTraderDiagnosticRows(
   hits: SymbolGateHit[],
@@ -202,9 +228,23 @@ export class AutoTraderDiagnosticsModel {
   private readonly expandedGroups = new Set<string>();
   private sourceSubscription?: Subscription;
   private readonly source: AutoTraderModel;
+  private readonly now: () => number;
+  private readonly scheduleInterval: IntervalScheduler;
+  private readonly cancelInterval: IntervalCanceller;
+  private clockTimer?: ReturnType<typeof setInterval>;
+  private funnelView = { ...initialDecisionFunnelViewState };
 
-  constructor(source: AutoTraderModel = new AutoTraderModel()) {
+  constructor(
+    source: AutoTraderModel = new AutoTraderModel(),
+    now: () => number = Date.now,
+    scheduleInterval: IntervalScheduler = (callback, intervalMs) =>
+      setInterval(callback, intervalMs),
+    cancelInterval: IntervalCanceller = (timer) => clearInterval(timer),
+  ) {
     this.source = source;
+    this.now = now;
+    this.scheduleInterval = scheduleInterval;
+    this.cancelInterval = cancelInterval;
     this.state$ = new BehaviorSubject(this.project(source.state$.value));
   }
 
@@ -214,12 +254,49 @@ export class AutoTraderDiagnosticsModel {
     this.sourceSubscription = this.source.state$.subscribe((state) =>
       this.state$.next(this.project(state)),
     );
+    this.clockTimer = this.scheduleInterval(() => {
+      this.state$.next(this.project(this.source.state$.value));
+    }, 5_000);
   }
 
   stop() {
+    if (!this.sourceSubscription) return;
     this.sourceSubscription?.unsubscribe();
     this.sourceSubscription = undefined;
+    if (this.clockTimer !== undefined) this.cancelInterval(this.clockTimer);
+    this.clockTimer = undefined;
     this.source.stop();
+  }
+
+  setFunnelTab(tab: DecisionFunnelViewState['tab']) {
+    this.updateFunnelView({ tab });
+  }
+
+  setFunnelDimension(dimension: DecisionFunnelViewState['dimension']) {
+    this.updateFunnelView({ dimension });
+  }
+
+  setEligibilityMode(
+    eligibilityMode: DecisionFunnelViewState['eligibilityMode'],
+  ) {
+    this.updateFunnelView({ eligibilityMode });
+  }
+
+  setSymbolFilter(symbolFilter: string) {
+    this.updateFunnelView({ symbolFilter });
+  }
+
+  setStrategyFilter(strategyFilter: string) {
+    this.updateFunnelView({ strategyFilter });
+  }
+
+  setCycleFilter(cycleFilter: string) {
+    this.updateFunnelView({ cycleFilter });
+  }
+
+  private updateFunnelView(update: Partial<DecisionFunnelViewState>) {
+    this.funnelView = { ...this.funnelView, ...update };
+    this.state$.next(this.project(this.source.state$.value));
   }
 
   toggleGroup(symbol: string, direction: string) {
@@ -246,6 +323,8 @@ export class AutoTraderDiagnosticsModel {
       funnelHistory,
       availableFromApiCount: state.entryDiagnosticHistory.length,
       displayedCycleCount: funnelHistory.length,
+      funnelView: { ...this.funnelView },
+      nowMs: this.now(),
     };
   }
 }

@@ -8,6 +8,7 @@ import {
 } from 'ag-grid-community';
 import { autoTraderRpc } from '../auto_trader_rsocket';
 import type { AutoTraderStrategyProfile } from '../models/AutoTraderModel';
+import { projectWalkForwardProfileRows } from '../models/AutoTraderStrategyPerformanceModel';
 
 ModuleRegistry.registerModules([ClientSideRowModelModule]);
 const walkForwardTheme = themeQuartz.withParams({
@@ -24,7 +25,7 @@ type WalkForwardRow = {
   id: string;
   symbol: string;
   strategy: string;
-  samples: number;
+  samples: number | null;
   winRate: number | null;
   averageNet: number | null;
   expectancy: string;
@@ -38,7 +39,12 @@ type WalkForwardRow = {
 const walkForwardColumns: ColDef<WalkForwardRow>[] = [
   { field: 'symbol', headerName: 'Symbol', pinned: 'left', width: 92 },
   { field: 'strategy', headerName: 'Strategy', width: 126 },
-  { field: 'samples', headerName: 'Samples', width: 68 },
+  {
+    field: 'samples',
+    headerName: 'Samples',
+    width: 68,
+    valueFormatter: ({ value }) => value ?? '—',
+  },
   {
     field: 'winRate',
     headerName: 'Win rate',
@@ -104,29 +110,17 @@ export function WalkForwardProfiles({
         <div className="walk-forward-list">
           <div className="data-grid-wrap walk-forward-grid">
             <AgGridReact<WalkForwardRow>
-              rowData={profiles.map((profile) => {
-                const evidence = profile.walk_forward_evidence;
-                return {
-                  id: `${profile.symbol}:${profile.strategy}`,
-                  symbol: profile.symbol,
-                  strategy: profile.strategy,
-                  samples: evidence?.sampleCount ?? 0,
-                  winRate: evidence?.positiveNetRate ?? null,
-                  averageNet: evidence?.averageNetReturnPercent ?? null,
-                  expectancy:
-                    evidence?.expectancyCiLowPercent == null ||
-                    evidence.expectancyCiHighPercent == null
-                      ? '—'
-                      : `${formatReturn(evidence.expectancyCiLowPercent)} to ${formatReturn(evidence.expectancyCiHighPercent)}`,
-                  effectiveSamples: evidence?.effectiveSampleSize ?? null,
-                  windows: evidence?.windowCount ?? null,
-                  maxDrawdown: evidence?.maxDrawdownPercent ?? null,
-                  meanDownside: evidence?.downsideLossPercent ?? null,
-                  lastSample: evidence?.lastSampleTimestampMs
-                    ? new Date(evidence.lastSampleTimestampMs).toLocaleString()
-                    : '—',
-                };
-              })}
+              rowData={projectWalkForwardProfileRows(profiles).map((row) => ({
+                ...row,
+                expectancy:
+                  row.expectancyCiLowPercent == null ||
+                  row.expectancyCiHighPercent == null
+                    ? '—'
+                    : `${formatReturn(row.expectancyCiLowPercent)} to ${formatReturn(row.expectancyCiHighPercent)}`,
+                lastSample: row.lastSampleTimestampMs
+                  ? new Date(row.lastSampleTimestampMs).toLocaleString()
+                  : '—',
+              }))}
               columnDefs={walkForwardColumns}
               getRowId={({ data }) => data.id}
               defaultColDef={{ sortable: true, resizable: true }}

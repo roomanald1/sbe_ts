@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -11,14 +11,21 @@ import type {
   LatestEntryDiagnostic,
   StrategyDiagnostic,
 } from '../models/AutoTraderModel';
-import { useBehaviorSnapshot } from '@workspace/ui-platform';
+import {
+  CompactTable,
+  OperatorMetricStrip,
+  OperatorPanel,
+  OperatorTabBar,
+  useBehaviorSnapshot,
+} from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
 import {
   AutoTraderDiagnosticsModel,
   candidateFunnelRecords,
   groupCandidateFunnelRecords,
-  MAX_FUNNEL_CYCLES,
+  type DecisionFunnelViewState,
   type FunnelCycle,
+  type CandidateFunnelRecord,
   type DiagnosticsRow,
 } from '../models/AutoTraderDiagnosticsModel';
 
@@ -139,19 +146,55 @@ export function DecisionFunnelPanel({
   availableFromApiCount = cycles.length,
   displayedCycleCount = cycles.length,
   nowMs = Date.now(),
+  initialTab = 'funnel',
+  viewState,
+  onSetTab,
+  onSetDimension,
+  onSetEligibilityMode,
+  onSetSymbolFilter,
+  onSetStrategyFilter,
+  onSetCycleFilter,
 }: {
   cycles: readonly FunnelCycle[];
   availableFromApiCount?: number;
   displayedCycleCount?: number;
   nowMs?: number;
+  initialTab?: 'funnel' | 'heatmap';
+  viewState?: DecisionFunnelViewState;
+  onSetTab?: (tab: DecisionFunnelViewState['tab']) => void;
+  onSetDimension?: (dimension: DecisionFunnelViewState['dimension']) => void;
+  onSetEligibilityMode?: (
+    mode: DecisionFunnelViewState['eligibilityMode'],
+  ) => void;
+  onSetSymbolFilter?: (symbol: string) => void;
+  onSetStrategyFilter?: (strategy: string) => void;
+  onSetCycleFilter?: (cycleId: string) => void;
 }) {
-  const [dimension, setDimension] = useState<
-    'symbol' | 'strategy' | 'symbol_strategy'
-  >('symbol_strategy');
-  const [symbolFilter, setSymbolFilter] = useState('');
-  const [strategyFilter, setStrategyFilter] = useState('');
-  const [cycleFilter, setCycleFilter] = useState('all');
-  const allRecords = useMemo(() => candidateFunnelRecords(cycles), [cycles]);
+  const controls: DecisionFunnelViewState = viewState ?? {
+    tab: initialTab,
+    dimension: 'strategy',
+    eligibilityMode: 'strictEligibility',
+    symbolFilter: '',
+    strategyFilter: '',
+    cycleFilter: 'all',
+  };
+  const {
+    tab,
+    dimension,
+    eligibilityMode,
+    symbolFilter,
+    strategyFilter,
+    cycleFilter,
+  } = controls;
+  const orderedCycles = useMemo(
+    () =>
+      [...cycles].sort((left, right) => left.timestampMs - right.timestampMs),
+    [cycles],
+  );
+  const allRecords = useMemo(
+    () => candidateFunnelRecords(orderedCycles),
+    [orderedCycles],
+  );
   const symbols = Array.from(
     new Set(allRecords.map(({ candidate }) => candidate.symbol)),
   ).sort();
@@ -162,327 +205,597 @@ export function DecisionFunnelPanel({
         .filter((strategy): strategy is string => Boolean(strategy)),
     ),
   ).sort();
+  const selectedCycles =
+    cycleFilter === 'all'
+      ? orderedCycles
+      : orderedCycles.filter((cycle) => cycle.cycleId === cycleFilter);
+  const funnelCycle = selectedCycles.at(-1);
   const records = allRecords.filter(
     ({ candidate, cycleId }) =>
       (!symbolFilter || candidate.symbol === symbolFilter) &&
       (!strategyFilter || candidate.strategy === strategyFilter) &&
       (cycleFilter === 'all' || cycleId === cycleFilter),
   );
-  const groups = groupCandidateFunnelRecords(records, dimension);
-  const selectedCycles =
-    cycleFilter === 'all'
-      ? cycles
-      : cycles.filter((cycle) => cycle.cycleId === cycleFilter);
+  const freshness = funnelCycle
+    ? entryDiagnosticFreshness(funnelCycle.timestampMs, nowMs)
+    : null;
+  const asOf = funnelCycle
+    ? new Date(funnelCycle.timestampMs).toLocaleString()
+    : 'Unavailable';
+  const metricValue = (value: number | null | undefined) =>
+    typeof value === 'number' && Number.isFinite(value)
+      ? value.toLocaleString()
+      : '—';
+  const metrics = [
+    {
+      label: 'Directional',
+      value: metricValue(funnelCycle?.freshDirectionalCandidateCount),
+    },
+    {
+      label: 'Eligible',
+      value: metricValue(funnelCycle?.eligibleCandidateCount),
+    },
+    {
+      label: 'Submitted',
+      value: metricValue(funnelCycle?.submittedOrderCount),
+    },
+    {
+      label: 'Fill status',
+      value:
+        funnelCycle?.fillConfirmed == null
+          ? '—'
+          : funnelCycle.fillConfirmed
+            ? 'Confirmed'
+            : 'Not confirmed',
+    },
+    { label: 'Closed', value: '—' },
+  ];
+  const candidateGroups = groupCandidateFunnelRecords(
+    records,
+    dimension === 'pair' ? 'symbol_strategy' : dimension,
+  );
+  const heatmapSymbols = Array.from(
+    new Set(
+      records.map(({ candidate }) => candidate.symbol || 'Unknown symbol'),
+    ),
+  ).sort();
+  const heatmapStrategies = Array.from(
+    new Set(
+      records.map(({ candidate }) => candidate.strategy ?? 'Unknown strategy'),
+    ),
+  ).sort();
+  const recordsFor = (symbol: string, strategy: string) =>
+    records.filter(
+      ({ candidate }) =>
+        (candidate.symbol || 'Unknown symbol') === symbol &&
+        (candidate.strategy ?? 'Unknown strategy') === strategy,
+    );
+  const eligibility = (group: CandidateFunnelRecord[]) => {
+    const classified = group.filter(
+      ({ candidate }) => candidate[eligibilityMode] != null,
+    );
+    const eligible = classified.filter(
+      ({ candidate }) => candidate[eligibilityMode] === true,
+    ).length;
+    const count = classified.length;
+    return {
+      eligible,
+      count,
+      label:
+        count === 0
+          ? '—'
+          : `${Math.round((eligible / count) * 100)}% · ${eligible}/${count}`,
+      tone:
+        count === 0
+          ? 'unknown'
+          : eligible === count
+            ? 'eligible'
+            : eligible === 0
+              ? 'blocked'
+              : 'mixed',
+    };
+  };
+  const failedMeasurements = new Map<string, number>();
+  const reasonMentions = new Map<string, number>();
+  for (const { candidate } of records) {
+    for (const measurement of candidate.measurements ?? []) {
+      if (measurement.passed === false) {
+        const gate = measurement.gateId || 'Unknown gate';
+        failedMeasurements.set(gate, (failedMeasurements.get(gate) ?? 0) + 1);
+      }
+    }
+    for (const reason of candidate.reasons) {
+      const text = reason.trim();
+      if (text) reasonMentions.set(text, (reasonMentions.get(text) ?? 0) + 1);
+    }
+  }
+  const gateRows = [
+    ...Array.from(failedMeasurements, ([label, count]) => ({
+      kind: 'measurement' as const,
+      label: `Failed measurement · ${label}`,
+      count,
+    })),
+    ...Array.from(reasonMentions, ([label, count]) => ({
+      kind: 'reason' as const,
+      label: `Reported reason · ${label}`,
+      count,
+    })),
+  ]
+    .sort(
+      (left, right) =>
+        right.count - left.count || left.label.localeCompare(right.label),
+    )
+    .slice(0, 6);
+  const stageRows: Array<[string, number | string | null | undefined]> =
+    funnelCycle
+      ? [
+          ['Raw signals', funnelCycle.rawSignalCount],
+          ['Allowed signals', funnelCycle.allowedSignalCount],
+          ['Strategy candidates', funnelCycle.strategyCandidateCount],
+          ['Fresh directional', funnelCycle.freshDirectionalCandidateCount],
+          ['Eligible candidates', funnelCycle.eligibleCandidateCount],
+          ['Selected', funnelCycle.selectedCandidateCount],
+          ['Order attempts', funnelCycle.orderAttemptCount],
+          ['Submitted', funnelCycle.submittedOrderCount],
+          [
+            'Fill confirmation',
+            funnelCycle.fillConfirmed == null
+              ? 'Unavailable'
+              : funnelCycle.fillConfirmed
+                ? 'Confirmed'
+                : 'Not confirmed',
+          ],
+        ]
+      : [];
+  const coverage = funnelCycle?.candidateCoverage;
+  const historyNote =
+    availableFromApiCount > displayedCycleCount
+      ? `Showing ${displayedCycleCount} of ${availableFromApiCount} API cycle reports; older backend history may be omitted.`
+      : `${displayedCycleCount} retained cycle reports; server history completeness is unknown.`;
+  const heatmapRows: Array<{
+    label: string;
+    cells: Array<{ label: string; records: CandidateFunnelRecord[] }>;
+  }> =
+    dimension === 'pair'
+      ? candidateGroups.map((group) => ({
+          label: group.key,
+          cells: [
+            {
+              label:
+                eligibilityMode === 'strictEligibility'
+                  ? 'Strict'
+                  : 'Exploratory',
+              records: group.records,
+            },
+          ],
+        }))
+      : dimension === 'strategy'
+        ? heatmapStrategies.map((strategy) => ({
+            label: strategy,
+            cells: heatmapSymbols.map((symbol) => ({
+              label: symbol,
+              records: recordsFor(symbol, strategy),
+            })),
+          }))
+        : heatmapSymbols.map((symbol) => ({
+            label: symbol,
+            cells: heatmapStrategies.map((strategy) => ({
+              label: strategy,
+              records: recordsFor(symbol, strategy),
+            })),
+          }));
 
   return (
-    <section
-      className="auto-trader-diagnostics-block auto-trader-decision-funnel v35-operator-card"
-      aria-label="Decision funnel diagnostics"
-    >
-      <div className="auto-trader-diagnostics-heading">
-        <strong>Decision funnel diagnostics</strong>
-        <span>
-          Showing {displayedCycleCount} of {availableFromApiCount} cycle reports
-          returned by API (view cap {MAX_FUNNEL_CYCLES});{' '}
-          {availableFromApiCount > displayedCycleCount
-            ? 'older backend history availability is unknown'
-            : 'server history completeness is unknown'}
-          {' · '}candidate detail records: {allRecords.length}
-        </span>
-      </div>
-      <p className="auto-trader-diagnostics-note">
-        This view reports only recorded populations. Candidate detail rows are
-        not complete signal or eligibility denominators. Missing backend
-        populations and unclassified eligibility remain unavailable.
-      </p>
-
-      <div className="auto-trader-funnel-filters" aria-label="Funnel filters">
-        <label>
-          Group by
-          <select
-            aria-label="Group candidates by"
-            value={dimension}
-            onChange={(event) =>
-              setDimension(
-                event.target.value as 'symbol' | 'strategy' | 'symbol_strategy',
-              )
-            }
-          >
-            <option value="symbol_strategy">Symbol and strategy</option>
-            <option value="symbol">Symbol</option>
-            <option value="strategy">Strategy</option>
-          </select>
-        </label>
-        <label>
-          Cycle
-          <select
-            aria-label="Filter by cycle"
-            value={cycleFilter}
-            onChange={(event) => setCycleFilter(event.target.value)}
-          >
-            <option value="all">All retained cycles</option>
-            {cycles
-              .slice()
-              .reverse()
-              .map((cycle, index) => (
-                <option
-                  key={`${cycle.cycleId}:${cycle.timestampMs}:${index}`}
-                  value={cycle.cycleId}
-                >
-                  {cycle.cycleId}
+    <div className="operator-decision-funnel">
+      <OperatorPanel
+        title="Decision funnel"
+        context={
+          <span>
+            {historyNote} · latest {asOf}
+          </span>
+        }
+        status={
+          freshness ? (
+            <span
+              className="operator-status"
+              data-tone={freshness.stale ? 'warning' : 'positive'}
+            >
+              {freshness.label}
+            </span>
+          ) : (
+            <span className="operator-status" data-tone="warning">
+              Cycle data unavailable
+            </span>
+          )
+        }
+        footer={
+          <span>
+            Candidate detail rows may repeat across cycles and do not define
+            complete signal, eligibility, fill or close denominators. Paper
+            diagnostics only.
+          </span>
+        }
+      >
+        <OperatorMetricStrip metrics={metrics} label="Latest cycle summary" />
+        <div
+          className="decision-funnel-filters"
+          aria-label="Decision funnel filters"
+        >
+          <label>
+            Candidate cycles
+            <select
+              aria-label="Filter by cycle"
+              value={cycleFilter}
+              onChange={(event) => onSetCycleFilter?.(event.target.value)}
+            >
+              <option value="all">All retained cycles</option>
+              {orderedCycles
+                .slice()
+                .reverse()
+                .map((cycle, index) => (
+                  <option
+                    key={`${cycle.cycleId}:${cycle.timestampMs}:${index}`}
+                    value={cycle.cycleId}
+                  >
+                    {new Date(cycle.timestampMs).toLocaleString()}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            Group
+            <select
+              aria-label="Group candidates by"
+              value={dimension}
+              onChange={(event) =>
+                onSetDimension?.(
+                  event.target.value as DecisionFunnelViewState['dimension'],
+                )
+              }
+            >
+              <option value="strategy">Strategy</option>
+              <option value="symbol">Symbol</option>
+              <option value="pair">Symbol / strategy</option>
+            </select>
+          </label>
+          <label>
+            Symbol
+            <select
+              aria-label="Filter by symbol"
+              value={symbolFilter}
+              onChange={(event) => onSetSymbolFilter?.(event.target.value)}
+            >
+              <option value="">All recorded symbols</option>
+              {symbols.map((symbol) => (
+                <option key={symbol} value={symbol}>
+                  {symbol}
                 </option>
               ))}
-          </select>
-        </label>
-        <label>
-          Symbol
-          <select
-            aria-label="Filter by symbol"
-            value={symbolFilter}
-            onChange={(event) => setSymbolFilter(event.target.value)}
-          >
-            <option value="">All recorded symbols</option>
-            {symbols.map((symbol) => (
-              <option key={symbol} value={symbol}>
-                {symbol}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Strategy
-          <select
-            aria-label="Filter by strategy"
-            value={strategyFilter}
-            onChange={(event) => setStrategyFilter(event.target.value)}
-          >
-            <option value="">All recorded strategies</option>
-            {strategies.map((strategy) => (
-              <option key={strategy} value={strategy}>
-                {strategy}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      {selectedCycles.map((cycle, index) => (
-        <div
-          className="auto-trader-funnel-cycle"
-          key={`${cycle.cycleId}:${cycle.timestampMs}:${index}`}
-        >
-          <strong>
-            Cycle {cycle.cycleId} ·{' '}
-            {new Date(cycle.timestampMs).toLocaleString()}
-          </strong>
-          <span>
-            {entryDiagnosticFreshness(cycle.timestampMs, nowMs).label}
-          </span>
-          <span>
-            Primary blocker:{' '}
-            {cycle.primaryBlocker ?? cycle.primaryGateId ?? 'None reported'}
-          </span>
-          <span>
-            Candidate detail coverage:{' '}
-            {cycle.candidateCoverage
-              ? `${cycle.candidateCoverage.state}; ${cycle.candidateCoverage.retained} retained${typeof cycle.candidateCoverage.observed === 'number' ? ` of ${cycle.candidateCoverage.observed} observed` : ''}; ${cycle.candidateCoverage.truncated ? 'truncated' : 'not marked truncated'}`
-              : 'unavailable'}
-          </span>
+            </select>
+          </label>
+          <label>
+            Strategy
+            <select
+              aria-label="Filter by strategy"
+              value={strategyFilter}
+              onChange={(event) => onSetStrategyFilter?.(event.target.value)}
+            >
+              <option value="">All recorded strategies</option>
+              {strategies.map((strategy) => (
+                <option key={strategy} value={strategy}>
+                  {strategy}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-      ))}
+        <OperatorTabBar
+          tabs={[
+            { id: 'funnel', label: 'Funnel' },
+            { id: 'heatmap', label: 'Heatmap' },
+          ]}
+          selectedId={tab}
+          label="Decision funnel views"
+          onSelect={(id) => onSetTab?.(id as DecisionFunnelViewState['tab'])}
+        />
 
-      <div className="data-grid-wrap">
-        <table className="auto-trader-funnel-table">
-          <caption>
-            Reported portfolio cycle counters; these populations do not share a
-            denominator
-          </caption>
-          <thead>
-            <tr>
-              <th scope="col">Cycle</th>
-              <th scope="col">Raw signals</th>
-              <th scope="col">Fresh directional before final gates</th>
-              <th scope="col">Selected</th>
-              <th scope="col">Order attempts</th>
-              <th scope="col">Submitted</th>
-              <th scope="col">Fill confirmation</th>
-            </tr>
-          </thead>
-          <tbody>
-            {selectedCycles.map((cycle, index) => (
-              <tr key={`${cycle.cycleId}:${cycle.timestampMs}:${index}`}>
-                <th scope="row">{cycle.cycleId}</th>
-                <td>{cycle.rawSignalCount}</td>
-                <td>{cycle.eligibleCandidateCount}</td>
-                <td>{cycle.selectedCandidateCount}</td>
-                <td>{cycle.orderAttemptCount}</td>
-                <td>{cycle.submittedOrderCount}</td>
-                <td>{cycle.fillConfirmed ? 'Confirmed' : 'Not confirmed'}</td>
-              </tr>
-            ))}
-            {!selectedCycles.length && (
-              <tr>
-                <td colSpan={7}>Cycle counters unavailable.</td>
-              </tr>
+        {tab === 'funnel' && (
+          <div className="decision-funnel-content">
+            <p className="decision-funnel-caveat">
+              Latest selected cycle · {asOf}. Counts are reported by stage; the
+              source contract does not establish shared conversion denominators.
+            </p>
+            {funnelCycle ? (
+              <CompactTable label="Latest cycle decision funnel">
+                <caption>Reported stage counts from one entry cycle</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Stage</th>
+                    <th scope="col">Count / status</th>
+                    <th scope="col">Conversion</th>
+                    <th scope="col">Blocker attribution</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stageRows.map(([stage, count]) => (
+                    <tr key={stage}>
+                      <th scope="row">{stage}</th>
+                      <td>
+                        {typeof count === 'number' && Number.isFinite(count)
+                          ? count.toLocaleString()
+                          : (count ?? 'Unavailable')}
+                      </td>
+                      <td>Unavailable · denominator not defined</td>
+                      <td>Not stage-attributed</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <th scope="row">Cycle-level blocker</th>
+                    <td>—</td>
+                    <td>—</td>
+                    <td>
+                      {funnelCycle.primaryBlocker ??
+                        funnelCycle.primaryGateId ??
+                        'None reported'}
+                    </td>
+                  </tr>
+                </tbody>
+              </CompactTable>
+            ) : (
+              <p role="status">No entry-cycle report is available.</p>
             )}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="data-grid-wrap">
-        <table className="auto-trader-funnel-table">
-          <caption>
-            Recorded candidate diagnostic rows by {dimension.replace('_', ' ')}
-          </caption>
-          <thead>
-            <tr>
-              <th scope="col">Group</th>
-              <th scope="col">Decision records</th>
-              <th scope="col">Strict eligibility</th>
-              <th scope="col">Exploratory eligibility</th>
-              <th scope="col">Actual selection modes</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((group) => {
-              const strictKnown = group.records.filter(
-                ({ candidate }) => candidate.strictEligibility != null,
-              );
-              const exploratoryKnown = group.records.filter(
-                ({ candidate }) => candidate.exploratoryEligibility != null,
-              );
-              const modes = new Map<string, number>();
-              for (const { candidate } of group.records) {
-                if (candidate.selectionMode != null) {
-                  modes.set(
-                    candidate.selectionMode,
-                    (modes.get(candidate.selectionMode) ?? 0) + 1,
-                  );
-                }
-              }
-              const eligibleCount = (
-                values: typeof group.records,
-                field: 'strictEligibility' | 'exploratoryEligibility',
-              ) =>
-                values.filter(({ candidate }) => candidate[field] === true)
-                  .length;
-              return (
-                <tr key={group.key}>
-                  <th scope="row">{group.key}</th>
-                  <td>{group.records.length}</td>
-                  <td>
-                    {strictKnown.length
-                      ? `${eligibleCount(group.records, 'strictEligibility')} eligible / ${strictKnown.length} classified`
-                      : 'Unavailable'}
-                  </td>
-                  <td>
-                    {exploratoryKnown.length
-                      ? `${eligibleCount(group.records, 'exploratoryEligibility')} eligible / ${exploratoryKnown.length} classified`
-                      : 'Unavailable'}
-                  </td>
-                  <td>
-                    {modes.size
-                      ? Array.from(
-                          modes,
-                          ([mode, count]) => `${mode}: ${count}`,
-                        ).join(', ')
-                      : 'Unavailable'}
-                  </td>
-                </tr>
-              );
-            })}
-            {!groups.length && (
-              <tr>
-                <td colSpan={5}>
-                  {cycles.length
-                    ? 'No candidate detail records are available for these filters.'
-                    : 'Decision funnel data is unavailable; no entry-cycle reports were received.'}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <details className="auto-trader-diagnostics-block">
-        <summary className="auto-trader-diagnostics-heading">
-          <strong>Candidate decisions</strong>
-          <span>{records.length} recorded detail rows</span>
-        </summary>
-        {records.length ? (
-          <ul className="auto-trader-gate-list">
-            {records.map(({ cycleId, cycleTimestampMs, candidate }, index) => (
-              <li
-                key={`${cycleId}:${candidate.decisionId}:${candidate.strategy ?? ''}:${candidate.symbol}:${index}`}
-              >
-                <span>
-                  <strong>{candidate.symbol}</strong>
-                  {candidate.strategy ? ` · ${candidate.strategy}` : ''}
-                  {candidate.profileId
-                    ? ` · profile ${candidate.profileId}`
-                    : ''}
-                  {candidate.workerEventId
-                    ? ` · event ${candidate.workerEventId}`
-                    : ''}
-                  {` · decision ${candidate.decisionId} · cycle ${cycleId}`}
-                </span>
-                <strong>
-                  Stage: {candidate.stage} · mode:{' '}
-                  {candidate.selectionMode ?? 'Unknown'} · strict:{' '}
-                  {explicitEligibility(candidate.strictEligibility)} ·
-                  exploratory:{' '}
-                  {explicitEligibility(candidate.exploratoryEligibility)}
-                </strong>
-                {candidate.reasons.length ? (
-                  <span>
-                    Reported reasons (unordered): {candidate.reasons.join('; ')}
-                  </span>
+            <div className="decision-funnel-lower-grid">
+              <section aria-label="Gate breakdown">
+                <h3>Gate breakdown</h3>
+                <p className="decision-funnel-caveat">
+                  Failed measured gates and reported reason mentions. One
+                  candidate may contribute multiple records.
+                </p>
+                {gateRows.length ? (
+                  <CompactTable label="Reported gate failures and reasons">
+                    <thead>
+                      <tr>
+                        <th scope="col">Gate or reported reason</th>
+                        <th scope="col">Records</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gateRows.map((row) => (
+                        <tr key={`${row.kind}:${row.label}`}>
+                          <th scope="row">{row.label}</th>
+                          <td>{row.count.toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </CompactTable>
                 ) : (
-                  <span>No candidate reasons reported.</span>
+                  <p role="status">
+                    No measured gate failures or reported reasons in this
+                    filtered candidate population.
+                  </p>
                 )}
-                {(candidate.measurements?.length ?? 0) > 0 && (
-                  <ul>
-                    {candidate.measurements!.map((measurement, index) => (
-                      <li key={`${measurement.gateId}:${index}`}>
-                        {measurement.gateId}: observed {measurement.observed}{' '}
-                        {measurement.unit ?? ''} {measurement.comparator}{' '}
-                        {measurement.required} {measurement.unit ?? ''} ·{' '}
-                        {measurement.passed == null
-                          ? 'result unavailable'
-                          : measurement.passed
-                            ? 'passed'
-                            : 'failed'}
+              </section>
+              <section aria-label="Candidate coverage">
+                <h3>Candidate coverage</h3>
+                <p>
+                  {records.length.toLocaleString()} retained candidate detail
+                  records
+                </p>
+                <p>
+                  {coverage
+                    ? `${coverage.state}; ${coverage.retained} retained${typeof coverage.observed === 'number' ? ` of ${coverage.observed} observed` : ''}; ${coverage.truncated ? 'truncated' : 'not marked truncated'}`
+                    : 'Coverage unavailable'}
+                </p>
+                <button
+                  type="button"
+                  className="decision-funnel-link"
+                  onClick={() => onSetTab?.('heatmap')}
+                >
+                  View eligibility heatmap
+                </button>
+              </section>
+            </div>
+            <details className="decision-funnel-details">
+              <summary>
+                Candidate decisions · {records.length.toLocaleString()} retained
+                detail rows
+              </summary>
+              {records.length ? (
+                <ul className="decision-funnel-candidate-list">
+                  {records.map(
+                    ({ cycleId, cycleTimestampMs, candidate }, index) => (
+                      <li key={`${cycleId}:${candidate.decisionId}:${index}`}>
+                        <strong>
+                          {candidate.symbol}
+                          {candidate.strategy ? ` · ${candidate.strategy}` : ''}
+                        </strong>
+                        <span>
+                          Stage {candidate.stage} · mode{' '}
+                          {candidate.selectionMode ?? 'Unknown'} · strict{' '}
+                          {explicitEligibility(candidate.strictEligibility)} ·
+                          exploratory{' '}
+                          {explicitEligibility(
+                            candidate.exploratoryEligibility,
+                          )}
+                        </span>
+                        <span>
+                          {candidate.reasons.length
+                            ? `Reported reasons (unordered): ${candidate.reasons.join('; ')}`
+                            : 'No candidate reasons reported.'}
+                        </span>
+                        {(candidate.measurements?.length ?? 0) > 0 && (
+                          <ul>
+                            {candidate.measurements!.map(
+                              (measurement, index) => (
+                                <li key={`${measurement.gateId}:${index}`}>
+                                  {measurement.gateId}: observed{' '}
+                                  {measurement.observed}{' '}
+                                  {measurement.unit ?? ''}{' '}
+                                  {measurement.comparator}{' '}
+                                  {measurement.required}{' '}
+                                  {measurement.unit ?? ''} ·{' '}
+                                  {measurement.passed == null
+                                    ? 'result unavailable'
+                                    : measurement.passed
+                                      ? 'passed'
+                                      : 'failed'}
+                                </li>
+                              ),
+                            )}
+                          </ul>
+                        )}
+                        <details>
+                          <summary>Technical identity and raw checks</summary>
+                          <dl>
+                            <div>
+                              <dt>Decision / cycle / worker event</dt>
+                              <dd>
+                                {candidate.decisionId} / {cycleId} /{' '}
+                                {candidate.workerEventId ?? 'Unavailable'}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Profile / timestamp</dt>
+                              <dd>
+                                {candidate.profileId ?? 'Unavailable'} /{' '}
+                                {new Date(cycleTimestampMs).toLocaleString()}
+                              </dd>
+                            </div>
+                          </dl>
+                          <pre>
+                            {JSON.stringify(
+                              {
+                                observed: candidate.observed,
+                                required: candidate.required,
+                                checks: candidate.checks,
+                                evidenceContract: candidate.evidenceContract,
+                              },
+                              null,
+                              2,
+                            )}
+                          </pre>
+                        </details>
                       </li>
-                    ))}
-                  </ul>
-                )}
+                    ),
+                  )}
+                </ul>
+              ) : (
+                <p role="status">
+                  No candidate detail rows for these filters. This does not mean
+                  zero signals were generated.
+                </p>
+              )}
+              {funnelCycle && (
                 <details>
-                  <summary>Observed, required and checks</summary>
-                  <pre>
-                    {JSON.stringify(
-                      {
-                        observed: candidate.observed,
-                        required: candidate.required,
-                        checks: candidate.checks,
-                        evidenceContract: candidate.evidenceContract,
-                        timestampMs: cycleTimestampMs,
-                      },
-                      null,
-                      2,
-                    )}
-                  </pre>
+                  <summary>Cycle source and completeness</summary>
+                  <dl>
+                    <div>
+                      <dt>Cycle identity</dt>
+                      <dd>{funnelCycle.cycleId}</dd>
+                    </div>
+                    <div>
+                      <dt>Candidate detail coverage</dt>
+                      <dd>
+                        {coverage
+                          ? `${coverage.state}; ${coverage.retained} retained${typeof coverage.observed === 'number' ? ` of ${coverage.observed} observed` : ''}; ${coverage.truncated ? 'truncated' : 'not marked truncated'}`
+                          : 'Unavailable'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Backend history</dt>
+                      <dd>{historyNote}</dd>
+                    </div>
+                  </dl>
                 </details>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="auto-trader-diagnostics-empty" role="status">
-            Candidate drill-down is unavailable for the selected filters; no
-            recorded candidate rows are being treated as zero generated signals.
-          </p>
+              )}
+            </details>
+          </div>
         )}
-      </details>
-    </section>
+
+        {tab === 'heatmap' && (
+          <div className="decision-funnel-heatmap-view">
+            <div
+              className="decision-funnel-heatmap-controls"
+              role="group"
+              aria-label="Eligibility mode"
+            >
+              <button
+                type="button"
+                aria-pressed={eligibilityMode === 'strictEligibility'}
+                onClick={() => onSetEligibilityMode?.('strictEligibility')}
+              >
+                Strict
+              </button>
+              <button
+                type="button"
+                aria-pressed={eligibilityMode === 'exploratoryEligibility'}
+                onClick={() => onSetEligibilityMode?.('exploratoryEligibility')}
+              >
+                Exploratory
+              </button>
+            </div>
+            <p className="decision-funnel-caveat">
+              Eligible / classified candidate-detail records. Unknown
+              classifications are excluded from cell denominators; records may
+              repeat across retained cycles. Not outcome probability.
+            </p>
+            <div
+              className="operator-funnel-heatmap"
+              role="table"
+              aria-label="Symbol and strategy eligibility heatmap"
+            >
+              <div
+                className="operator-funnel-heatmap__row is-header"
+                role="row"
+              >
+                <span role="columnheader">
+                  {dimension === 'strategy'
+                    ? 'Strategy'
+                    : dimension === 'symbol'
+                      ? 'Symbol'
+                      : 'Symbol / strategy'}
+                </span>
+                <span role="columnheader">
+                  {dimension === 'pair'
+                    ? 'Eligibility'
+                    : 'Symbol / strategy classifications'}
+                </span>
+              </div>
+              {heatmapRows.map((row) => (
+                <div
+                  className="operator-funnel-heatmap__row"
+                  role="row"
+                  key={row.label}
+                >
+                  <strong role="rowheader">{row.label}</strong>
+                  <div className="operator-funnel-heatmap__cells" role="cell">
+                    {row.cells.map((cell) => {
+                      const result = eligibility(cell.records);
+                      return (
+                        <span
+                          className="operator-funnel-heatmap__cell"
+                          key={`${row.label}:${cell.label}`}
+                          data-eligibility={result.tone}
+                          title={`${result.eligible} eligible of ${result.count} classified records`}
+                        >
+                          <small>{cell.label}</small>
+                          <b>{result.label}</b>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {!records.length && (
+              <p role="status">
+                No candidate detail records for these heatmap filters.
+              </p>
+            )}
+          </div>
+        )}
+      </OperatorPanel>
+    </div>
   );
 }
 
@@ -493,12 +806,13 @@ export function AutoTraderDiagnostics() {
     return () => model.stop();
   }, [model]);
   const state = useBehaviorSnapshot(model.state$);
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 5_000);
-    return () => window.clearInterval(timer);
-  }, []);
-  const { diagnosticRows: gridRows, symbolGroupCount, funnelHistory } = state;
+  const nowMs = state.nowMs;
+  const {
+    diagnosticRows: gridRows,
+    symbolGroupCount,
+    funnelHistory,
+    funnelView,
+  } = state;
   const entryDiagnostic = state.latestEntryDiagnostic;
   const workerResults = state.latestSymbolEntryResults
     .slice()
@@ -680,6 +994,13 @@ export function AutoTraderDiagnostics() {
           availableFromApiCount={state.availableFromApiCount}
           displayedCycleCount={state.displayedCycleCount}
           nowMs={nowMs}
+          viewState={funnelView}
+          onSetTab={(tab) => model.setFunnelTab(tab)}
+          onSetDimension={(dimension) => model.setFunnelDimension(dimension)}
+          onSetEligibilityMode={(mode) => model.setEligibilityMode(mode)}
+          onSetSymbolFilter={(symbol) => model.setSymbolFilter(symbol)}
+          onSetStrategyFilter={(strategy) => model.setStrategyFilter(strategy)}
+          onSetCycleFilter={(cycleId) => model.setCycleFilter(cycleId)}
         />
         <section
           className="auto-trader-diagnostics-block"

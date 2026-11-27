@@ -22,6 +22,7 @@ import { LearningEvidenceWidget } from './LearningEvidenceWidget';
 import { AutoTraderLearningWidget } from './AutoTraderLearningWidget';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AutoTraderStrategyPerformanceWidget } from './AutoTraderStrategyPerformanceWidget';
+import { AutoTraderExcursionsWidget } from './AutoTraderExcursionsWidget';
 import { AutoTraderExecutionCheck } from './AutoTraderExecutionCheck';
 import { AutoTraderScouts } from './AutoTraderScouts';
 import { LearningScoutActivityWidget } from './LearningScoutActivityWidget';
@@ -158,6 +159,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <AutoTraderOutcomes ticks={prices.ticks} />;
     case 'auto-trader-strategy-performance':
       return <AutoTraderStrategyPerformanceWidget widgetId={widget.id} />;
+    case 'auto-trader-excursions':
+      return <AutoTraderExcursionsWidget />;
     case 'auto-trader-execution-check':
       return <AutoTraderExecutionCheck />;
     case 'auto-trader-completed-positions':

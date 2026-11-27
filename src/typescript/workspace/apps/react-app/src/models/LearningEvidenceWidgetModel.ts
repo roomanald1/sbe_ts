@@ -70,6 +70,10 @@ export type LearningEvidenceTab =
   | 'activity'
   | 'history'
   | 'promotion';
+export type LearningEvidenceGapReason = {
+  reason: string;
+  cohortRows: number;
+};
 export type LearningEvidenceWidgetState = {
   view: LearningEvidenceWidgetView;
   tab: LearningEvidenceTab;
@@ -77,6 +81,7 @@ export type LearningEvidenceWidgetState = {
   symbols: string[];
   strategies: string[];
   visibleCohorts: LearningEvidenceCohortRow[] | null;
+  visibleGapReasons: LearningEvidenceGapReason[] | null;
   visibleRequests: LearningEvidenceRequestRow[] | null;
   visibleScoutEvidence: LearningEvidenceWidgetView['scoutEvidence'];
   visibleActualTradeEvidence: LearningEvidenceWidgetView['actualTradeEvidence'];
@@ -340,6 +345,22 @@ export class LearningEvidenceWidgetModel {
     const matches = (row: { symbol: string; strategy: string }) =>
       (!this.filters.symbol || row.symbol === this.filters.symbol) &&
       (!this.filters.strategy || row.strategy === this.filters.strategy);
+    const visibleCohorts = view.cohorts?.filter(matches) ?? null;
+    const gapCounts = new Map<string, number>();
+    for (const cohort of visibleCohorts ?? []) {
+      const reason = cohort.gapReason?.trim();
+      if (reason) gapCounts.set(reason, (gapCounts.get(reason) ?? 0) + 1);
+    }
+    const visibleGapReasons =
+      visibleCohorts === null
+        ? null
+        : [...gapCounts]
+            .map(([reason, cohortRows]) => ({ reason, cohortRows }))
+            .sort(
+              (left, right) =>
+                right.cohortRows - left.cohortRows ||
+                left.reason.localeCompare(right.reason),
+            );
     const hasData =
       view.profilesMonitored != null ||
       view.requests != null ||
@@ -355,7 +376,8 @@ export class LearningEvidenceWidgetModel {
       filters: this.filters,
       symbols,
       strategies,
-      visibleCohorts: view.cohorts?.filter(matches) ?? null,
+      visibleCohorts,
+      visibleGapReasons,
       visibleRequests: view.requests?.filter(matches) ?? null,
       visibleScoutEvidence: this.filters.symbol
         ? []

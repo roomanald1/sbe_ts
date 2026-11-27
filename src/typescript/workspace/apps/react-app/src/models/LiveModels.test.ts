@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { BehaviorSubject } from 'rxjs';
 import { AutoTraderScoutModel } from './AutoTraderScoutModel';
-import { setLearningRpcRequesterForTests } from '../learning_rsocket';
+import { setScoutWorkerRpcRequesterForTests } from '../learning_rsocket';
 import { CloseInsightsModel } from './CloseInsightsModel';
 import { OrderBookModel } from './OrderBookModel';
 import { OrderManagerBookFeeds } from './OrderManagerBookFeeds';
@@ -64,7 +64,7 @@ function scoutOutcomesResponse(rows: unknown[]) {
 describe('AutoTraderScoutModel', () => {
   it('loads unavailable Scout outcomes without an entry price from Insights', async () => {
     const timestamp = Date.now();
-    setLearningRpcRequesterForTests(async (_method, path) => {
+    setScoutWorkerRpcRequesterForTests(async (_method, path) => {
       assert.match(path, /\/outcomes/);
       return jsonResponse(
         scoutOutcomesResponse([
@@ -93,12 +93,12 @@ describe('AutoTraderScoutModel', () => {
         model.stop();
       },
     );
-    setLearningRpcRequesterForTests();
+    setScoutWorkerRpcRequesterForTests();
   });
 
   it('loads the fee-aware Scout outcomes computed by Insights', async () => {
     const timestamp = Date.now();
-    setLearningRpcRequesterForTests(async (_method, path) => {
+    setScoutWorkerRpcRequesterForTests(async (_method, path) => {
       assert.match(path, /\/outcomes/);
       return jsonResponse(
         scoutOutcomesResponse([
@@ -135,7 +135,7 @@ describe('AutoTraderScoutModel', () => {
         model.stop();
       },
     );
-    setLearningRpcRequesterForTests();
+    setScoutWorkerRpcRequesterForTests();
   });
 });
 

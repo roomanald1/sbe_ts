@@ -52,7 +52,7 @@ export function sharedGet(url: string, cacheForMs = 0): Promise<Response> {
     typeof response.clone === 'function' ? response.clone() : response,
   );
 }
-function usesExecutionRSocket(url: string): boolean {
+export function usesExecutionRSocket(url: string): boolean {
   const path = new URL(
     url,
     typeof window === 'undefined' ? 'http://localhost' : window.location.href,
@@ -66,13 +66,14 @@ function usesExecutionRSocket(url: string): boolean {
   );
 }
 
-function usesPositionManagementRSocket(url: string): boolean {
+export function usesPositionManagementRSocket(url: string): boolean {
   const path = new URL(
     url,
     typeof window === 'undefined' ? 'http://localhost' : window.location.href,
   ).pathname;
   return (
     path === '/positions' ||
+    path.startsWith('/positions/operational') ||
     path.startsWith('/positions/trades') ||
     path.startsWith('/positions/account') ||
     path.startsWith('/positions/realized-pnl') ||

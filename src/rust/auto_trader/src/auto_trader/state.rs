@@ -584,7 +584,7 @@ struct TraderPosition {
     thesis_failure_last_signal_timestamp_ms: u64,
     #[serde(default)]
     protective_stops: Vec<ProtectiveStop>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     price_path: Vec<TradePriceSample>,
     /// Stable per-position path epoch; a restore starts a new epoch while
     /// retaining prior rows as explicitly interrupted evidence.
@@ -594,10 +594,30 @@ struct TraderPosition {
     price_path_total_samples: u64,
     #[serde(default)]
     price_path_truncated: bool,
+    /// The bounded in-memory working window rolls, while durable raw rows stay append-only.
+    #[serde(default)]
+    price_path_memory_window_truncated: bool,
+    /// True only after the post-exit observer's final path batch is committed.
+    #[serde(default)]
+    price_path_finalized: bool,
     /// A persisted open position crossed a process restart, so observations
     /// from before and after the interruption cannot be treated as continuous.
     #[serde(default)]
     price_path_restart_interrupted: bool,
+    /// Event-updated gross executable excursions retained independently of raw point rows.
+    #[serde(default)]
+    price_path_gross_mfe_percent: Option<f64>,
+    #[serde(default)]
+    price_path_gross_mae_percent: Option<f64>,
+    #[serde(default)]
+    price_path_event_sample_count: u64,
+    #[serde(default)]
+    price_path_event_metrics_complete: bool,
+    /// First observed executable event crossing for each entry-captured threshold.
+    /// Fee rates are recorded with their attribution status; unverified estimates
+    /// never make an excursion eligible for Learning or promotion.
+    #[serde(default)]
+    price_path_threshold_crossings: Vec<serde_json::Value>,
     #[serde(default)]
     entry_timestamp_ms: u64,
 }
@@ -624,6 +644,20 @@ struct PositionEntryFillLink {
     fee_known: bool,
     fee_amount: Option<f64>,
     fee_currency: Option<String>,
+    /// Independent Paper Exchange schedule evidence, retained separately from
+    /// PM's fee amount/currency accounting projection.
+    #[serde(default)]
+    paper_exchange_fee_amount: Option<f64>,
+    #[serde(default)]
+    paper_exchange_fee_currency: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_id: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_version: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_order_class: Option<String>,
+    #[serde(default)]
+    paper_exchange_fee_schedule_evidence: Option<serde_json::Value>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct TradePriceSample {
@@ -642,6 +676,16 @@ struct TradePriceSample {
     freshness_max_age_ms: Option<u64>,
     #[serde(default)]
     source_fresh: Option<bool>,
+    /// Source identity for the executable quote itself, independent of the
+    /// local position-path epoch and sample sequence.
+    #[serde(default)]
+    quote_source_system: Option<String>,
+    #[serde(default)]
+    quote_source_epoch: Option<String>,
+    #[serde(default)]
+    quote_source_cursor: Option<u64>,
+    #[serde(default)]
+    quote_source_record_id: Option<String>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct ProtectiveStop {

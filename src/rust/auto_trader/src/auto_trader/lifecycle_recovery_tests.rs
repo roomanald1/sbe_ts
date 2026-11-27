@@ -2851,6 +2851,23 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
     let path_epoch = "auto-trader-position-path:v1:fixture:trade-1";
     let entry_fill_id = "pm-fill:v1:fixture-entry:1";
     let exit_fill_id = "pm-fill:v1:fixture-exit:1";
+    let fee_schedule = serde_json::json!({
+        "schema_version":"paper_exchange_financial_evidence:v1",
+        "event_type":"fee_schedule",
+        "event_id":"fixture-fee-schedule-event-1",
+        "source_system":"paper_exchange_simulator",
+        "source_epoch":"fixture-paper-epoch",
+        "source_cursor":500,
+        "source_record_id":"fixture-fee-schedule-record-500",
+        "source_timestamp_utc_ms":entry_timestamp_ms,
+        "fee_schedule_id":"fixture-fee-schedule",
+        "fee_schedule_version":"v1",
+        "symbol":symbol,
+        "effective_from_utc_ms":entry_timestamp_ms,
+        "effective_to_utc_ms":null,
+        "maker_rate":0.0008,
+        "taker_rate":0.001
+    });
     let identity = CanonicalLifecycleIdentity {
         schema_version: 1,
         opportunity_id: "fixture-opportunity-1".into(),
@@ -2883,6 +2900,10 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
                 freshness_contract_version: Some(1),
                 freshness_max_age_ms: Some(5_000),
                 source_fresh: Some(true),
+                quote_source_system: Some("paper_exchange.market_data_cache".into()),
+                quote_source_epoch: Some("fixture-market-epoch".into()),
+                quote_source_cursor: Some(timestamp),
+                quote_source_record_id: Some(format!("fixture-book-{timestamp}")),
             }
         })
         .collect::<Vec<_>>();
@@ -2894,7 +2915,7 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
         fill_ids: vec![entry_fill_id.into()],
         status: "complete".into(),
     };
-    let mut position = TraderPosition {
+    let position = TraderPosition {
         quantity: 1.0,
         average_entry_price: 100.0,
         entry_fees: 0.01,
@@ -2913,6 +2934,13 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
             fee_known: true,
             fee_amount: Some(0.01),
             fee_currency: Some("USDT".into()),
+            paper_exchange_fee_amount: Some(0.01),
+            paper_exchange_fee_currency: Some("USDT".into()),
+            paper_exchange_fee_schedule_id: Some("fixture-fee-schedule".into()),
+            paper_exchange_fee_schedule_version: Some("v1".into()),
+            paper_exchange_fee_order_class: Some("taker".into()),
+            paper_exchange_fee_schedule_evidence: Some(fee_schedule.clone()),
+            ..PositionEntryFillLink::default()
         }],
         entry_fee_currencies: vec!["USDT".into()],
         entry_fill_costs_complete: true,
@@ -2976,7 +3004,13 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
             "execution_price":100.20,
             "fee":-0.01,
             "fee_known":true,
-            "fee_currency":"USDT"
+            "fee_currency":"USDT",
+            "paper_exchange_fee_amount":0.01,
+            "paper_exchange_fee_currency":"USDT",
+            "paper_exchange_fee_schedule_id":"fixture-fee-schedule",
+            "paper_exchange_fee_schedule_version":"v1",
+            "paper_exchange_fee_order_class":"taker",
+            "paper_exchange_fee_schedule_evidence":fee_schedule
         }]
     });
     let build_audit = |position: &TraderPosition| {
@@ -3085,9 +3119,49 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
             .map(|minute| {
                 let timestamp = exit_timestamp_ms + minute * 60_000;
                 let bid = 100.20 + minute as f64 * 0.001;
-                serde_json::json!({"timestamp":timestamp,"bid":bid,"ask":bid + 0.02})
+                let mut quote = serde_json::json!({
+                    "timestamp":timestamp,
+                    "bid":bid,
+                    "ask":bid + 0.02,
+                    "sequence":5 + minute,
+                    "epoch":path_epoch,
+                    "source_updated_at_ms":timestamp.saturating_sub(10),
+                    "source_fresh":true,
+                    "freshness_contract_version":1,
+                    "freshness_max_age_ms":5_000,
+                    "quote_source_system":"paper_exchange.market_data_cache",
+                    "quote_source_epoch":"fixture-market-epoch",
+                    "quote_source_cursor":timestamp,
+                    "quote_source_record_id":format!("fixture-book-{timestamp}")
+                });
+                if minute == 0 {
+                    quote = audit["price_path"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .clone();
+                }
+                quote
             })
             .collect::<Vec<_>>();
+        let mut all_quotes_by_timestamp = BTreeMap::new();
+        for quote in audit["price_path"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(post_exit_path.iter())
+        {
+            all_quotes_by_timestamp.insert(quote["timestamp"].as_u64().unwrap(), quote.clone());
+        }
+        let all_quotes = all_quotes_by_timestamp.into_values().collect::<Vec<_>>();
+        let fee_attribution = counterfactual_exit_fee_attribution(
+            symbol,
+            exit_timestamp_ms,
+            &audit["entry_context"]["entry_fill_links"],
+            &audit["exit_fill_evidence"],
+            &all_quotes,
+        );
         let mut pre_exit_evidence = audit["price_path_evidence"].clone();
         if !pre_exit_complete {
             pre_exit_evidence["complete"] = serde_json::json!(false);
@@ -3112,6 +3186,7 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
             "missed_return_percent":0.10,
             "pre_exit_price_path":audit["price_path"],
             "pre_exit_price_path_evidence":pre_exit_evidence,
+            "counterfactual_exit_fee_attribution":fee_attribution,
             "exit_fill_evidence":audit["exit_fill_evidence"],
             "realized_r_evidence":audit["realized_r_evidence"],
             "independent_reconciliation":{"status":"pending","source":null,"evidence_epoch_id":null},
@@ -3119,24 +3194,39 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
             "price_path_evidence":{"schema_version":1,"complete":true,"sample_count":31,"fresh_sample_count":31,"fee_adjusted":false}
         })
     };
-    let complete_learning_observation =
-        make_learning_observation(&complete_audit, "fixture-exit-timing-complete", true);
-    let interrupted_learning_observation = make_learning_observation(
-        &interrupted_audit,
-        "fixture-exit-timing-restart-interrupted",
-        false,
+    let complete_learning_observation = compact_exit_timing_feedback_for_delivery(
+        &make_learning_observation(&complete_audit, "fixture-exit-timing-complete", true),
+    )
+    .expect("complete deterministic path fits the existing bounded Learning payload");
+    assert!(
+        serde_json::to_vec(&complete_learning_observation)
+            .unwrap()
+            .len()
+            <= 15 * 1024
     );
+    assert_eq!(
+        complete_learning_observation["history_path_compacted"],
+        serde_json::Value::Null
+    );
+    let interrupted_learning_observation =
+        compact_exit_timing_feedback_for_delivery(&make_learning_observation(
+            &interrupted_audit,
+            "fixture-exit-timing-restart-interrupted",
+            false,
+        ))
+        .expect("interrupted deterministic path is retained within the bounded contract");
     let mut accepted = 0;
     for observation in [
         complete_learning_observation,
         interrupted_learning_observation,
     ] {
+        let encoded_bytes = serde_json::to_vec(&observation).unwrap().len();
         let (status, response) =
             learning_json_request(&learning_router, "POST", "/exit-timing", Some(observation))
                 .await;
         assert_eq!(
             status, 200,
-            "Learning accepts durable evidence input: {response}"
+            "Learning accepts durable evidence input ({encoded_bytes} bytes): {response}",
         );
         assert_eq!(response["accepted"], true);
         accepted += 1;
@@ -3169,6 +3259,22 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
     assert_eq!(
         assessment["metrics"]["values"]["executable_path_source_coverage_percent"],
         50.0
+    );
+    assert_eq!(
+        assessment["metrics"]["coverage"]["counterfactual_exit_fee_schedule_source_coverage_percent"]
+            ["sample_count"],
+        2,
+        "both source-complete schedule attestations are counted even though one observation has interrupted path continuity"
+    );
+    assert_eq!(
+        assessment["metrics"]["coverage"]["net_executable_mfe_percent"]["sample_count"], 1,
+        "one continuous cost-complete path remains visible while aggregate policy metrics are withheld"
+    );
+    assert!(
+        !assessment["metrics"]["values"]
+            .get("net_executable_mfe_percent")
+            .is_some(),
+        "a single deterministic observation must not be presented as a policy metric"
     );
     assert!(
         assessment["metrics"]["promotion_blockers"]

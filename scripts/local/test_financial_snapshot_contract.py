@@ -11,6 +11,7 @@ from financial import (
     MAX_RECONCILIATION_SOURCE_BYTES,
     reconcile_independent_execution_fills,
     reconcile_independent_portfolio_intervals,
+    reconcile_interval_position_marks,
     load_execution_reconciliation_inputs,
     project_paper_exchange_financial_evidence_page,
     reconciliation,
@@ -1228,6 +1229,77 @@ class FinancialSnapshotContractTests(unittest.TestCase):
             interval["reconciled_flat_cash_period_return_percent"],
             97.99 / 11_000.0 * 100.0,
         )
+
+    def test_open_position_mark_evidence_requires_fresh_identity_and_independent_history(self):
+        row = {
+            "evidence_id": "pm-interval-open-1",
+            "interval_end_utc_ms": 10_000,
+            "positions": [{"symbol": "BTC-USDT", "quantity": 0.5}],
+            "position_valuations": [{
+                "symbol": "BTC-USDT", "quantity": 0.5,
+                "position_side": "long", "close_side": "bid", "close_price": 99.0,
+                "quote_currency": "USDT", "signed_close_value_quote": 49.5,
+                "signed_close_value_usd": 49.5,
+                "mark_source_system": "paper_exchange.market_data_cache",
+                "mark_source_epoch": "book-epoch-1", "mark_source_cursor": 7,
+                "mark_source_record_id": "paper-book:v1:book-epoch-1:BTC-USDT:7",
+                "mark_updated_at_utc_ms": 9_500, "valued_at_utc_ms": 10_000,
+                "fx_rate_usd": 1.0, "fx_updated_at_utc_ms": 9_900,
+                "fx_source_record_id": "fx-usdt:17",
+            }],
+            "open_position_valuation_complete": True,
+            "open_position_valuation_reasons": [],
+            "market_mark_at_utc_ms": 10_000,
+            "closing_fx_rates_usd_by_currency": {"USD": 1.0, "USDT": 1.0},
+            "closing_fx_rates_updated_at_by_currency": {"USD": 0, "USDT": 9_900},
+            "closing_fx_source_record_ids_by_currency": {
+                "USD": "fixed-usd-parity:10000", "USDT": "fx-usdt:17",
+            },
+        }
+        pending = reconcile_interval_position_marks([row], None)
+        self.assertEqual(pending["status"], "VALIDATED_PENDING_INDEPENDENT_MARK_HISTORY")
+        self.assertTrue(pending["pm_mark_rows_valid"])
+        self.assertIn("no complete durable executable book-mark history", pending["blockers"][0])
+
+        independent = {
+            "market_mark_history": {
+                "schema_version": 1,
+                "source_system": "paper_exchange.market_data_cache",
+                "complete": True,
+                "marks": [{
+                    "symbol": "BTC-USDT", "source_epoch": "book-epoch-1",
+                    "source_cursor": 7,
+                    "source_record_id": "paper-book:v1:book-epoch-1:BTC-USDT:7",
+                    "updated_at_ms": 9_500, "bid": 99.0, "ask": 100.0,
+                }],
+            }
+        }
+        reconciled = reconcile_interval_position_marks([row], independent)
+        self.assertEqual(reconciled["status"], "RECONCILED")
+        self.assertTrue(reconciled["independent_market_mark_history_reconciled"])
+
+        stale = copy.deepcopy(row)
+        stale["position_valuations"][0]["mark_updated_at_utc_ms"] = 4_999
+        rejected = reconcile_interval_position_marks([stale], independent)
+        self.assertEqual(rejected["status"], "MISMATCH")
+        self.assertIn("stale", rejected["blockers"][0])
+
+        wrong_source = copy.deepcopy(row)
+        wrong_source["position_valuations"][0]["mark_source_record_id"] = "paper-book:wrong"
+        rejected = reconcile_interval_position_marks([wrong_source], independent)
+        self.assertEqual(rejected["status"], "MISMATCH")
+
+        wrong_fx = copy.deepcopy(row)
+        wrong_fx["closing_fx_source_record_ids_by_currency"]["USDT"] = "fx-usdt:other"
+        rejected = reconcile_interval_position_marks([wrong_fx], independent)
+        self.assertEqual(rejected["status"], "MISMATCH")
+        self.assertIn("FX source identity", rejected["blockers"][0])
+
+        stale_fx = copy.deepcopy(row)
+        stale_fx["position_valuations"][0]["fx_updated_at_utc_ms"] = 1
+        rejected = reconcile_interval_position_marks([stale_fx], independent)
+        self.assertEqual(rejected["status"], "MISMATCH")
+        self.assertIn("FX", rejected["blockers"][0])
 
     def test_portfolio_interval_missing_or_mismatched_evidence_fails_closed(self):
         """Synthetic fixture mutations prove no return escapes a failed gate."""

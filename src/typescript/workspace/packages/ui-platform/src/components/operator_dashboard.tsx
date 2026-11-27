@@ -9,8 +9,35 @@ export type OperatorMetric = {
   tone?: OperatorTone;
 };
 
+export type OperatorKeyValue = {
+  label: string;
+  value: ReactNode;
+  tone?: OperatorTone;
+};
+
+/** Compact, aligned operator settings/status rows with caller-owned values. */
+export function OperatorKeyValueList({
+  rows,
+  label,
+}: {
+  rows: readonly OperatorKeyValue[];
+  label: string;
+}) {
+  return (
+    <dl className="operator-key-value-list" aria-label={label}>
+      {rows.map((row) => (
+        <div key={row.label} data-tone={row.tone ?? 'neutral'}>
+          <dt>{row.label}</dt>
+          <dd>{row.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 type OperatorPanelProps = {
   title: string;
+  hideTitle?: boolean;
   context?: ReactNode;
   status?: ReactNode;
   children: ReactNode;
@@ -20,6 +47,7 @@ type OperatorPanelProps = {
 /** A compact, source-agnostic shell for operator dashboard panels. */
 export function OperatorPanel({
   title,
+  hideTitle = false,
   context,
   status,
   children,
@@ -28,7 +56,7 @@ export function OperatorPanel({
   return (
     <section className="operator-panel" aria-label={title}>
       <header className="operator-panel__header">
-        <h2 className="operator-panel__title">{title}</h2>
+        {!hideTitle && <h2 className="operator-panel__title">{title}</h2>}
         <div className="operator-panel__context">
           {context}
           {status}

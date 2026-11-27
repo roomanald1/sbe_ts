@@ -3,20 +3,14 @@ import { AutoTraderPageModel } from '../models/AutoTraderPageModel';
 import { AutoTraderExitPolicyModel } from '../models/AutoTraderExitPolicyModel';
 import { AutoTraderOutcomesModel } from '../models/AutoTraderOutcomesModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
-import { FeedToolbar } from './FeedToolbar';
 import {
   AutoTraderParametersDialog,
   AutoTraderSettingsDialog,
 } from './AutoTraderDialogs';
-import { CapitalAllocationView } from './AutoTraderAllocationView';
 import { AutoTraderExitPoliciesView } from './AutoTraderExitPoliciesView';
 import { AutoTraderGlobalControlsSummary } from './AutoTraderGlobalControlsSummary';
 
 const STALE_AUTO_TRADER_DECISION_MS = 6 * 60_000;
-const pnlMoney = new Intl.NumberFormat(undefined, {
-  minimumFractionDigits: 5,
-  maximumFractionDigits: 5,
-});
 export function AutoTrader() {
   const pageModel = useMemo(() => new AutoTraderPageModel(), []);
   const exitPolicyModel = useMemo(
@@ -55,71 +49,54 @@ export function AutoTrader() {
       }
       aria-label="Auto Trader"
     >
-      <FeedToolbar title="Auto Trader" />
       <div className="auto-trader-content">
         <div
-          className={
-            'auto-trader-live-banner ' +
-            (state.enabled ? 'is-live' : '') +
-            (state.loading ? ' is-loading' : '')
-          }
+          className="auto-trader-controls-toolbar"
+          aria-label="Paper execution controls"
         >
-          <span className="auto-trader-live-dot" aria-hidden="true" />
-          <strong>
-            {state.loading ? 'Connecting' : state.enabled ? 'LIVE' : 'PAUSED'}
-          </strong>
-          <span>
-            {state.loading
-              ? 'Checking status'
-              : state.enabled
-                ? 'Auto Trader is active'
-                : 'Auto Trader is off'}
+          <span
+            className={`auto-trader-control-state ${state.enabled ? 'is-active' : ''}`}
+            role="status"
+          >
+            <i aria-hidden="true" />
+            {state.loading ? 'Connecting' : state.enabled ? 'Active' : 'Paused'}
           </span>
-          <div className="auto-trader-live-actions">
-            <button
-              type="button"
-              disabled={state.loading || state.busy}
-              onClick={() => void pageModel.setEnabled(!state.enabled)}
-            >
-              {state.busy ? 'Working…' : state.enabled ? 'Pause' : 'Go live'}
-            </button>
-          </div>
+          <span className="auto-trader-paper-mode">Paper execution</span>
+          <button
+            className="auto-trader-control-action"
+            type="button"
+            disabled={state.loading || state.busy}
+            onClick={() => void pageModel.setEnabled(!state.enabled)}
+          >
+            {state.busy ? 'Working…' : state.enabled ? 'Pause' : 'Resume'}
+          </button>
+          <details className="auto-trader-advanced-controls">
+            <summary>Advanced</summary>
+            <div className="auto-trader-advanced-menu">
+              <button
+                className="auto-trader-parameters-button"
+                type="button"
+                aria-expanded={parametersOpen}
+                aria-haspopup="dialog"
+                disabled={state.loading}
+                onClick={() => pageModel.toggleParameters()}
+              >
+                View parameters
+              </button>
+              <button
+                className="auto-trader-settings-button"
+                type="button"
+                aria-expanded={settingsOpen}
+                aria-haspopup="dialog"
+                disabled={state.loading}
+                onClick={() => pageModel.toggleSettings()}
+              >
+                Settings
+              </button>
+            </div>
+          </details>
         </div>
         <div className="auto-trader-settings-anchor">
-          <p>Paper mode · global risk and capital limits</p>
-          <div className="auto-trader-settings-actions">
-            <button
-              className="auto-trader-parameters-button"
-              type="button"
-              aria-expanded={parametersOpen}
-              aria-haspopup="dialog"
-              disabled={state.loading}
-              onClick={() => pageModel.toggleParameters()}
-            >
-              View parameters
-            </button>
-            <button
-              className="auto-trader-parameters-button"
-              type="button"
-              aria-expanded={exitPoliciesOpen}
-              aria-controls="autotrader-exit-policies"
-              onClick={() => setExitPoliciesOpen((open) => !open)}
-            >
-              {exitPoliciesOpen
-                ? 'Hide exit policies'
-                : 'Learned exit policies'}
-            </button>
-            <button
-              className="auto-trader-settings-button"
-              type="button"
-              aria-expanded={settingsOpen}
-              aria-haspopup="dialog"
-              disabled={state.loading}
-              onClick={() => pageModel.toggleSettings()}
-            >
-              …
-            </button>
-          </div>
           {parametersOpen && (
             <AutoTraderParametersDialog
               state={state}
@@ -134,33 +111,15 @@ export function AutoTrader() {
             />
           )}
         </div>
-        <AutoTraderGlobalControlsSummary state={state} />
+        <AutoTraderGlobalControlsSummary
+          state={state}
+          onViewLearnedPolicies={() => setExitPoliciesOpen((open) => !open)}
+          learnedPoliciesOpen={exitPoliciesOpen}
+        />
         <div id="autotrader-exit-policies" hidden={!exitPoliciesOpen}>
           {exitPoliciesOpen && (
             <AutoTraderExitPoliciesView model={exitPolicyModel} />
           )}
-        </div>
-        <div
-          className="v35-operator-status-row"
-          aria-label="Current AutoTrader safety status"
-        >
-          <span
-            className={`v35-operator-status ${state.auditHealthy ? 'is-good' : 'is-bad'}`}
-          >
-            {state.auditHealthy ? 'Audit OK' : 'Audit degraded'}
-          </span>
-          <span
-            className={`v35-operator-status ${state.auditFailureLatched ? 'is-bad' : 'is-good'}`}
-          >
-            {state.auditFailureLatched ? 'Safety latch set' : 'Latch clear'}
-          </span>
-          <span
-            className={`v35-operator-status ${state.capitalAllocation ? 'is-good' : 'is-unavailable'}`}
-          >
-            {state.capitalAllocation
-              ? 'Shared allocation v1'
-              : 'Allocation details unavailable'}
-          </span>
         </div>
         {!state.auditHealthy && (
           <div className="auto-trader-audit-alert" role="alert">
@@ -196,64 +155,6 @@ export function AutoTrader() {
             decisions.
           </p>
         )}
-        <CapitalAllocationView
-          allocation={state.capitalAllocation}
-          availableNotional={state.availableNotional}
-        />
-        <div
-          className="auto-trader-pnl-summary"
-          aria-label="Auto Trader profit and loss"
-        >
-          <span>
-            Realized today:{' '}
-            <strong
-              className={
-                state.realizedPnl == null
-                  ? undefined
-                  : state.realizedPnl >= 0
-                    ? 'auto-trader-pnl-positive'
-                    : 'auto-trader-pnl-negative'
-              }
-            >
-              {state.realizedPnl == null
-                ? 'Unavailable (position ledger or FX rate)'
-                : 'USD ' + pnlMoney.format(state.realizedPnl)}
-            </strong>
-          </span>
-          <span>
-            Open now:{' '}
-            <strong
-              className={
-                state.unrealizedPnl == null
-                  ? undefined
-                  : state.unrealizedPnl >= 0
-                    ? 'auto-trader-pnl-positive'
-                    : 'auto-trader-pnl-negative'
-              }
-            >
-              {state.unrealizedPnl == null
-                ? 'Unavailable (missing mark or FX rate)'
-                : 'USD ' + pnlMoney.format(state.unrealizedPnl)}
-            </strong>
-          </span>
-          <span>
-            Combined today:{' '}
-            <strong
-              className={
-                state.realizedPnl == null || state.unrealizedPnl == null
-                  ? undefined
-                  : state.realizedPnl + state.unrealizedPnl >= 0
-                    ? 'auto-trader-pnl-positive'
-                    : 'auto-trader-pnl-negative'
-              }
-            >
-              {state.realizedPnl == null || state.unrealizedPnl == null
-                ? 'Unavailable'
-                : 'USD ' +
-                  pnlMoney.format(state.realizedPnl + state.unrealizedPnl)}
-            </strong>
-          </span>
-        </div>
         {state.error && (
           <p className="auto-trader-error" role="alert">
             {state.error}

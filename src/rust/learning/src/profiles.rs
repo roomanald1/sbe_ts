@@ -1855,6 +1855,96 @@ mod tests {
     }
 
     #[test]
+    fn scout_evidence_funnel_separates_retained_rows_groups_and_unavailable_stages() {
+        let now = now_ms();
+        let cutoff = now.saturating_sub(7 * 24 * 60 * 60 * 1_000);
+        let mut first = scout_variant("BTC-USDT", &[0.1, 0.2]);
+        first.profile.strategy = "live-momentum".into();
+        first.outcomes[0].observed_at_ms = now;
+        first.outcomes[0].evidence_group_id = Some("paired-opportunity".into());
+        first.outcomes[0].independence_block_id = Some(10);
+        first.outcomes[0].candidate_family_id = Some("family-a".into());
+        first.outcomes[1].observed_at_ms = now;
+        first.outcomes[1].evidence_group_id = Some("single-opportunity".into());
+        first.outcomes[1].paired_comparison = false;
+        first.outcomes[1].independence_block_id = None;
+        first.outcomes[1].candidate_family_id = None;
+
+        let mut second = first.clone();
+        second.profile.profile_id = "BTC-USDT-second-variant".into();
+        second.profile.version = 1;
+        second.outcomes.truncate(1);
+
+        let mut ungrouped = first.outcomes[0].clone();
+        ungrouped.observed_at_ms = now;
+        ungrouped.evidence_group_id = None;
+        ungrouped.independence_block_id = None;
+        ungrouped.candidate_family_id = None;
+        first.outcomes.push(ungrouped);
+
+        let mut stale = first.outcomes[0].clone();
+        stale.observed_at_ms = cutoff.saturating_sub(1);
+        stale.evidence_group_id = Some("outside-window".into());
+        first.outcomes.push(stale);
+
+        let mut trade = first.outcomes[0].clone();
+        trade.observed_at_ms = now;
+        trade.source = LearningOutcomeSource::Trade;
+        first.outcomes.push(trade);
+
+        let mut state = LearningState::default();
+        state.variants.insert("variant-a".into(), first);
+        state.variants.insert("variant-b".into(), second);
+        state.exit_timing_observations.insert(
+            "exit-1".into(),
+            serde_json::json!({
+                "strategy": "live-momentum",
+                "observed_at_ms": now
+            }),
+        );
+        state.exit_timing_observations.insert(
+            "exit-old".into(),
+            serde_json::json!({
+                "strategy": "live-momentum",
+                "observed_at_ms": cutoff.saturating_sub(1)
+            }),
+        );
+
+        let funnel = scout_evidence_funnel(&state, "live-momentum", cutoff);
+        assert_eq!(funnel.retained_scout_outcome_rows, 4);
+        assert_eq!(funnel.retained_paired_scout_rows, 3);
+        assert_eq!(funnel.rows_with_explicit_evidence_group_id, 3);
+        assert_eq!(funnel.rows_without_explicit_evidence_group_id, 1);
+        assert_eq!(funnel.distinct_evidence_groups_by_symbol_strategy, 2);
+        assert_eq!(funnel.distinct_paired_evidence_groups_by_symbol_strategy, 1);
+        assert_eq!(funnel.groups_with_multiple_retained_rows, 1);
+        assert_eq!(funnel.rows_in_groups_with_multiple_retained_rows, 2);
+        assert_eq!(funnel.additional_rows_after_first_per_group, 1);
+        assert_eq!(funnel.paired_rows_with_candidate_family_id, 2);
+        assert_eq!(funnel.paired_rows_with_four_hour_cluster_id, 2);
+        assert_eq!(funnel.distinct_symbol_four_hour_cluster_buckets, 1);
+        assert_eq!(funnel.distinct_candidate_families, 1);
+        assert_eq!(funnel.registered_variant_profile_attributed_rows, 4);
+        assert_eq!(funnel.matching_exit_timing_observation_rows, 1);
+        assert_eq!(funnel.trade_learning_outcome_rows, 1);
+        assert_eq!(funnel.unique_source_event_rows, None);
+        assert_eq!(funnel.excluded_ingress_rows, None);
+        assert_eq!(funnel.complete_executable_path_rows, None);
+        assert_eq!(funnel.cost_complete_executable_path_rows, None);
+        assert_eq!(funnel.exact_decision_profile_attributed_rows, None);
+        assert_eq!(funnel.training_rows, None);
+        assert_eq!(funnel.holdout_rows, None);
+        let contract = serde_json::to_value(&funnel).unwrap();
+        assert_eq!(contract["retained_scout_outcome_rows"], 4);
+        assert_eq!(contract["distinct_evidence_groups_by_symbol_strategy"], 2);
+        assert_eq!(
+            contract["complete_executable_path_rows"],
+            serde_json::Value::Null
+        );
+        assert_eq!(contract["excluded_ingress_rows"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn negative_upper_bound_marks_a_well_sampled_candidate_to_avoid() {
         let returns = vec![-0.2; 9];
         let sample_count = returns.len();
@@ -2259,6 +2349,7 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                 let (scout_count, scout_positive_rate, scout_average) = summarize(&scouts);
                 let (paired_count, paired_positive_rate, paired_average) =
                     summarize(&paired_scouts);
+                let evidence_funnel = scout_evidence_funnel(&state, &strategy, cutoff);
                 StrategySummary {
                     strategy,
                     learning_samples: trade_count,
@@ -2276,10 +2367,125 @@ pub(super) async fn get_summary(State(service): State<ServiceState>) -> Json<Vec
                     paired_scout_samples: paired_count,
                     paired_scout_positive_rate: paired_positive_rate,
                     average_paired_scout_lift_percent: paired_average,
+                    evidence_funnel,
                 }
             })
             .collect(),
     )
+}
+
+fn scout_evidence_funnel(
+    state: &LearningState,
+    strategy_name: &str,
+    cutoff_ms: u64,
+) -> ScoutEvidenceFunnel {
+    let mut scout_rows = 0usize;
+    let mut paired_rows = 0usize;
+    let mut rows_with_group_id = 0usize;
+    let mut rows_with_candidate_family = 0usize;
+    let mut rows_with_cluster = 0usize;
+    let mut trade_rows = 0usize;
+    let mut profile_attributed_rows = 0usize;
+    let mut group_rows = BTreeMap::<(String, String), usize>::new();
+    let mut paired_groups = BTreeSet::<(String, String)>::new();
+    let mut symbol_clusters = BTreeSet::<(String, u64)>::new();
+    let mut candidate_families = BTreeSet::<(String, String)>::new();
+
+    for variant in state
+        .variants
+        .values()
+        .filter(|variant| variant.profile.strategy == strategy_name)
+    {
+        for outcome in variant.outcomes.iter().filter(|outcome| {
+            outcome.observed_at_ms >= cutoff_ms && outcome.net_return_percent.is_finite()
+        }) {
+            match outcome.source {
+                LearningOutcomeSource::Trade => trade_rows += 1,
+                LearningOutcomeSource::Scout => {
+                    scout_rows += 1;
+                    // Each retained row is stored under a registered Learning
+                    // variant. This is variant attribution, not proof that the
+                    // source decision used that exact profile version.
+                    profile_attributed_rows += 1;
+                    if outcome.paired_comparison {
+                        paired_rows += 1;
+                        if let Some(family_id) = outcome.candidate_family_id.as_ref() {
+                            rows_with_candidate_family += 1;
+                            candidate_families
+                                .insert((variant.profile.symbol.clone(), family_id.clone()));
+                        }
+                        if let Some(block_id) = outcome.independence_block_id {
+                            rows_with_cluster += 1;
+                            symbol_clusters.insert((variant.profile.symbol.clone(), block_id));
+                        }
+                    }
+                    let Some(group_id) = outcome
+                        .evidence_group_id
+                        .as_deref()
+                        .filter(|group_id| !group_id.trim().is_empty())
+                    else {
+                        continue;
+                    };
+                    rows_with_group_id += 1;
+                    let group_key = (variant.profile.symbol.clone(), group_id.to_owned());
+                    *group_rows.entry(group_key.clone()).or_default() += 1;
+                    if outcome.paired_comparison {
+                        paired_groups.insert(group_key);
+                    }
+                }
+            }
+        }
+    }
+
+    let groups_with_multiple_rows = group_rows.values().filter(|count| **count > 1).count();
+    let additional_rows_after_first = group_rows
+        .values()
+        .map(|count| count.saturating_sub(1))
+        .sum();
+    let matching_exit_observation_rows = state
+        .exit_timing_observations
+        .values()
+        .filter(|observation| {
+            observation["strategy"].as_str() == Some(strategy_name)
+                && observation["observed_at_ms"]
+                    .as_u64()
+                    .is_some_and(|observed_at_ms| observed_at_ms >= cutoff_ms)
+        })
+        .count();
+
+    ScoutEvidenceFunnel {
+        retained_rows_definition: "finite Scout outcome rows stored under Learning variants with observed_at_ms in the rolling seven-day window; rows are accepted retained records, not raw ingress attempts",
+        group_definition: "explicit evidence_group_id deduplicated across candidate variants within this strategy and symbol; groups are comparison cohorts, not independent observations",
+        four_hour_cluster_definition: "distinct symbol and UTC four-hour buckets carried by paired Scout outcomes; buckets cluster rows and are not effective independent sample counts",
+        window_start_ms: cutoff_ms,
+        retained_scout_outcome_rows: scout_rows,
+        retained_paired_scout_rows: paired_rows,
+        rows_with_explicit_evidence_group_id: rows_with_group_id,
+        rows_without_explicit_evidence_group_id: scout_rows.saturating_sub(rows_with_group_id),
+        distinct_evidence_groups_by_symbol_strategy: group_rows.len(),
+        distinct_paired_evidence_groups_by_symbol_strategy: paired_groups.len(),
+        groups_with_multiple_retained_rows: groups_with_multiple_rows,
+        rows_in_groups_with_multiple_retained_rows: group_rows
+            .iter()
+            .filter(|(_, count)| **count > 1)
+            .map(|(_, count)| *count)
+            .sum(),
+        additional_rows_after_first_per_group: additional_rows_after_first,
+        paired_rows_with_candidate_family_id: rows_with_candidate_family,
+        paired_rows_with_four_hour_cluster_id: rows_with_cluster,
+        distinct_symbol_four_hour_cluster_buckets: symbol_clusters.len(),
+        distinct_candidate_families: candidate_families.len(),
+        registered_variant_profile_attributed_rows: profile_attributed_rows,
+        matching_exit_timing_observation_rows: matching_exit_observation_rows,
+        trade_learning_outcome_rows: trade_rows,
+        unique_source_event_rows: None,
+        excluded_ingress_rows: None,
+        complete_executable_path_rows: None,
+        cost_complete_executable_path_rows: None,
+        exact_decision_profile_attributed_rows: None,
+        training_rows: None,
+        holdout_rows: None,
+    }
 }
 
 pub(super) fn now_ms() -> u64 {

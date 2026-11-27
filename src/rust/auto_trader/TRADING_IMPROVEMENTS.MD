@@ -196,6 +196,12 @@ Reconcile SL/TP, profit protection, rewards and promotion on net returns. Invest
 ## 3. Winning versus losing trades — Critical [QUANT; after reconciliation]
 Analyse each evidence source separately by strategy, symbol, direction, regime, strength, flow/book imbalance, VWAP, momentum, trend, volatility, spread, liquidity, aggressor cost, fill delay, holding duration and exit reason. Measure net expectancy, profit factor, average net win/loss, break-even win rate, costs and gross/net outcomes. Reconcile positive/negative/neutral rates and denominators (ETH/TRX positive expectancy despite low positive rates). Identify pre-entry predictive features versus execution/exit defects. Measure forward returns at 10s/30s/1m/5m/15m/30m and suitable daily horizons; separate signal decay from fill delay and costs.
 
+**Risk-adjusted performance contract (applies to WP3, WP5, WP13–WP15 and UI widgets 5–8).** Add annualised Sharpe and Sortino ratios, Calmar ratio, maximum drawdown, annualised volatility and downside deviation, plus rolling 7-, 30- and 90-day results. Support portfolio, exchange, strategy, symbol, strategy/symbol, profile version, direction, horizon, and strict/exploratory cohorts. AutoTrader and Scout observations are separate populations and are never combined or ranked against one another. Each result carries sample count, elapsed observation duration, interval coverage/completeness, net-cost basis, capital-attribution rule, risk-free-rate assumption, annualisation/interval convention, statistical suitability and confidence interval/method when supported.
+
+Calculate only from authoritative, net-of-cost, consistently sampled valuation-return intervals. Returns use attributable portfolio capital and explicit treatment of deposits, withdrawals, transfers, overlapping positions and capital changes; do not annualise trade-level returns or infer an arbitrary trade frequency. Missing or incomplete valuation intervals withhold the affected series and rolling window; never synthesize zero returns. Use a documented calendar-time convention (including inactive but actually valued intervals), disclose the cadence and risk-free-rate conversion, and account for serial correlation in annualised estimates and uncertainty. Define maximum drawdown from the attributed net wealth series and Calmar from annualised compound return divided by positive maximum drawdown. Zero variance, undefined denominator, short duration, sparse/irregular sampling or insufficient coverage yields an unavailable metric with a reason, not zero or an infinite ratio. Confidence must not imply independence where observations overlap or are serially dependent.
+
+Expose sortable/filterable metrics and comparable historical periods in Strategy Performance tables/heatmaps, Portfolio & Reconciliation, Autonomous Capital Allocation, Learning/profile evaluation, historical What-if, and exit-policy candidate comparisons. Preserve the approved compact card, table and heatmap visual language. Risk-adjusted performance may inform allocation/promotion only alongside net expectancy, uncertainty, execution costs, liquidity, drawdown, correlation and out-of-sample stability; do not optimize Sharpe alone or introduce an arbitrary promotion threshold. Deterministic calculation tests cover formulas, incomplete/missing intervals, irregular sampling, annualisation, zero volatility, capital attribution and withholding; UI model/render tests cover provenance, grouping, sorting/filtering and historical comparisons. Risk metric delivery is additive and must not displace critical-path financial reconciliation or evidence acquisition.
+
 ## 4. Scouting, learning and shared data integrity audit — Critical [ENG]
 [ENG] One coordinating agent traces actual signal, scout, outcome, learning, promotion, execution and reporting paths. Verify realistic scout fills/costs, comparable AutoTrader outcomes, incremental live evidence, parameter consumption, expiry, persistence and promotion blockers. Investigate common ingestion, attribution, transport and persistence causes before algorithm changes:
 - Execute the canonical Section 4 audit checklist below, covering realised learning, replay, daily coverage, walk-forward and missed opportunities.
@@ -641,6 +647,19 @@ Every independently stateful operator widget and drill-down view must have a cor
 - Constructors must not launch unmanaged side effects during render. Forward stable or changed inputs explicitly through the repository's supported lifecycle pattern. Repeated activation/cleanup and React Strict Mode must not duplicate subscriptions/timers. Hidden widgets suspend work; disposal releases subscriptions/timers; superseded requests are invalidated and late results cannot overwrite current state. Share transport/cache infrastructure where appropriate, not mutable instance view state.
 - Every model has independent model-level tests using the existing test framework. Cover initial state; activation/deactivation; changed inputs; subscriptions; cancellation and out-of-order results; error/recovery and stale/missing data; filters/navigation; persistence; disposal; repeated mount/unmount and visibility; and independent instances as applicable. Use deterministic fake transport/clock fixtures. Keep rendered component/browser tests for presentation, event binding, responsive sizing and integration; these complement model tests.
 - Acceptance of each widget requires its tested model, thin TSX view, and passing relevant model and integration tests. Record implementation, deterministic test, deployment, runtime verification and empirical/trade-dependent status separately. Deliver widget increments as dependencies permit; this gate must not make UI delivery wait for completed-trade evidence. Apply the rule to affected v35 views only; do not expand into an unrelated application-wide refactor.
+
+#### UI 4.4 Mandatory completion, scrolling, and legacy consolidation
+
+The eight required operational widgets and the additional Excursions & Exit Analysis widget are not accepted solely because they have models, pass component tests, or render explicit unavailable states. Track each widget independently through implementation, authoritative backend data availability, runtime verification, visual fidelity against its supplied PNG/HTML reference, scrolling/responsive behavior, interaction testing, legacy replacement and operator approval.
+
+- Trace every required operational value from authoritative producer through route/subscription and DTO, into the tested `Model.ts`, and finally to the rendered control or visualization. Classify missing values as source absence, incorrect subscription, contract mismatch, deployment mismatch, stale/incomplete evidence or frontend mapping defect. Repair defects at their owning layer. An unavailable state is valid only while the specific upstream blocker is recorded; it is not permanent acceptance for a value the system should provide.
+- Restore the Orders and Positions inline Net vs Breakeven bar with only source-valid executable-close, breakeven, selected stop/target and dynamic protection markers. Show entry value, executable mark, net unrealized P&L, exposure and protection exception status when authoritative data exists. Signal-managed positions must not inherit fixed fallback protection markers.
+- Excursion acquisition is event-driven, samples no more slowly than one second, keeps a ten-minute general rolling market buffer and complete trade-specific paths, captures post-exit observations and chronological threshold crossings, and supports deterministic historical What-if replay only from timestamped, fee/FX-attributed evidence. Diagnose every incomplete path individually, distinguishing unrecoverable historical gaps from live acquisition defects. Never fabricate backfill, relabel synthetic surfaced records as natural outcomes, or reduce Learning/promotion requirements. A deterministic fixture proves software behavior; a subsequently occurring natural Paper trade is separate runtime/empirical evidence.
+- Audit scrolling and overflow across the full dashboard, prioritizing dense tables. Prefer generic `ui-platform` primitives: vertically scroll table bodies with sticky/preserved column headers; use horizontal table scrolling only where responsive columns cannot fit; keep expanded row details accessible; prevent clipped rows/cells/controls and adjacent-widget overflow; style scrollbars consistently; verify resize behavior; and avoid redundant nested vertical scrollers. Other oversized widget content must also remain accessible. Test actual widgets at small, medium and large sizes.
+- Use the dashboard container as the sole primary title/header. Remove duplicate internal titles, redundant status/explanation copy, excessive whitespace, unnecessary metric cards and repeated controls; move durable diagnostics into expandable details or tooltips. Use shared responsive spacing and typography tokens rather than per-widget fixed mockup dimensions.
+- Inventory every dashboard catalogue/render entry as retain unchanged, retain and improve, consolidate into an approved v35 widget, superseded and remove, or explicitly deferred. Name the replacement for each consolidation. Before removal, trace non-UI consumers through subscriptions, handlers, DTOs, aggregators, pollers, workers, caches, configuration and tests, including Grafana, Learning, reconciliation and operational monitoring. Quantify subscription, processing, memory and complexity reductions. Do not migrate, rewrite, reorder, replace or auto-upgrade existing saved views/layouts or widget configurations. Preserve their serialized type, position, filters and settings; retired types referenced by saved views require a non-destructive unavailable-widget state or minimal compatibility renderer until the operator manually replaces/removes them. Do not remove shared data, research, Scout/signal workflows or a dependency whose consumers are uncertain.
+- For each approved view, verify populated deterministic fixtures for every supported interaction, filters, sorting, drill-down, details, multiple independently configured instances, persistence, loading/stale/unavailable/error states, lifecycle cancellation/disposal, scrolling, resizing and visual reference fidelity. Verify actual runtime separately. Capture compact browser screenshots at comparable small, medium and large sizes for operator review.
+- Maintain the completion matrix in `plan.md`; Beads owns durable task status. Keep implementation, runtime/financial evidence, visual fidelity and operator approval as separate columns. Never close a widget task when its data, runtime, visual, scrolling, legacy-replacement or operator-approval gates remain unresolved. Keep Paper-only mode, existing risk settings, historical records, performance limits, Learning safeguards and WP16 deferral unchanged.
 
 ### UI 5. Widget 1 — AutoTrader Controls and Safety
 
@@ -1921,14 +1940,13 @@ Retirement means removal from the default operator workspace or replacement of r
 
 Do not unnecessarily delete shared components, research capabilities or historical data.
 
-#### UI Migration requirements
+#### UI Saved-view preservation requirements — no migration
 
-- Inventory persisted widget types.
-- Map obsolete widgets to replacements.
-- Preserve layout position and dimensions where practical.
-- Preserve compatible filters and settings.
-- Provide clear unavailable-widget handling where migration is impossible.
-- Verify replacements before retiring existing widgets.
+- Do not migrate, rewrite, reorder or auto-replace existing saved views/layouts.
+- Preserve saved widget types, positions, ordering, filters and configuration.
+- When an obsolete widget type is removed from the add-widget catalogue, preserve a generic non-destructive unavailable-widget placeholder (or minimal compatibility renderer) at its original location until the operator manually replaces/removes it.
+- Verify backend and non-UI consumer retirement before removing obsolete handlers, subscriptions, workers, caches or storage.
+- Test loading and saving old saved views to prove their content remains intact without automatic migration.
 - Avoid destructive changes to user layouts.
 
 ### UI 16. UI Design and Interaction Principles
@@ -2180,7 +2198,7 @@ Avoid unnecessary waiting where independent frontend work can proceed against va
 - Default dashboard presets work.
 - Shared and local filters behave consistently.
 - Cross-widget navigation preserves identity and context.
-- Existing dashboard layouts migrate safely.
+- Existing saved dashboard views/layouts are not migrated or rewritten; type, ordering, position, filters and configuration remain intact. Retired widget types render a non-destructive unavailable state until the operator manually changes the saved view.
 - Redundant manual allocation controls are removed.
 - Optional research functionality remains accessible.
 
@@ -2197,6 +2215,10 @@ Avoid unnecessary waiting where independent frontend work can proceed against va
 - Strict/exploratory eligibility is explicit.
 - Zero-activity strategies remain visible.
 - Gate drill-down identifies actual observed and required values.
+
+#### UI 21.3 Mandatory per-widget completion matrix
+
+The coordinator maintains a row for each of the eight operational widgets plus Excursions & Exit Analysis, with independent evidence/status for: implementation; backend data availability; runtime verification; PNG/HTML visual fidelity; scrolling and responsive behavior; interaction testing; legacy replacement; and operator approval. Link compact screenshots, runtime/source traces, test evidence and Beads issues from each row. `Pending`, `blocked` and `unverified` are valid recorded states; they are not completion. A test pass or unavailable placeholder cannot promote a cell to accepted. Preserve the distinction between synthetic fixtures, surfaced non-empirical records and naturally occurring Paper lifecycle evidence.
 - Missing evidence is not misrepresented as zero activity.
 
 #### UI 21.3 Capital allocation
@@ -2256,7 +2278,7 @@ Test:
 - Missing fee or FX evidence.
 - Multiple evidence epochs.
 - Zero-activity strategies.
-- Persisted layout migration.
+- Saved-view round-trip preservation without migration.
 
 #### UI 21.8 Frontend verification
 

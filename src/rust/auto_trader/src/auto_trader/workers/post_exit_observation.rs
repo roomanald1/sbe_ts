@@ -96,14 +96,28 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             .as_array()
             .cloned()
             .unwrap_or_default();
+        let path_epoch = observation["pre_exit_price_path_evidence"]["path_epoch"].clone();
+        let path_sequence = observation["pre_exit_price_path_evidence"]["total_sample_count"]
+            .as_u64()
+            .unwrap_or_default()
+            .saturating_add(price_path.len() as u64)
+            .saturating_add(1);
         let sample = serde_json::json!({
             "timestamp": observed_at,
             "bid": bid,
             "ask": ask,
             "mid": mark,
+            "epoch": path_epoch,
+            "sequence": path_sequence,
             "source_updated_at_ms": book_updated_at,
             "source_fresh": true,
+            "freshness_contract_version": freshness_contract["contract_version"],
+            "freshness_max_age_ms": freshness_contract["max_age_ms"],
             "symbol_freshness": freshness_contract,
+            "quote_source_system": market["source_system"],
+            "quote_source_epoch": market["source_epoch"],
+            "quote_source_cursor": market["source_cursor"],
+            "quote_source_record_id": market["source_record_id"],
         });
         if price_path
             .last()
@@ -111,6 +125,44 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
         {
             price_path.push(sample);
         }
+        let mut quotes_by_timestamp = std::collections::BTreeMap::new();
+        let mut quote_conflict = false;
+        for quote in observation["pre_exit_price_path"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(price_path.iter())
+        {
+            let Some(timestamp) = quote["timestamp"].as_u64() else {
+                quote_conflict = true;
+                continue;
+            };
+            if quotes_by_timestamp
+                .get(&timestamp)
+                .is_some_and(|previous: &serde_json::Value| {
+                    previous["bid"] != quote["bid"]
+                        || previous["ask"] != quote["ask"]
+                        || previous["quote_source_record_id"] != quote["quote_source_record_id"]
+                })
+            {
+                quote_conflict = true;
+            }
+            quotes_by_timestamp.insert(timestamp, quote.clone());
+        }
+        let fee_attribution = (!quote_conflict)
+            .then(|| {
+                counterfactual_exit_fee_attribution(
+                    symbol,
+                    observation["exit_timestamp_ms"]
+                        .as_u64()
+                        .unwrap_or_default(),
+                    &observation["entry_context"]["entry_fill_links"],
+                    &observation["exit_fill_evidence"],
+                    &quotes_by_timestamp.into_values().collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .unwrap_or(serde_json::Value::Null);
         let completed = observed_at >= observation["observe_at_ms"].as_u64().unwrap_or(u64::MAX);
         if !completed {
             let mut settings = state.settings.lock().await;
@@ -120,6 +172,7 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
                 .find(|item| item["event_id"].as_str() == Some(event_id))
             {
                 tracker["price_path"] = serde_json::json!(price_path);
+                tracker["counterfactual_exit_fee_attribution"] = fee_attribution;
                 tracker["next_sample_at_ms"] =
                     serde_json::json!(observed_at.saturating_add(POST_EXIT_SAMPLE_INTERVAL_MS));
                 tracker["last_collection_attempt_at_ms"] = serde_json::json!(observed_at);
@@ -246,7 +299,8 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
             "post_exit_mfe_percent": best_post_exit_return_percent,
             "post_exit_mae_percent": worst_post_exit_return_percent,
             "price_path_evidence": price_path_evidence,
-            "price_path": price_path,
+            "price_path": price_path.clone(),
+            "counterfactual_exit_fee_attribution": fee_attribution.clone(),
             "missed_pnl_quote": hold_improvement_percent
                 .map(|improvement| improvement / 100.0 * entry_notional),
             "learning_context": observation["learning_context"],
@@ -301,6 +355,31 @@ async fn collect_due_post_exit_observations(state: &AutoTraderState) -> Result<(
                 .exit_timing_feedback_outbox
                 .push(learning_observation);
         }
+        if let Some(tracker) = settings
+            .post_exit_observations
+            .iter_mut()
+            .find(|item| item["event_id"].as_str() == Some(event_id))
+        {
+            tracker["price_path"] = serde_json::json!(price_path);
+            tracker["counterfactual_exit_fee_attribution"] = fee_attribution;
+            tracker["completion_pending_durable"] = serde_json::Value::Bool(true);
+            tracker["last_collection_status"] = serde_json::json!("completion_pending_durable");
+        }
+        request_settings_persist(state).map_err(|error| error.1)?;
+        drop(settings);
+
+        // Commit the final path samples while the pending close observation is
+        // still present. On write failure the record remains queued for retry;
+        // it is never removed after an unacknowledged path append.
+        if let Err(error) = persist_settings_snapshot_durable(state).await {
+            crate::service_log!(
+                "WARN",
+                "Could not durably finish post-exit path {event_id}: {}",
+                error.1
+            );
+            continue;
+        }
+        let mut settings = state.settings.lock().await;
         settings
             .post_exit_observations
             .retain(|item| item["event_id"] != event_id);
@@ -573,6 +652,20 @@ fn compact_exit_timing_feedback_for_delivery(
             object.remove(field);
         }
     }
+    if let Some(entry_fills) = payload["entry_context"]["entry_fill_links"].as_array_mut() {
+        for fill in entry_fills {
+            if let Some(fill) = fill.as_object_mut() {
+                fill.remove("paper_exchange_fee_schedule_evidence");
+            }
+        }
+    }
+    if let Some(exit_fills) = payload["exit_fill_evidence"]["fills"].as_array_mut() {
+        for fill in exit_fills {
+            if let Some(fill) = fill.as_object_mut() {
+                fill.remove("paper_exchange_fee_schedule_evidence");
+            }
+        }
+    }
 
     let pre_exit_path = payload["pre_exit_price_path"]
         .as_array()
@@ -589,15 +682,38 @@ fn compact_exit_timing_feedback_for_delivery(
         .len()
         .min(EXIT_TIMING_POST_EXIT_PATH_MAX_POINTS);
     loop {
-        payload["pre_exit_price_path"] =
-            serde_json::Value::Array(sample_exit_timing_path(&pre_exit_path, pre_exit_cap));
-        payload["price_path"] =
-            serde_json::Value::Array(sample_exit_timing_path(&post_exit_path, post_exit_cap));
+        let pre_exit_compact = sample_exit_timing_path(&pre_exit_path, pre_exit_cap);
+        let post_exit_compact = sample_exit_timing_path(&post_exit_path, post_exit_cap);
+        payload["pre_exit_price_path"] = compact_executable_quote_path(&pre_exit_compact);
+        payload["price_path"] = compact_executable_quote_path(&post_exit_compact);
         let compacted = pre_exit_cap < pre_exit_path.len() || post_exit_cap < post_exit_path.len();
         if compacted {
             payload["history_path_compacted"] = serde_json::json!(true);
             payload["pre_exit_path_original_count"] = serde_json::json!(pre_exit_path.len());
             payload["post_exit_path_original_count"] = serde_json::json!(post_exit_path.len());
+            let retained_timestamps = pre_exit_compact
+                .iter()
+                .chain(post_exit_compact.iter())
+                .filter_map(|quote| quote["timestamp"].as_u64())
+                .collect::<std::collections::BTreeSet<_>>();
+            if let Some(observations) =
+                payload["counterfactual_exit_fee_attribution"]["quote_observations"].as_array_mut()
+            {
+                observations.retain(|source| {
+                    let timestamp = if source.is_array() {
+                        source[0].as_u64()
+                    } else {
+                        source["timestamp_ms"].as_u64()
+                    };
+                    timestamp.is_some_and(|timestamp| retained_timestamps.contains(&timestamp))
+                });
+            }
+            payload["pre_exit_price_path_evidence"]["complete"] = serde_json::json!(false);
+            payload["pre_exit_price_path_evidence"]["missing_coverage"] =
+                serde_json::json!(["transport_path_compacted"]);
+            payload["price_path_evidence"]["complete"] = serde_json::json!(false);
+            payload["price_path_evidence"]["missing_reason"] =
+                serde_json::json!("transport_path_compacted");
         }
         let encoded = serde_json::to_vec(&payload)
             .map_err(|error| format!("could not encode exit-timing feedback: {error}"))?;
@@ -616,6 +732,43 @@ fn compact_exit_timing_feedback_for_delivery(
             ));
         }
     }
+}
+
+fn compact_executable_quote_path(path: &[serde_json::Value]) -> serde_json::Value {
+    let mut source_indexes = std::collections::BTreeMap::<String, usize>::new();
+    let mut sources = Vec::<serde_json::Value>::new();
+    let mut quotes = Vec::with_capacity(path.len());
+    for quote in path {
+        let source = serde_json::json!({
+            "epoch": quote["epoch"],
+            "freshness_contract_version": quote["freshness_contract_version"],
+            "freshness_max_age_ms": quote["freshness_max_age_ms"],
+            "quote_source_system": quote["quote_source_system"],
+            "quote_source_epoch": quote["quote_source_epoch"],
+        });
+        let key = serde_json::to_string(&source).unwrap_or_default();
+        let source_index = *source_indexes.entry(key).or_insert_with(|| {
+            let index = sources.len();
+            sources.push(source);
+            index
+        });
+        quotes.push(serde_json::json!([
+            quote["timestamp"],
+            quote["bid"],
+            quote["ask"],
+            quote["sequence"],
+            quote["source_updated_at_ms"],
+            quote["source_fresh"],
+            source_index,
+            quote["quote_source_cursor"],
+            quote["quote_source_record_id"],
+        ]));
+    }
+    serde_json::json!({
+        "encoding":"executable_quote_path:v1",
+        "sources":sources,
+        "quotes":quotes,
+    })
 }
 
 fn sample_exit_timing_path(
@@ -823,14 +976,19 @@ mod post_exit_feedback_tests {
         assert_eq!(payload["pre_exit_path_original_count"], 2_618);
         assert_eq!(payload["history_path_compacted"], true);
         assert_eq!(
-            payload["pre_exit_price_path"][0],
-            event["pre_exit_price_path"][0]
+            payload["pre_exit_price_path"]["quotes"][0][0],
+            event["pre_exit_price_path"][0]["timestamp"]
         );
         assert_eq!(
-            payload["pre_exit_price_path"]
-                [payload["pre_exit_price_path"].as_array().unwrap().len() - 1],
-            event["pre_exit_price_path"][2_617]
+            payload["pre_exit_price_path"]["quotes"][payload["pre_exit_price_path"]["quotes"]
+                .as_array()
+                .unwrap()
+                .len()
+                - 1][0],
+            event["pre_exit_price_path"][2_617]["timestamp"]
         );
+        assert_eq!(payload["pre_exit_price_path_evidence"]["complete"], false);
+        assert_eq!(payload["price_path_evidence"]["complete"], false);
         assert!(payload.get("delivery_attempts").is_none());
     }
 

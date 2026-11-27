@@ -180,7 +180,8 @@ async fn execute_vwap_child(
         fill.source_quantity = Some(fill.quantity);
         fill.source_price = Some(fill.price);
     }
-    let source_evidence = paper_exchange_fill_evidence(&matched, Some(&request_order_id), quantity);
+    let source_evidence =
+        paper_exchange_fill_evidence(&matched, symbol, Some(&request_order_id), quantity);
     let filled = matched.filled_quantity;
     if filled <= EPSILON {
         return Ok((0.0, None));
@@ -210,6 +211,12 @@ async fn execute_vwap_child(
             paper_exchange_source_quantity: source_evidence.source_quantity,
             paper_exchange_source_price: source_evidence.source_price,
             paper_exchange_source_complete: source_evidence.complete,
+            paper_exchange_fee_amount: source_evidence.fee,
+            paper_exchange_fee_currency: source_evidence.fee_currency,
+            paper_exchange_fee_schedule_id: source_evidence.fee_schedule_id,
+            paper_exchange_fee_schedule_version: source_evidence.fee_schedule_version,
+            paper_exchange_fee_order_class: source_evidence.fee_order_class,
+            paper_exchange_fee_schedule_evidence: source_evidence.fee_schedule_evidence,
             symbol: symbol.to_owned(),
             side: side.clone(),
             quantity: qty,

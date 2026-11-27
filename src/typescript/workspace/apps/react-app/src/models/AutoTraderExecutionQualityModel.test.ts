@@ -139,6 +139,82 @@ describe('AutoTraderExecutionQualityModel', () => {
     assert.equal(snapshot.summary.order_samples, 0);
   });
 
+  it('derives strategy/outcome summaries only from returned evidence records', () => {
+    const orders = [
+      order({ status: 'expired', strategy: 'trend-50-200', fees_paid: 0 }),
+      order({
+        status: 'filled',
+        strategy: 'trend-50-200',
+        execution_order_id: 'execution-filled',
+        filled_quantity: 1,
+        failure_reason: undefined,
+        fees_paid: 0.02,
+      }),
+      order({
+        status: 'cancelled',
+        strategy: undefined,
+        execution_order_id: 'execution-unattributed',
+        failure_reason: undefined,
+        fees_paid: undefined,
+      }),
+    ];
+    const snapshot = buildExecutionQualitySnapshot(orders, emptyQuality, false);
+    assert.equal(snapshot.displayedOrderCount, 3);
+    assert.equal(snapshot.outcomeCounts.passive_expiry, 1);
+    assert.equal(snapshot.outcomeCounts.filled, 1);
+    assert.equal(snapshot.outcomeCounts.cancelled, 1);
+    assert.deepEqual(snapshot.strategyRows, [
+      {
+        strategy: 'trend-50-200',
+        orderCount: 2,
+        filledCount: 1,
+        feeEvidenceCount: 2,
+        terminalAgeSamples: 0,
+        averageTerminalLifetimeMs: null,
+        fillRatePercent: 50,
+      },
+      {
+        strategy: 'Attribution unavailable',
+        orderCount: 1,
+        filledCount: 0,
+        feeEvidenceCount: 0,
+        terminalAgeSamples: 0,
+        averageTerminalLifetimeMs: null,
+        fillRatePercent: 0,
+      },
+    ]);
+  });
+
+  it('computes average strategy age only from exact joined terminal timestamps', () => {
+    const orders = [
+      order({ execution_order_id: 'matched', timestamp: 1_000 }),
+      order({ execution_order_id: 'unmatched', timestamp: 1_500 }),
+    ];
+    const evidence = parseExecutionPathData(
+      { orders: [] },
+      {
+        execution_paths: [
+          {
+            order: { id: 'matched', remaining_quantity: 0 },
+            terminal_reason: 'expired',
+            terminal_at_ms: 3_000,
+          },
+        ],
+        execution_paths_truncated: false,
+        has_more_orders: false,
+      },
+    );
+    const snapshot = buildExecutionQualitySnapshot(
+      orders,
+      emptyQuality,
+      false,
+      evidence,
+    );
+    assert.equal(snapshot.strategyRows[0].orderCount, 2);
+    assert.equal(snapshot.strategyRows[0].terminalAgeSamples, 1);
+    assert.equal(snapshot.strategyRows[0].averageTerminalLifetimeMs, 2_000);
+  });
+
   it('marks missing and stale aggregate timestamps explicitly', () => {
     assert.deepEqual(executionFreshnessLabel(undefined, 10_000), {
       label: 'Update timestamp unavailable',
@@ -403,6 +479,19 @@ describe('AutoTraderExecutionQualityModel', () => {
     );
     model.setFilters({ symbol: '' });
     assert.equal(model.state$.value.visibleRows.length, 1);
+    model.setView('orders');
+    assert.equal(model.state$.value.view, 'orders');
+    model.selectOrder('execution-eth');
+    assert.equal(model.state$.value.selectedOrder?.order.symbol, 'ETH-USDT');
+    model.setSort('symbol');
+    assert.deepEqual(model.state$.value.sort, {
+      field: 'symbol',
+      direction: 'asc',
+    });
+    model.setSort('symbol');
+    assert.equal(model.state$.value.sort.direction, 'desc');
+    model.setFilters({ outcome: 'passive_expiry' });
+    assert.equal(model.state$.value.selectedOrder, null);
     model.stop();
   });
 

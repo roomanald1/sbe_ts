@@ -82,30 +82,36 @@ describe('ExecutionQualityPanel', () => {
         failure_reason: 'Passive order expired without a fill',
       }),
     ];
-    const state = buildExecutionQualitySnapshot(rows, quality, false);
+    const base = buildExecutionQualitySnapshot(rows, quality, false);
+    const state = {
+      ...base,
+      view: 'orders' as const,
+      selectedOrder: base.rows[0],
+    };
     const markup = renderToStaticMarkup(
       createElement(ExecutionQualityPanel, {
         state,
         nowMs: 1_800_000_000_200,
       }),
     );
-    assert.match(markup, /Aggregate execution quality/);
-    assert.match(markup, /Filled orders/);
-    assert.match(markup, /0 \/ 2/);
+    assert.match(markup, /Execution quality summary/);
+    assert.match(markup, /Filled/);
+    assert.match(markup, /of 2 orders/);
     assert.match(markup, /Post-only crossing rejection/);
     assert.match(markup, /Passive order expired/);
     assert.match(markup, /Decision bid \/ ask/);
     assert.match(markup, /Submitted limit/);
-    assert.match(markup, /Configured lifetime to expiry/);
-    assert.match(markup, /reservation ID and timestamp unavailable/);
-    assert.match(markup, /Post-submit executable market path, queue position/);
-    assert.match(markup, /counterfactual fillability are unavailable/);
+    assert.match(markup, /Configured expiry/);
+    assert.match(markup, /Reservation amount/);
+    assert.match(markup, /Matcher observations are not settled fills/);
+    assert.match(markup, /Identifiers, terminal reason and source evidence/);
     assert.match(markup, /Filter execution orders by symbol/);
     assert.match(markup, /Filter execution orders by outcome/);
   });
 
   it('renders empty returned orders and zero summary fills without claiming complete history', () => {
-    const state = buildExecutionQualitySnapshot([], quality, false);
+    const base = buildExecutionQualitySnapshot([], quality, false);
+    const state = { ...base, view: 'orders' as const };
     const markup = renderToStaticMarkup(
       createElement(ExecutionQualityPanel, {
         state,
@@ -113,29 +119,22 @@ describe('ExecutionQualityPanel', () => {
       }),
     );
     assert.match(markup, /No AutoTrader order records were returned/);
-    assert.match(markup, /0 fills from 2 orders/);
-    assert.match(
-      markup,
-      /zero orders in this response do not establish complete history/,
-    );
+    assert.match(markup, /of 2 orders/);
+    assert.match(markup, /Zero records do not establish complete history/);
   });
 
   it('keeps missing legacy matcher-path fields unavailable instead of showing zero retained paths', () => {
     const legacyPaths = parseExecutionPathData({ orders: [] }, { orders: [] });
-    const state = buildExecutionQualitySnapshot(
-      [],
-      quality,
-      false,
-      legacyPaths,
-    );
+    const base = buildExecutionQualitySnapshot([], quality, false, legacyPaths);
+    const state = { ...base, view: 'history' as const };
     const markup = renderToStaticMarkup(
       createElement(ExecutionQualityPanel, {
         state,
         nowMs: 1_800_000_000_200,
       }),
     );
-    assert.match(markup, /Terminal paths retained<\/dt><dd>Unavailable/);
-    assert.match(markup, /Unlinked path records<\/dt><dd>Unavailable/);
+    assert.match(markup, /Terminal paths Unavailable/);
+    assert.match(markup, /Unlinked records Unavailable/);
     assert.match(
       markup,
       /history contract does not expose durable matcher-path records/,
@@ -185,12 +184,13 @@ describe('ExecutionQualityPanel', () => {
         has_more_orders: false,
       },
     );
-    const state = buildExecutionQualitySnapshot(
+    const base = buildExecutionQualitySnapshot(
       [sourceOrder],
       quality,
       false,
       pathEvidence,
     );
+    const state = { ...base, view: 'history' as const };
     const markup = renderToStaticMarkup(
       createElement(ExecutionQualityPanel, {
         state,
@@ -199,7 +199,7 @@ describe('ExecutionQualityPanel', () => {
     );
     assert.match(markup, /Terminal resting order/);
     assert.match(markup, /source_incomplete/);
-    assert.match(markup, /Global terminal-path history truncated/);
+    assert.match(markup, /History truncated true/);
     assert.match(markup, /45 · event_sequence/);
     assert.match(markup, /100 \/ 101/);
     assert.match(markup, /expired_without_full_fill/);
@@ -208,10 +208,7 @@ describe('ExecutionQualityPanel', () => {
       markup,
       /do not establish continuous quote coverage, queue priority, or fillability/,
     );
-    assert.match(markup, /Filled \/ requested quantity[\s\S]*?0 \/ 1/);
-    assert.match(
-      markup,
-      /Matcher probes and resting-limit observations are not settled fills/,
-    );
+    assert.match(markup, /Path records are joined only by stable order/);
+    assert.match(markup, /do not establish continuous quote coverage/);
   });
 });

@@ -1,5 +1,336 @@
-const TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS: u64 = 5_000;
-const TRADE_PRICE_PATH_MAX_GAP_MS: u64 = 10_000;
+const TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS: u64 = 1_000;
+const TRADE_PRICE_PATH_MAX_GAP_MS: u64 = 1_000;
+
+fn trade_price_path_sample_due(last_timestamp_ms: Option<u64>, observed_at_ms: u64) -> bool {
+    last_timestamp_ms.is_none_or(|last| {
+        observed_at_ms.saturating_sub(last) >= TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
+    })
+}
+
+fn gross_executable_return_percent(
+    signed_quantity: f64,
+    entry_price: f64,
+    bid: f64,
+    ask: f64,
+) -> Option<f64> {
+    if !signed_quantity.is_finite()
+        || signed_quantity.abs() <= f64::EPSILON
+        || !entry_price.is_finite()
+        || entry_price <= 0.0
+        || !bid.is_finite()
+        || bid <= 0.0
+        || !ask.is_finite()
+        || ask < bid
+    {
+        return None;
+    }
+    let value = if signed_quantity > 0.0 {
+        (bid / entry_price - 1.0) * 100.0
+    } else {
+        (entry_price / ask - 1.0) * 100.0
+    };
+    value.is_finite().then_some(value)
+}
+
+fn record_event_driven_gross_excursion(
+    position: &mut TraderPosition,
+    return_percent: Option<f64>,
+    quote_identity_complete: bool,
+    freshness_complete: bool,
+    cadence_complete: bool,
+    first_sample: bool,
+) {
+    if let Some(value) = return_percent.filter(|value| value.is_finite()) {
+        position.price_path_gross_mfe_percent = Some(
+            position
+                .price_path_gross_mfe_percent
+                .map_or(value, |prior| prior.max(value)),
+        );
+        position.price_path_gross_mae_percent = Some(
+            position
+                .price_path_gross_mae_percent
+                .map_or(value, |prior| prior.min(value)),
+        );
+        position.price_path_event_sample_count =
+            position.price_path_event_sample_count.saturating_add(1);
+    }
+    if !quote_identity_complete || !freshness_complete || !cadence_complete {
+        position.price_path_event_metrics_complete = false;
+    } else if first_sample {
+        position.price_path_event_metrics_complete = true;
+    }
+}
+
+fn price_path_threshold_crossings_for_event(
+    position: &TraderPosition,
+    observed_at_ms: u64,
+    bid: f64,
+    ask: f64,
+    source_fresh: Option<bool>,
+    quote_source_system: Option<&str>,
+    quote_source_epoch: Option<&str>,
+    quote_source_cursor: Option<u64>,
+    quote_source_record_id: Option<&str>,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    immediate_net_return_percent: f64,
+    profit_net_return_percent: f64,
+    immediate_exit_fee_rate: f64,
+    profit_exit_fee_rate: f64,
+    stop_loss_source: &str,
+    take_profit_source: &str,
+) -> Vec<serde_json::Value> {
+    let Some(quote_source_system) = quote_source_system.filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let Some(quote_source_epoch) = quote_source_epoch.filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let Some(quote_source_cursor) = quote_source_cursor.filter(|cursor| *cursor > 0) else {
+        return Vec::new();
+    };
+    let Some(quote_source_record_id) =
+        quote_source_record_id.filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let Some(path_epoch) = position.price_path_epoch.as_deref() else {
+        return Vec::new();
+    };
+    if source_fresh != Some(true) || !bid.is_finite() || bid <= 0.0 || !ask.is_finite() || ask < bid
+    {
+        return Vec::new();
+    }
+    let close_mark = if position.quantity > 0.0 { bid } else { ask };
+    let mut crossings = Vec::with_capacity(2);
+    if stop_loss_percent.is_finite()
+        && stop_loss_percent > 0.0
+        && immediate_net_return_percent <= -stop_loss_percent
+    {
+        crossings.push(serde_json::json!({
+            "schema_version": 1,
+            "threshold_type": "stop_loss",
+            "threshold_source": stop_loss_source,
+            "threshold_percent": -stop_loss_percent,
+            "observed_net_return_percent": immediate_net_return_percent,
+            "threshold_comparator": "less_than_or_equal",
+            "timestamp_ms": observed_at_ms,
+            "position_path_epoch": path_epoch,
+            "quote_side": if position.quantity > 0.0 { "bid" } else { "ask" },
+            "close_mark": close_mark,
+            "quote_source_system": quote_source_system,
+            "quote_source_epoch": quote_source_epoch,
+            "quote_source_cursor": quote_source_cursor,
+            "quote_source_record_id": quote_source_record_id,
+            "fee_rate": immediate_exit_fee_rate,
+            "fee_rate_attribution": "local_estimate_unverified_against_effective_paper_exchange_schedule",
+            "crossing_evidence_status": "observed_but_fee_schedule_unverified"
+        }));
+    }
+    if take_profit_percent.is_finite()
+        && take_profit_percent > 0.0
+        && profit_net_return_percent >= take_profit_percent
+    {
+        crossings.push(serde_json::json!({
+            "schema_version": 1,
+            "threshold_type": "take_profit",
+            "threshold_source": take_profit_source,
+            "threshold_percent": take_profit_percent,
+            "observed_net_return_percent": profit_net_return_percent,
+            "threshold_comparator": "greater_than_or_equal",
+            "timestamp_ms": observed_at_ms,
+            "position_path_epoch": path_epoch,
+            "quote_side": if position.quantity > 0.0 { "bid" } else { "ask" },
+            "close_mark": close_mark,
+            "quote_source_system": quote_source_system,
+            "quote_source_epoch": quote_source_epoch,
+            "quote_source_cursor": quote_source_cursor,
+            "quote_source_record_id": quote_source_record_id,
+            "fee_rate": profit_exit_fee_rate,
+            "fee_rate_attribution": "local_estimate_unverified_against_effective_paper_exchange_schedule",
+            "crossing_evidence_status": "observed_but_fee_schedule_unverified"
+        }));
+    }
+    crossings
+}
+
+fn counterfactual_exit_fee_attribution(
+    symbol: &str,
+    exit_timestamp_ms: u64,
+    entry_fill_links: &serde_json::Value,
+    exit_fill_evidence: &serde_json::Value,
+    quotes: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let quote_currency = symbol.rsplit_once('-')?.1;
+    if quotes.is_empty() || exit_fill_evidence["fees_complete"].as_bool() != Some(true) {
+        return None;
+    }
+    let entry_fills = entry_fill_links.as_array()?;
+    let exit_fills = exit_fill_evidence["fills"].as_array()?;
+    if entry_fills.is_empty() || exit_fills.is_empty() {
+        return None;
+    }
+    let fill_schedule_matches = |fill: &serde_json::Value| {
+        let event = &fill["paper_exchange_fee_schedule_evidence"];
+        fill["paper_exchange_fee_currency"].as_str() == Some(quote_currency)
+            && event["fee_schedule_id"].as_str() == fill["paper_exchange_fee_schedule_id"].as_str()
+            && event["fee_schedule_version"].as_str()
+                == fill["paper_exchange_fee_schedule_version"].as_str()
+            && fill["paper_exchange_fee_amount"]
+                .as_f64()
+                .is_some_and(|fee| fee.is_finite() && fee >= 0.0)
+            && fill["paper_exchange_fee_order_class"]
+                .as_str()
+                .is_some_and(|class| matches!(class, "maker" | "taker"))
+    };
+    if entry_fills
+        .iter()
+        .chain(exit_fills)
+        .any(|fill| !fill_schedule_matches(fill))
+    {
+        return None;
+    }
+    let mut schedules = std::collections::BTreeMap::<(String, String), serde_json::Value>::new();
+    for event in entry_fill_links
+        .as_array()?
+        .iter()
+        .filter_map(|fill| fill.get("paper_exchange_fee_schedule_evidence"))
+        .filter(|event| !event.is_null())
+        .chain(
+            exit_fill_evidence["fills"]
+                .as_array()?
+                .iter()
+                .filter_map(|fill| {
+                    fill["paper_exchange_fee_schedule_evidence"]
+                        .as_object()
+                        .map(|_| &fill["paper_exchange_fee_schedule_evidence"])
+                }),
+        )
+    {
+        if event["schema_version"].as_str() != Some("paper_exchange_financial_evidence:v1")
+            || event["event_type"].as_str() != Some("fee_schedule")
+            || event["source_system"].as_str() != Some("paper_exchange_simulator")
+        {
+            return None;
+        }
+        let schedule_id = event["fee_schedule_id"].as_str()?.to_owned();
+        let schedule_version = event["fee_schedule_version"].as_str()?.to_owned();
+        let maker_rate = event["maker_rate"].as_f64()?;
+        let taker_rate = event["taker_rate"].as_f64()?;
+        let effective_from = event["effective_from_utc_ms"].as_u64()?;
+        let source_timestamp = event["source_timestamp_utc_ms"].as_u64()?;
+        if event["symbol"].as_str() != Some(symbol)
+            || event["source_epoch"].as_str().is_none_or(str::is_empty)
+            || event["source_record_id"].as_str().is_none_or(str::is_empty)
+            || event["source_cursor"]
+                .as_u64()
+                .is_none_or(|cursor| cursor == 0)
+            || event["source_timestamp_utc_ms"]
+                .as_u64()
+                .is_none_or(|ts| ts == 0)
+            || !maker_rate.is_finite()
+            || !taker_rate.is_finite()
+            || maker_rate < 0.0
+            || taker_rate < 0.0
+            || effective_from == 0
+            || source_timestamp == 0
+            || event["effective_to_utc_ms"]
+                .as_u64()
+                .is_some_and(|end| end <= effective_from)
+        {
+            return None;
+        }
+        let normalized = serde_json::json!({
+            "source_schema_version": event["schema_version"],
+            "source_event_id": event["event_id"],
+            "source_system": event["source_system"],
+            "source_epoch": event["source_epoch"],
+            "source_cursor": event["source_cursor"],
+            "source_record_id": event["source_record_id"],
+            "source_timestamp_utc_ms": event["source_timestamp_utc_ms"],
+            "fee_schedule_id": schedule_id,
+            "fee_schedule_version": schedule_version,
+            "symbol": event["symbol"],
+            "effective_from_utc_ms": event["effective_from_utc_ms"],
+            "effective_to_utc_ms": event["effective_to_utc_ms"],
+            "maker_rate": event["maker_rate"],
+            "taker_rate": event["taker_rate"],
+        });
+        let key = (schedule_id, schedule_version);
+        if schedules
+            .get(&key)
+            .is_some_and(|prior| prior != &normalized)
+        {
+            return None;
+        }
+        schedules.insert(key, normalized);
+    }
+    if schedules.is_empty() {
+        return None;
+    }
+    let covers = |schedule: &&serde_json::Value, timestamp: u64| {
+        schedule["effective_from_utc_ms"]
+            .as_u64()
+            .is_some_and(|from| from <= timestamp)
+            && schedule["effective_to_utc_ms"]
+                .as_u64()
+                .is_none_or(|to| timestamp < to)
+    };
+    let mut quote_observations = Vec::with_capacity(quotes.len());
+    for quote in quotes {
+        let timestamp = quote["timestamp"].as_u64()?;
+        let covering = schedules
+            .values()
+            .filter(|schedule| covers(schedule, timestamp))
+            .collect::<Vec<_>>();
+        if covering.len() != 1
+            || quote["source_fresh"] != serde_json::Value::Bool(true)
+            || quote["freshness_contract_version"].as_u64() != Some(1)
+        {
+            return None;
+        }
+        let schedule = covering[0];
+        quote_observations.push(serde_json::json!([
+            timestamp,
+            schedule["fee_schedule_id"],
+            schedule["fee_schedule_version"],
+            "taker",
+            schedule["taker_rate"],
+            quote_currency,
+        ]));
+    }
+    let exit_schedules = schedules
+        .values()
+        .filter(|schedule| covers(schedule, exit_timestamp_ms))
+        .collect::<Vec<_>>();
+    if exit_schedules.len() != 1 {
+        return None;
+    }
+    let schedule = exit_schedules[0];
+    if exit_fills.iter().any(|fill| {
+        fill["paper_exchange_fee_schedule_id"].as_str() != schedule["fee_schedule_id"].as_str()
+            || fill["paper_exchange_fee_schedule_version"].as_str()
+                != schedule["fee_schedule_version"].as_str()
+    }) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "schema_version": 1,
+        "fee_schedules": schedules.values().collect::<Vec<_>>(),
+        "exit_fee_schedule_ref": {
+            "timestamp_ms": exit_timestamp_ms,
+            "fee_schedule_id": schedule["fee_schedule_id"],
+            "fee_schedule_version": schedule["fee_schedule_version"],
+            "exit_order_class": "taker",
+            "applied_rate": schedule["taker_rate"],
+            "fee_currency": quote_currency,
+            "fee_currency_conversion": serde_json::Value::Null,
+        },
+        "quote_observations": quote_observations,
+    }))
+}
 
 fn entry_fill_identity_complete(position: &TraderPosition) -> bool {
     let unique_ids = position
@@ -45,7 +376,7 @@ fn entry_fill_identity_complete(position: &TraderPosition) -> bool {
         })
 }
 
-pub(super) fn price_path_excursion_evidence(
+fn price_path_excursion_evidence(
     position: &TraderPosition,
     exit_observed_at_ms: u64,
 ) -> serde_json::Value {
@@ -59,6 +390,28 @@ pub(super) fn price_path_excursion_evidence(
         position.entry_timestamp_ms,
         exit_observed_at_ms,
     );
+    evidence["threshold_crossings"] =
+        serde_json::Value::Array(position.price_path_threshold_crossings.clone());
+    evidence["threshold_crossing_evidence_status"] =
+        serde_json::json!(if position.price_path_threshold_crossings.is_empty() {
+            "no_source_backed_threshold_crossing_recorded"
+        } else {
+            "observed_with_unverified_fee_schedule"
+        });
+    evidence["event_driven_gross_mfe_percent"] =
+        serde_json::json!(position.price_path_gross_mfe_percent);
+    evidence["event_driven_gross_mae_percent"] =
+        serde_json::json!(position.price_path_gross_mae_percent);
+    evidence["event_driven_sample_count"] =
+        serde_json::json!(position.price_path_event_sample_count);
+    evidence["event_driven_metrics_complete"] =
+        serde_json::json!(position.price_path_event_metrics_complete);
+    evidence["event_driven_metrics_attribution"] =
+        serde_json::json!(if position.price_path_event_metrics_complete {
+            "fresh_source_identity_within_one_second_cadence"
+        } else {
+            "incomplete_or_unverified_source_cadence"
+        });
     let identity = position.lifecycle_identity.as_ref();
     let identity_complete = identity.is_some_and(|identity| {
         identity.schema_version == 1
@@ -107,16 +460,11 @@ pub(super) fn price_path_excursion_evidence(
                 && !risk.fill_ids.is_empty()
         });
     evidence["identity_complete"] = serde_json::json!(identity_complete);
-    evidence["canonical_lifecycle_identity"] = serde_json::json!(identity);
     evidence["trade_id"] = serde_json::json!(position.trade_id);
     evidence["source_episode_id"] =
         serde_json::json!(identity.map(|identity| &identity.episode_id));
     evidence["opportunity_id"] =
         serde_json::json!(identity.map(|identity| &identity.opportunity_id));
-    evidence["path_epoch"] = serde_json::json!(position.price_path_epoch);
-    evidence["entry_fill_ids"] = serde_json::json!(position.entry_fill_ids);
-    evidence["entry_fill_links"] = serde_json::json!(position.entry_fill_links);
-    evidence["initial_risk_reference"] = serde_json::json!(position.initial_risk_reference);
     evidence["initial_risk_complete"] = serde_json::json!(initial_risk_complete);
     let mut policy_evaluation_blockers = Vec::new();
     if !continuity_complete {
@@ -302,7 +650,7 @@ fn stable_pm_exit_fill_id(value: &str) -> bool {
         })
 }
 
-pub(super) fn realized_r_evidence(
+fn realized_r_evidence(
     position: &TraderPosition,
     symbol: &str,
     trade_closed: bool,
@@ -540,6 +888,12 @@ fn exit_fill_lineage_evidence(
             "fee_currency": fee_currency,
             "fee_currency_known": fee_currency_known,
             "fee_status": fee_status,
+            "paper_exchange_fee_amount": fill["paper_exchange_fee_amount"],
+            "paper_exchange_fee_currency": fill["paper_exchange_fee_currency"],
+            "paper_exchange_fee_schedule_id": fill["paper_exchange_fee_schedule_id"],
+            "paper_exchange_fee_schedule_version": fill["paper_exchange_fee_schedule_version"],
+            "paper_exchange_fee_order_class": fill["paper_exchange_fee_order_class"],
+            "paper_exchange_fee_schedule_evidence": fill["paper_exchange_fee_schedule_evidence"],
         }));
     }
 
@@ -738,11 +1092,28 @@ fn position_exit_audit_payload(
                     "freshness_contract_version": sample.freshness_contract_version,
                     "freshness_max_age_ms": sample.freshness_max_age_ms,
                     "source_fresh": sample.source_fresh,
+                    "quote_source_system": sample.quote_source_system,
+                    "quote_source_epoch": sample.quote_source_epoch,
+                    "quote_source_cursor": sample.quote_source_cursor,
+                    "quote_source_record_id": sample.quote_source_record_id,
                 })
             })
             .collect::<Vec<_>>()
     );
     payload["price_path_evidence"] = price_path_excursion_evidence(position, observed_at);
+    let executable_quotes = payload["price_path"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let entry_fill_links_full = serde_json::json!(position.entry_fill_links);
+    payload["counterfactual_exit_fee_attribution"] = counterfactual_exit_fee_attribution(
+        symbol,
+        observed_at,
+        &entry_fill_links_full,
+        &payload["exit_fill_evidence"],
+        &executable_quotes,
+    )
+    .unwrap_or(serde_json::Value::Null);
     payload["entry_context"] = serde_json::json!({
         "trade_id": trade_id,
         "strategy_decision": position.strategy_decision,
@@ -756,7 +1127,7 @@ fn position_exit_audit_payload(
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
         "quantity": position.quantity.abs(),
         "entry_fill_ids": position.entry_fill_ids,
-        "entry_fill_links": position.entry_fill_links,
+        "entry_fill_links": entry_fill_links_full,
         "entry_fee_currencies": position.entry_fee_currencies,
         "entry_fill_costs_complete": position.entry_fill_costs_complete,
         "initial_risk_reference": position.initial_risk_reference,
@@ -842,6 +1213,7 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
         "effective_take_profit_percent": payload["effective_take_profit_percent"],
         "pre_exit_price_path": payload["price_path"],
         "pre_exit_price_path_evidence": payload["price_path_evidence"],
+        "counterfactual_exit_fee_attribution": payload["counterfactual_exit_fee_attribution"],
         "exit_fill_evidence": payload["exit_fill_evidence"],
         "realized_r_evidence": payload["realized_r_evidence"],
         "canonical_lifecycle_identity": payload["canonical_lifecycle_identity"],
@@ -939,6 +1311,187 @@ mod tests {
     use super::*;
 
     #[test]
+    fn trade_price_path_samples_no_slower_than_one_second_when_events_arrive() {
+        assert!(trade_price_path_sample_due(None, 1_000));
+        assert!(!trade_price_path_sample_due(Some(1_000), 1_999));
+        assert!(trade_price_path_sample_due(Some(1_000), 2_000));
+        assert!(!trade_price_path_sample_due(Some(2_000), 1_000));
+    }
+
+    #[test]
+    fn event_driven_gross_excursion_uses_executable_side_for_long_and_short() {
+        assert_eq!(
+            gross_executable_return_percent(1.0, 100.0, 103.0, 104.0),
+            Some(3.0)
+        );
+        assert!(
+            (gross_executable_return_percent(-1.0, 100.0, 96.0, 97.0).unwrap()
+                - (100.0 / 97.0 - 1.0) * 100.0)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            gross_executable_return_percent(1.0, 0.0, 103.0, 104.0),
+            None
+        );
+    }
+
+    #[test]
+    fn event_driven_excursion_aggregates_monotonically_and_fails_closed_on_gap_or_identity() {
+        let mut position = TraderPosition::default();
+        record_event_driven_gross_excursion(&mut position, Some(1.0), true, true, true, true);
+        record_event_driven_gross_excursion(&mut position, Some(-2.0), true, true, true, false);
+        record_event_driven_gross_excursion(&mut position, Some(0.5), false, true, true, false);
+        assert_eq!(position.price_path_gross_mfe_percent, Some(1.0));
+        assert_eq!(position.price_path_gross_mae_percent, Some(-2.0));
+        assert_eq!(position.price_path_event_sample_count, 3);
+        assert!(!position.price_path_event_metrics_complete);
+    }
+
+    #[test]
+    fn event_threshold_crossings_keep_executable_quote_lineage_and_fee_uncertainty() {
+        let position = TraderPosition {
+            quantity: 1.0,
+            price_path_epoch: Some("path-epoch".into()),
+            ..TraderPosition::default()
+        };
+        let crossings = price_path_threshold_crossings_for_event(
+            &position,
+            2_000,
+            98.0,
+            99.0,
+            Some(true),
+            Some("paper_exchange.market_data_cache"),
+            Some("pex-epoch"),
+            Some(11),
+            Some("paper-book:v1:pex-epoch:BTC-USDT:11"),
+            2.0,
+            3.0,
+            -2.5,
+            3.5,
+            0.001,
+            0.001,
+            "entry_profile",
+            "entry_profile",
+        );
+        assert_eq!(crossings.len(), 2);
+        assert_eq!(crossings[0]["threshold_type"], "stop_loss");
+        assert_eq!(crossings[0]["quote_side"], "bid");
+        assert_eq!(crossings[0]["quote_source_cursor"], 11);
+        assert_eq!(
+            crossings[0]["fee_rate_attribution"],
+            "local_estimate_unverified_against_effective_paper_exchange_schedule"
+        );
+        assert_eq!(crossings[1]["threshold_type"], "take_profit");
+        assert!(
+            price_path_threshold_crossings_for_event(
+                &position,
+                2_000,
+                98.0,
+                99.0,
+                Some(false),
+                Some("paper_exchange.market_data_cache"),
+                Some("pex-epoch"),
+                Some(12),
+                Some("paper-book:v1:pex-epoch:BTC-USDT:12"),
+                2.0,
+                3.0,
+                -2.5,
+                3.5,
+                0.001,
+                0.001,
+                "entry_profile",
+                "entry_profile",
+            )
+            .is_empty()
+        );
+    }
+
+    fn fee_schedule_event(from_ms: u64, to_ms: Option<u64>) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version":"paper_exchange_financial_evidence:v1",
+            "event_type":"fee_schedule",
+            "event_id":"schedule-event-1",
+            "source_system":"paper_exchange_simulator",
+            "source_epoch":"paper-epoch-1",
+            "source_cursor":7,
+            "source_record_id":"paper-record-7",
+            "source_timestamp_utc_ms":from_ms,
+            "fee_schedule_id":"schedule-1",
+            "fee_schedule_version":"v1",
+            "symbol":"BTC-USDT",
+            "effective_from_utc_ms":from_ms,
+            "effective_to_utc_ms":to_ms,
+            "maker_rate":0.0008,
+            "taker_rate":0.001
+        })
+    }
+
+    #[test]
+    fn counterfactual_fee_attribution_requires_exact_schedule_and_quote_provenance() {
+        let schedule = fee_schedule_event(1_000, None);
+        let entry_links = vec![PositionEntryFillLink {
+            paper_exchange_fee_amount: Some(0.01),
+            paper_exchange_fee_currency: Some("USDT".into()),
+            paper_exchange_fee_schedule_id: Some("schedule-1".into()),
+            paper_exchange_fee_schedule_version: Some("v1".into()),
+            paper_exchange_fee_order_class: Some("taker".into()),
+            paper_exchange_fee_schedule_evidence: Some(schedule.clone()),
+            ..PositionEntryFillLink::default()
+        }];
+        let exit_evidence = serde_json::json!({
+            "fees_complete":true,
+            "fills":[{
+                "paper_exchange_fee_amount":0.01,
+                "paper_exchange_fee_currency":"USDT",
+                "paper_exchange_fee_schedule_id":"schedule-1",
+                "paper_exchange_fee_schedule_version":"v1",
+                "paper_exchange_fee_order_class":"taker",
+                "paper_exchange_fee_schedule_evidence":schedule
+            }]
+        });
+        let quotes = vec![serde_json::json!({
+            "timestamp":1_500,
+            "sequence":1,
+            "epoch":"path-epoch-1",
+            "source_updated_at_ms":1_490,
+            "freshness_contract_version":1,
+            "freshness_max_age_ms":5_000,
+            "source_fresh":true,
+            "quote_source_system":"paper_exchange.market_data_cache",
+            "quote_source_epoch":"market-epoch-1",
+            "quote_source_cursor":9,
+            "quote_source_record_id":"paper-book-9"
+        })];
+
+        let attribution = counterfactual_exit_fee_attribution(
+            "BTC-USDT",
+            2_000,
+            &serde_json::json!(entry_links),
+            &exit_evidence,
+            &quotes,
+        )
+        .expect("exact schedule and quote sources allow a fee contract");
+        assert_eq!(attribution["schema_version"], 1);
+        assert_eq!(attribution["fee_schedules"][0]["source_cursor"], 7);
+        assert_eq!(attribution["quote_observations"][0][2], "v1");
+        assert_eq!(attribution["exit_fee_schedule_ref"]["applied_rate"], 0.001);
+
+        let mut stale_quotes = quotes;
+        stale_quotes[0]["source_fresh"] = serde_json::Value::Bool(false);
+        assert!(
+            counterfactual_exit_fee_attribution(
+                "BTC-USDT",
+                2_000,
+                &serde_json::json!(entry_links),
+                &exit_evidence,
+                &stale_quotes,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn position_exit_audit_includes_execution_and_entry_context() {
         let position = TraderPosition {
             quantity: 2.0,
@@ -972,6 +1525,7 @@ mod tests {
                     fee_known: true,
                     fee_amount: Some(0.05),
                     fee_currency: Some("USDT".into()),
+                    ..PositionEntryFillLink::default()
                 },
                 PositionEntryFillLink {
                     fill_id: "pm-fill:v1:entry-1:2".into(),
@@ -984,6 +1538,7 @@ mod tests {
                     fee_known: true,
                     fee_amount: Some(0.05),
                     fee_currency: Some("USDT".into()),
+                    ..PositionEntryFillLink::default()
                 },
             ],
             entry_fee_currencies: vec!["USDT".into()],
@@ -1280,6 +1835,7 @@ mod tests {
             freshness_contract_version: Some(1),
             freshness_max_age_ms: Some(5_000),
             source_fresh: Some(true),
+            ..TradePriceSample::default()
         };
         let long = TraderPosition {
             quantity: 1.0,

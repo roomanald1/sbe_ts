@@ -1,3 +1,152 @@
+.dashboard-widget-content {
+  box-sizing: border-box;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #465363 #11151a;
+  scrollbar-width: thin;
+}
+
+/* OperatorPanel owns its scrollport; keep the dashboard fallback from nesting. */
+.dashboard-widget-content:has(.operator-panel) {
+  overflow: hidden;
+}
+
+.dashboard-widget-content:has(.operator-panel) > * {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.dashboard-widget-content .operator-panel__body {
+  height: 0;
+  flex: 1 1 0;
+}
+
+/* Prevent legacy horizontal overflow rules from becoming sticky scrollports. */
+.dashboard-widget-content .operator-panel__body .operator-compact-table-scroll {
+  overflow: visible;
+}
+
+/* Raw operator-panel variants without header/body slots own their full scroll. */
+.dashboard-widget-content .operator-panel:not(:has(> .operator-panel__body)) {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--operator-scrollbar-thumb, #465363)
+    var(--operator-scrollbar-track, #11151a);
+  scrollbar-width: thin;
+}
+
+.dashboard-widget-content
+  .operator-panel:not(:has(> .operator-panel__body))::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.dashboard-widget-content
+  .operator-panel:not(:has(> .operator-panel__body))::-webkit-scrollbar-track {
+  background: var(--operator-scrollbar-track, #11151a);
+}
+
+.dashboard-widget-content
+  .operator-panel:not(:has(> .operator-panel__body))::-webkit-scrollbar-thumb {
+  border: 2px solid var(--operator-scrollbar-track, #11151a);
+  border-radius: 8px;
+  background: var(--operator-scrollbar-thumb, #465363);
+}
+
+.dashboard-widget-content::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.dashboard-widget-content::-webkit-scrollbar-track {
+  background: #11151a;
+}
+
+.dashboard-widget-content::-webkit-scrollbar-thumb {
+  border: 2px solid #11151a;
+  border-radius: 8px;
+  background: #465363;
+}
+
+.dashboard-widget-content > * {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dashboard-widget-content > .feed-section {
+  display: flex;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+/* Native table views get one bounded body scroller with sticky column labels. */
+.dashboard-widget-content:not(:has(.operator-panel))
+  > .feed-section
+  :is(.data-grid-wrap, [class$='-grid-wrap'], [class$='-table-wrap']):has(
+    > table
+  ) {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #465363 #11151a;
+  scrollbar-width: thin;
+}
+
+.dashboard-widget-content:not(:has(.operator-panel))
+  > .feed-section
+  :is(
+    .data-grid-wrap,
+    [class$='-grid-wrap'],
+    [class$='-table-wrap']
+  )::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.dashboard-widget-content:not(:has(.operator-panel))
+  > .feed-section
+  :is(
+    .data-grid-wrap,
+    [class$='-grid-wrap'],
+    [class$='-table-wrap']
+  )::-webkit-scrollbar-track {
+  background: #11151a;
+}
+
+.dashboard-widget-content:not(:has(.operator-panel))
+  > .feed-section
+  :is(
+    .data-grid-wrap,
+    [class$='-grid-wrap'],
+    [class$='-table-wrap']
+  )::-webkit-scrollbar-thumb {
+  border: 2px solid #11151a;
+  border-radius: 8px;
+  background: #465363;
+}
+
+/* OperatorPanel body is the sole scrollport for native tables it contains. */
+.operator-panel__body
+  :is(.data-grid-wrap, [class$='-grid-wrap'], [class$='-table-wrap']):has(
+    > table
+  ) {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .dashboard-widget-resize {
   position: absolute;
   z-index: 5;

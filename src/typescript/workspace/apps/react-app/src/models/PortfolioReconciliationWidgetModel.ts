@@ -31,7 +31,7 @@ export type PortfolioReconciliationState = {
   intervalError?: string;
   stale: boolean;
   dataStatus: 'inactive' | 'loading' | 'available' | 'partial' | 'unavailable';
-  tab: 'summary' | 'intervals';
+  tab: 'summary' | 'balances' | 'intervals';
   intervalFilter: 'all' | 'complete' | 'incomplete';
   snapshot: JsonObject | null;
   intervalCoverage: string | null;

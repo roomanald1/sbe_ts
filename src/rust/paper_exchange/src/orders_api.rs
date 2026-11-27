@@ -1,12 +1,12 @@
 use crate::market_data::{BookSnapshot, MarketData};
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use rusqlite::{
-    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -54,6 +54,13 @@ pub struct Fill {
     pub fee_schedule_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fee_schedule_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_order_class: Option<String>,
+    /// Exact versioned source event that priced this fill. The matching fee
+    /// fields above stay separate so legacy readers can ignore the added
+    /// provenance without changing their execution contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_schedule_evidence: Option<FinancialEvidenceEvent>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -270,6 +277,37 @@ struct FinancialEvidenceQuery {
     limit: Option<usize>,
     through_cursor: Option<u64>,
     through_epoch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EffectiveFeeScheduleQuery {
+    symbols: String,
+    at_utc_ms: u64,
+}
+
+#[derive(Serialize)]
+struct EffectiveFeeScheduleSnapshot {
+    schema_version: &'static str,
+    captured_at_utc_ms: u64,
+    ledger_epoch: String,
+    observed_max_cursor: u64,
+    schedules: Vec<EffectiveFeeScheduleEntry>,
+}
+
+#[derive(Serialize)]
+struct EffectiveFeeScheduleEntry {
+    symbol: String,
+    status: &'static str,
+    fee_schedule_id: Option<String>,
+    fee_schedule_version: Option<String>,
+    effective_from_utc_ms: Option<u64>,
+    effective_to_utc_ms: Option<u64>,
+    maker_rate: Option<f64>,
+    taker_rate: Option<f64>,
+    source_epoch: Option<String>,
+    source_cursor: Option<u64>,
+    source_record_id: Option<String>,
+    source_timestamp_utc_ms: Option<u64>,
 }
 
 async fn match_order(
@@ -493,6 +531,201 @@ async fn financial_evidence_history(
         }
     })?;
     Ok(Json(page))
+}
+
+async fn effective_fee_schedules(
+    State(state): State<OrderApiState>,
+    Query(query): Query<EffectiveFeeScheduleQuery>,
+) -> Result<Json<EffectiveFeeScheduleSnapshot>, (StatusCode, String)> {
+    let symbols = query
+        .symbols
+        .split(',')
+        .map(str::trim)
+        .map(str::to_ascii_uppercase)
+        .filter(|symbol| !symbol.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    if query.at_utc_ms == 0
+        || query.symbols.len() > 8_192
+        || symbols.is_empty()
+        || symbols.len() > 256
+        || symbols.iter().any(|symbol| {
+            !symbol.is_ascii()
+                || symbol.len() > 32
+                || !symbol.split_once('-').is_some_and(|(base, quote)| {
+                    !base.is_empty()
+                        && !quote.is_empty()
+                        && base.bytes().all(|b| b.is_ascii_alphanumeric())
+                        && quote.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+        })
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid fee-schedule symbols or timestamp".to_owned(),
+        ));
+    }
+    let path = state.ledger_path;
+    let at_utc_ms = query.at_utc_ms;
+    let snapshot = tokio::task::spawn_blocking(move || {
+        effective_fee_schedule_snapshot(&path, &symbols.into_iter().collect::<Vec<_>>(), at_utc_ms)
+    })
+    .await
+    .map_err(database_join_error)?
+    .map_err(database_error)?;
+    Ok(Json(snapshot))
+}
+
+fn effective_fee_schedule_snapshot(
+    path: &PathBuf,
+    symbols: &[String],
+    at_utc_ms: u64,
+) -> anyhow::Result<EffectiveFeeScheduleSnapshot> {
+    let mut connection = Connection::open(path)?;
+    let transaction = connection.transaction()?;
+    let source_epoch = financial_evidence_source_epoch(&transaction)?;
+    let observed_max_cursor = transaction.query_row(
+        "SELECT COALESCE(MAX(source_cursor), 0) FROM financial_evidence_events",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as u64;
+    let mut schedules = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let mut statement = transaction.prepare(
+            "SELECT s.fee_schedule_id,s.fee_schedule_version,s.effective_from_utc_ms,
+                    s.effective_to_utc_ms,s.maker_rate,s.taker_rate,e.source_epoch,
+                    e.source_cursor,e.source_record_id,e.source_timestamp_utc_ms,e.event_json
+             FROM financial_fee_schedules s
+             JOIN financial_evidence_events e ON e.source_cursor=s.event_cursor
+             WHERE s.symbol=?1 AND s.effective_from_utc_ms<=?2
+               AND (s.effective_to_utc_ms IS NULL OR ?2<s.effective_to_utc_ms)
+               AND e.source_timestamp_utc_ms<=?2
+             ORDER BY s.effective_from_utc_ms DESC,s.event_cursor DESC LIMIT 2",
+        )?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![symbol, i64::try_from(at_utc_ms)?],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, String>(10)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let entry = if rows.len() > 1 {
+            EffectiveFeeScheduleEntry {
+                symbol: symbol.clone(),
+                status: "ambiguous",
+                fee_schedule_id: None,
+                fee_schedule_version: None,
+                effective_from_utc_ms: None,
+                effective_to_utc_ms: None,
+                maker_rate: None,
+                taker_rate: None,
+                source_epoch: None,
+                source_cursor: None,
+                source_record_id: None,
+                source_timestamp_utc_ms: None,
+            }
+        } else if let Some((
+            id,
+            version,
+            effective_from,
+            effective_to,
+            maker,
+            taker,
+            epoch,
+            cursor,
+            record_id,
+            timestamp,
+            event_json,
+        )) = rows.into_iter().next()
+        {
+            let event: serde_json::Value = serde_json::from_str(&event_json)?;
+            let matches = event.get("event_type").and_then(serde_json::Value::as_str)
+                == Some("fee_schedule")
+                && event.get("symbol").and_then(serde_json::Value::as_str) == Some(symbol.as_str())
+                && event
+                    .get("fee_schedule_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(id.as_str())
+                && event
+                    .get("fee_schedule_version")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(version.as_str())
+                && epoch == source_epoch
+                && cursor > 0
+                && !record_id.trim().is_empty()
+                && timestamp > 0
+                && effective_from > 0
+                && maker.is_finite()
+                && taker.is_finite();
+            if matches {
+                EffectiveFeeScheduleEntry {
+                    symbol: symbol.clone(),
+                    status: "matched",
+                    fee_schedule_id: Some(id),
+                    fee_schedule_version: Some(version),
+                    effective_from_utc_ms: Some(u64::try_from(effective_from)?),
+                    effective_to_utc_ms: effective_to.map(u64::try_from).transpose()?,
+                    maker_rate: Some(maker),
+                    taker_rate: Some(taker),
+                    source_epoch: Some(epoch),
+                    source_cursor: Some(u64::try_from(cursor)?),
+                    source_record_id: Some(record_id),
+                    source_timestamp_utc_ms: Some(u64::try_from(timestamp)?),
+                }
+            } else {
+                EffectiveFeeScheduleEntry {
+                    symbol: symbol.clone(),
+                    status: "mismatched_source_record",
+                    fee_schedule_id: None,
+                    fee_schedule_version: None,
+                    effective_from_utc_ms: None,
+                    effective_to_utc_ms: None,
+                    maker_rate: None,
+                    taker_rate: None,
+                    source_epoch: None,
+                    source_cursor: None,
+                    source_record_id: None,
+                    source_timestamp_utc_ms: None,
+                }
+            }
+        } else {
+            EffectiveFeeScheduleEntry {
+                symbol: symbol.clone(),
+                status: "missing",
+                fee_schedule_id: None,
+                fee_schedule_version: None,
+                effective_from_utc_ms: None,
+                effective_to_utc_ms: None,
+                maker_rate: None,
+                taker_rate: None,
+                source_epoch: None,
+                source_cursor: None,
+                source_record_id: None,
+                source_timestamp_utc_ms: None,
+            }
+        };
+        schedules.push(entry);
+    }
+    transaction.commit()?;
+    Ok(EffectiveFeeScheduleSnapshot {
+        schema_version: FINANCIAL_EVIDENCE_SCHEMA_VERSION,
+        captured_at_utc_ms: at_utc_ms,
+        ledger_epoch: source_epoch,
+        observed_max_cursor,
+        schedules,
+    })
 }
 
 fn validate_financial_evidence(event: &FinancialEvidenceEvent) -> Result<(), String> {
@@ -1133,6 +1366,8 @@ fn match_book(request: &MatchRequest, book: &BookSnapshot, fingerprint: String) 
                 fee_currency: None,
                 fee_schedule_id: None,
                 fee_schedule_version: None,
+                fee_order_class: None,
+                fee_schedule_evidence: None,
             });
             remaining -= quantity;
         }
@@ -1321,7 +1556,9 @@ fn open_ledger(path: &PathBuf) -> anyhow::Result<Connection> {
              taker_rate REAL NOT NULL,
              event_cursor INTEGER NOT NULL REFERENCES financial_evidence_events(source_cursor),
              PRIMARY KEY(fee_schedule_id, fee_schedule_version, symbol)
-         );",
+         );
+         CREATE INDEX IF NOT EXISTS financial_fee_schedules_effective_lookup
+             ON financial_fee_schedules(symbol, effective_from_utc_ms, effective_to_utc_ms, event_cursor);",
     )?;
     let mut columns = connection.prepare("PRAGMA table_info(match_requests)")?;
     let mut rows = columns.query([])?;
@@ -1507,7 +1744,7 @@ fn ensure_simulator_fee_schedule(
     effective_from_utc_ms: u64,
     request_cursor: i64,
     config: &SimulatorFeeScheduleConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<FinancialEvidenceEvent> {
     let Some((_, _quote_currency)) = symbol.rsplit_once('-') else {
         anyhow::bail!("symbol has no quote currency for fee schedule attribution");
     };
@@ -1521,7 +1758,16 @@ fn ensure_simulator_fee_schedule(
         .optional()?;
     if let Some((maker_rate, taker_rate)) = existing_rates {
         if maker_rate == config.maker_rate && taker_rate == config.taker_rate {
-            return Ok(());
+            let event_id = format!(
+                "paper-fee-schedule:{}:{}:{symbol}",
+                config.fee_schedule_id, config.fee_schedule_version
+            );
+            let event_json: String = transaction.query_row(
+                "SELECT event_json FROM financial_evidence_events WHERE event_id = ?1",
+                [event_id],
+                |row| row.get(0),
+            )?;
+            return Ok(serde_json::from_str(&event_json)?);
         }
         anyhow::bail!("configured fee schedule version was reused with changed rates");
     }
@@ -1552,7 +1798,7 @@ fn ensure_simulator_fee_schedule(
     };
     validate_financial_evidence(&event).map_err(anyhow::Error::msg)?;
     insert_financial_evidence_transaction(transaction, &event)?;
-    Ok(())
+    Ok(event)
 }
 
 fn commit_match(
@@ -1622,15 +1868,17 @@ fn commit_match_with_config(
         ],
     )?;
     let request_cursor = transaction.last_insert_rowid();
-    if let Some(config) = &fee_schedule_config {
-        ensure_simulator_fee_schedule(
+    let fee_schedule_evidence = if let Some(config) = &fee_schedule_config {
+        Some(ensure_simulator_fee_schedule(
             &transaction,
             &request.symbol,
             recorded_at_utc_ms,
             request_cursor,
             config,
-        )?;
-    }
+        )?)
+    } else {
+        None
+    };
     response.order_id = Some(order_id.to_owned());
     response.parent_order_id = request.parent_order_id.clone();
     response.source_epoch = Some(ledger_source_epoch(&transaction)?);
@@ -1694,6 +1942,12 @@ fn commit_match_with_config(
                 fill.fee_currency = Some(quote_currency.to_owned());
                 fill.fee_schedule_id = Some(config.fee_schedule_id.clone());
                 fill.fee_schedule_version = Some(config.fee_schedule_version.clone());
+                fill.fee_order_class = Some(if execution_origin == "resting_limit" {
+                    "maker".to_owned()
+                } else {
+                    "taker".to_owned()
+                });
+                fill.fee_schedule_evidence = fee_schedule_evidence.clone();
                 let execution_event = FinancialEvidenceEvent {
                     schema_version: FINANCIAL_EVIDENCE_SCHEMA_VERSION.to_owned(),
                     event_id: format!("paper-settlement:{execution_id}"),
@@ -1875,6 +2129,10 @@ fn router_with_path(market: Arc<MarketData>, ledger_path: PathBuf) -> Router {
             "/internal/financial/evidence",
             post(append_financial_evidence).get(financial_evidence_history),
         )
+        .route(
+            "/internal/financial/fee-schedules",
+            get(effective_fee_schedules),
+        )
         .with_state(state)
 }
 
@@ -1901,6 +2159,9 @@ mod tests {
                 },
             ],
             updated_at_ms: 1,
+            source_epoch: None,
+            source_cursor: None,
+            source_record_id: None,
         }
     }
 
@@ -1958,6 +2219,71 @@ mod tests {
                 taker_rate: 0.002,
             },
         )
+    }
+
+    #[test]
+    fn effective_fee_schedule_lookup_is_bounded_and_fails_closed_for_overlap() {
+        let path = temp_db("effective-fee-schedule");
+        append_financial_evidence_sync(&path, &fixture_fee_schedule()).unwrap();
+        let mut db = open_ledger(&path).unwrap();
+        let tx = db.transaction().unwrap();
+        for cursor in 2..=5_001_u64 {
+            tx.execute(
+                "INSERT INTO financial_evidence_events(event_id,event_type,source_system,source_epoch,
+                     provider_cursor,source_record_id,source_timestamp_utc_ms,event_json)
+                 VALUES(?1,'unrelated_fixture','paper-account-provider-fixture','provider-epoch-fixture',?2,?3,1001,'{}')",
+                rusqlite::params![format!("unrelated-{cursor}"), i64::try_from(cursor).unwrap(), format!("unrelated-record-{cursor}")],
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+        let matched =
+            effective_fee_schedule_snapshot(&path, &["BTC-USDT".into(), "ETH-USDT".into()], 1_500)
+                .unwrap();
+        assert_eq!(matched.observed_max_cursor, 5_001);
+        assert_eq!(
+            matched.schedules.len(),
+            2,
+            "a single batch lookup returns every requested symbol"
+        );
+        assert_eq!(matched.schedules[0].status, "matched");
+        assert_eq!(
+            matched.schedules[0].fee_schedule_id.as_deref(),
+            Some("account-fees")
+        );
+        assert_eq!(matched.schedules[0].source_cursor, Some(1));
+        assert_eq!(
+            matched.schedules[0].source_record_id.as_deref(),
+            Some("provider-record-1")
+        );
+        assert_eq!(matched.schedules[1].status, "missing");
+
+        let missing = effective_fee_schedule_snapshot(&path, &["BTC-USDT".into()], 10_000).unwrap();
+        assert_eq!(missing.schedules[0].status, "missing");
+
+        append_financial_evidence_sync(
+            &path,
+            &financial_event(
+                "overlapping-fee-schedule",
+                2,
+                FinancialEvidencePayload::FeeSchedule {
+                    fee_schedule_id: "second-fees".into(),
+                    fee_schedule_version: "v2".into(),
+                    symbol: "BTC-USDT".into(),
+                    effective_from_utc_ms: 1_400,
+                    effective_to_utc_ms: None,
+                    maker_rate: 0.0,
+                    taker_rate: 0.003,
+                },
+            ),
+        )
+        .unwrap();
+        let ambiguous =
+            effective_fee_schedule_snapshot(&path, &["BTC-USDT".into()], 1_500).unwrap();
+        assert_eq!(ambiguous.schedules[0].status, "ambiguous");
+        let _ = std::fs::remove_file(&path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 
     fn fixture_settled_fill() -> FinancialEvidenceEvent {
@@ -2174,32 +2500,28 @@ mod tests {
         assert!(second.page_complete);
         assert!(second.history_complete);
         assert!(second.current_history_complete);
-        assert!(second
-            .events
-            .iter()
-            .all(|event| event.source_cursor <= pinned_cursor));
-        assert!(!second
-            .events
-            .iter()
-            .any(|event| event.event.event_id == appended.event_id));
+        assert!(
+            second
+                .events
+                .iter()
+                .all(|event| event.source_cursor <= pinned_cursor)
+        );
+        assert!(
+            !second
+                .events
+                .iter()
+                .any(|event| event.event.event_id == appended.event_id)
+        );
 
         assert!(read_financial_evidence_page(&path, 0, 2, Some(6), Some(&pinned_epoch)).is_err());
-        assert!(read_financial_evidence_page(
-            &path,
-            5,
-            2,
-            Some(pinned_cursor),
-            Some(&pinned_epoch)
-        )
-        .is_err());
-        assert!(read_financial_evidence_page(
-            &path,
-            0,
-            2,
-            Some(pinned_cursor),
-            Some("wrong-epoch")
-        )
-        .is_err());
+        assert!(
+            read_financial_evidence_page(&path, 5, 2, Some(pinned_cursor), Some(&pinned_epoch))
+                .is_err()
+        );
+        assert!(
+            read_financial_evidence_page(&path, 0, 2, Some(pinned_cursor), Some("wrong-epoch"))
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2285,6 +2607,26 @@ mod tests {
             response.fills[0].fee_schedule_version.as_deref(),
             Some("paper-config-v1")
         );
+        assert_eq!(response.fills[0].fee_order_class.as_deref(), Some("taker"));
+        let schedule = response.fills[0]
+            .fee_schedule_evidence
+            .as_ref()
+            .expect("settled fill carries the exact fee-schedule source event");
+        assert_eq!(
+            schedule.source_system,
+            "paper_exchange_simulator_configuration"
+        );
+        assert!(!schedule.source_epoch.trim().is_empty());
+        assert!(!schedule.source_record_id.trim().is_empty());
+        assert!(schedule.source_cursor > 0);
+        assert!(matches!(
+            &schedule.payload,
+            FinancialEvidencePayload::FeeSchedule {
+                fee_schedule_version,
+                taker_rate,
+                ..
+            } if fee_schedule_version == "paper-config-v1" && *taker_rate == 0.002
+        ));
         let page = read_financial_evidence_page(&path, 0, 20, None, None).unwrap();
         assert_eq!(page.events.len(), 3);
         assert_eq!(
@@ -2451,10 +2793,12 @@ mod tests {
         assert!(first.capture_complete);
         assert_eq!(first.capture_status, "durably_captured");
         assert_eq!(first.source_cursor_kind, "match_request");
-        assert!(first
-            .source_epoch
-            .as_ref()
-            .is_some_and(|epoch| epoch.len() == 32));
+        assert!(
+            first
+                .source_epoch
+                .as_ref()
+                .is_some_and(|epoch| epoch.len() == 32)
+        );
         assert!(first.fills.iter().all(|fill| {
             fill.source_execution_id.is_some()
                 && fill.source_cursor.is_some()
@@ -2474,13 +2818,15 @@ mod tests {
             serde_json::to_value(first).unwrap(),
             serde_json::to_value(replay).unwrap()
         );
-        assert!(lookup_committed_match(
-            &path,
-            "client-order-7",
-            &request_fingerprint(&request(Some("client-order-7"), 2.0)),
-            None,
-        )
-        .is_err());
+        assert!(
+            lookup_committed_match(
+                &path,
+                "client-order-7",
+                &request_fingerprint(&request(Some("client-order-7"), 2.0)),
+                None,
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2558,10 +2904,12 @@ mod tests {
         let snapshot_page = read_ledger_page_snapshot(&snapshot, 0, 10).unwrap();
         assert_eq!(snapshot_page.max_cursor, u64::try_from(high_water).unwrap());
         assert_eq!(snapshot_page.rows.len(), 1);
-        assert!(snapshot_page
-            .rows
-            .iter()
-            .all(|row| row.source_cursor <= snapshot_page.max_cursor));
+        assert!(
+            snapshot_page
+                .rows
+                .iter()
+                .all(|row| row.source_cursor <= snapshot_page.max_cursor)
+        );
         snapshot.commit().unwrap();
 
         let next_page = read_ledger_page(&path, snapshot_page.max_cursor, 10).unwrap();
@@ -2594,10 +2942,12 @@ mod tests {
         );
         assert!(!result.reconciliation_eligible);
         assert_eq!(result.source_epoch, None);
-        assert!(result
-            .fills
-            .iter()
-            .all(|fill| fill.source_execution_id.is_none()));
+        assert!(
+            result
+                .fills
+                .iter()
+                .all(|fill| fill.source_execution_id.is_none())
+        );
     }
 
     #[test]
@@ -2612,10 +2962,12 @@ mod tests {
             incomplete.capture_failure_reason.as_deref(),
             Some("durable_ledger_write_failed")
         );
-        assert!(incomplete
-            .fills
-            .iter()
-            .all(|fill| fill.source_cursor.is_none()));
+        assert!(
+            incomplete
+                .fills
+                .iter()
+                .all(|fill| fill.source_cursor.is_none())
+        );
     }
 
     #[test]

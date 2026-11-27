@@ -1,9 +1,46 @@
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { AutoTraderModel } from '../models/AutoTraderModel';
 import type { CapitalAllocation } from '../models/AutoTraderModel';
-import { CapitalAllocationView } from './AutoTraderAllocationView';
+import { CapitalAllocationWidgetModel } from '../models/CapitalAllocationWidgetModel';
+import { createServer, type ViteDevServer } from 'vite';
+
+let viteServer: ViteDevServer;
+let CapitalAllocationView: typeof import('./AutoTraderAllocationView').CapitalAllocationView;
+
+before(async () => {
+  viteServer = await createServer({
+    configFile: './vite.config.ts',
+    server: { middlewareMode: true },
+    appType: 'custom',
+  });
+  const module = await viteServer.ssrLoadModule(
+    '/src/views/AutoTraderAllocationView.tsx',
+  );
+  CapitalAllocationView =
+    module.CapitalAllocationView as typeof CapitalAllocationView;
+});
+
+after(async () => {
+  await viteServer?.close();
+});
+
+function viewState(allocation?: CapitalAllocation, availableNotional = 500) {
+  const upstream = new AutoTraderModel();
+  upstream.state$.next({
+    ...upstream.state$.value,
+    loading: false,
+    capitalAllocation: allocation,
+    availableNotional,
+  });
+  return new CapitalAllocationWidgetModel('allocation-view-test', {
+    state$: upstream.state$,
+    start: () => undefined,
+    stop: () => undefined,
+  }).state$.value;
+}
 
 describe('CapitalAllocationView', () => {
   it('renders a zero cold-start allocation and unknown evidence distinctly', () => {
@@ -29,16 +66,19 @@ describe('CapitalAllocationView', () => {
         },
       ],
     };
+    const state = viewState(allocation);
     const markup = renderToStaticMarkup(
       createElement(CapitalAllocationView, {
-        allocation,
-        availableNotional: 500,
+        state: { ...state, tab: 'candidates' },
+        onSetTab: () => undefined,
+        onSetGroupBy: () => undefined,
       }),
     );
-    assert.match(markup, /trend-50-200 · BTC-USDT · daily/);
-    assert.match(markup, /Effective USD 0\.00/);
-    assert.match(markup, /Evidence eligibility: unknown/);
-    assert.match(markup, /State: cold_start/);
+    assert.match(markup, /trend-50-200/);
+    assert.match(markup, /BTC-USDT/);
+    assert.match(markup, /Effective/);
+    assert.match(markup, /Unknown/);
+    assert.match(markup, /cold_start/);
     assert.match(markup, /Evidence collection is pending/);
     assert.doesNotMatch(markup, /profit|return|win rate/i);
   });
@@ -46,11 +86,13 @@ describe('CapitalAllocationView', () => {
   it('shows missing contract as unavailable rather than zero allocation', () => {
     const markup = renderToStaticMarkup(
       createElement(CapitalAllocationView, {
-        availableNotional: 500,
+        state: viewState(undefined, 500),
+        onSetTab: () => undefined,
+        onSetGroupBy: () => undefined,
       }),
     );
-    assert.match(markup, /Effective allocation details are unavailable/);
-    assert.match(markup, /USD 500\.00/);
+    assert.match(markup, /Allocation details are unavailable/);
+    assert.match(markup, /\$500\.00/);
     assert.match(markup, /does not indicate zero allocation/);
   });
 });

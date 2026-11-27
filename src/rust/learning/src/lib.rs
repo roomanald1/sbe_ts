@@ -136,6 +136,43 @@ struct StrategySummary {
     paired_scout_samples: usize,
     paired_scout_positive_rate: Option<f64>,
     average_paired_scout_lift_percent: Option<f64>,
+    evidence_funnel: ScoutEvidenceFunnel,
+}
+
+/// Read-only counts over retained Learning outcome rows. These fields do not
+/// claim that grouped observations are independent or promotion eligible.
+#[derive(Serialize)]
+struct ScoutEvidenceFunnel {
+    retained_rows_definition: &'static str,
+    group_definition: &'static str,
+    four_hour_cluster_definition: &'static str,
+    window_start_ms: u64,
+    retained_scout_outcome_rows: usize,
+    retained_paired_scout_rows: usize,
+    rows_with_explicit_evidence_group_id: usize,
+    rows_without_explicit_evidence_group_id: usize,
+    distinct_evidence_groups_by_symbol_strategy: usize,
+    distinct_paired_evidence_groups_by_symbol_strategy: usize,
+    groups_with_multiple_retained_rows: usize,
+    rows_in_groups_with_multiple_retained_rows: usize,
+    additional_rows_after_first_per_group: usize,
+    paired_rows_with_candidate_family_id: usize,
+    paired_rows_with_four_hour_cluster_id: usize,
+    distinct_symbol_four_hour_cluster_buckets: usize,
+    distinct_candidate_families: usize,
+    registered_variant_profile_attributed_rows: usize,
+    matching_exit_timing_observation_rows: usize,
+    trade_learning_outcome_rows: usize,
+    /// The retained outcome store has already accepted and bounded rows; it
+    /// does not retain rejected ingress events or stable source event IDs.
+    unique_source_event_rows: Option<usize>,
+    excluded_ingress_rows: Option<usize>,
+    /// Scout markouts do not contain an executable position lifecycle.
+    complete_executable_path_rows: Option<usize>,
+    cost_complete_executable_path_rows: Option<usize>,
+    exact_decision_profile_attributed_rows: Option<usize>,
+    training_rows: Option<usize>,
+    holdout_rows: Option<usize>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

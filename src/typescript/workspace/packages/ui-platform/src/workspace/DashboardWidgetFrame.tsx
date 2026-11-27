@@ -178,15 +178,17 @@ export function DashboardWidgetFrame(props: Props) {
           <span className="dashboard-widget-remove-icon" aria-hidden="true" />
         </button>
       </div>
-      {connected ? (
-        children
-      ) : (
-        <section className="feed-section" aria-label={description}>
-          <div className="book-popup-message">
-            Waiting for the market data connection.
-          </div>
-        </section>
-      )}
+      <div className="dashboard-widget-content">
+        {connected ? (
+          children
+        ) : (
+          <section className="feed-section" aria-label={description}>
+            <div className="book-popup-message">
+              Waiting for the market data connection.
+            </div>
+          </section>
+        )}
+      </div>
       {!widget.collapsed && (
         <>
           <div

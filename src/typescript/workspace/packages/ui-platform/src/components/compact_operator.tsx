@@ -44,6 +44,59 @@ export function SortableHeader({
   );
 }
 
+export type OperatorStackedSegment = {
+  id: string;
+  label: string;
+  value: string;
+  sharePercent: number;
+  tone: 'positive' | 'warning' | 'negative' | 'neutral';
+};
+
+/** Renders source-computed segment shares without deriving allocation values. */
+export function OperatorStackedBar({
+  label,
+  segments,
+}: {
+  label: string;
+  segments: readonly OperatorStackedSegment[];
+}) {
+  const reported = segments.filter(
+    (segment) =>
+      Number.isFinite(segment.sharePercent) && segment.sharePercent > 0,
+  );
+  return (
+    <div
+      className="operator-stacked-bar"
+      role="img"
+      aria-label={
+        reported.length
+          ? label +
+            ': ' +
+            reported
+              .map((segment) => `${segment.label} ${segment.value}`)
+              .join(', ')
+          : label + ': unavailable'
+      }
+    >
+      {reported.length ? (
+        reported.map((segment) => (
+          <span
+            key={segment.id}
+            className="operator-stacked-bar__segment"
+            data-tone={segment.tone}
+            style={{
+              width: `${Math.max(0, Math.min(100, segment.sharePercent))}%`,
+            }}
+            title={`${segment.label}: ${segment.value}`}
+          />
+        ))
+      ) : (
+        <span className="operator-stacked-bar__empty" />
+      )}
+    </div>
+  );
+}
+
 export type NetPnlMarker = {
   label: string;
   value: number;
@@ -56,12 +109,14 @@ export function InlineNetPnlBar({
   min = -1,
   max = 1,
   breakevenAt,
+  breakevenLabel = 'Net breakeven unavailable',
   currentLabel = 'Close now unavailable',
 }: {
   markers: readonly NetPnlMarker[];
   min?: number;
   max?: number;
   breakevenAt?: number;
+  breakevenLabel?: string;
   currentLabel?: string;
 }) {
   const position = (value: number) =>
@@ -70,7 +125,7 @@ export function InlineNetPnlBar({
     <div className="operator-net-pnl" aria-label={currentLabel}>
       <div className="operator-net-pnl__labels">
         <span>{currentLabel}</span>
-        <span>Net breakeven unavailable</span>
+        <span>{breakevenLabel}</span>
       </div>
       <div
         className="operator-net-pnl__track"

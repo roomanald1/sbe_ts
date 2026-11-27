@@ -55,7 +55,7 @@ function cycle(candidateDetails: FunnelCycle['candidateDetails']): FunnelCycle {
 }
 
 describe('DecisionFunnelPanel', () => {
-  it('renders explicit classification, measured gate values and stable identities', () => {
+  it('renders a compact per-cycle funnel with explicit denominator and attribution limits', () => {
     const markup = renderToStaticMarkup(
       createElement(DecisionFunnelPanel, {
         nowMs: 1_800_000_000_000,
@@ -105,24 +105,25 @@ describe('DecisionFunnelPanel', () => {
         ],
       }),
     );
-    assert.match(markup, /Decision funnel diagnostics/);
+    assert.match(markup, /Decision funnel/);
     assert.match(
       markup,
-      /Showing 1 of 1 cycle reports returned by API \(view cap 35\); server history completeness is unknown/,
+      /1 retained cycle reports; server history completeness is unknown/,
     );
-    assert.match(markup, /candidate detail records: 2/);
     assert.match(markup, /partial; 2 retained of 3 observed; truncated/);
-    assert.match(markup, /BTC-USDT \/ trend-50-200/);
-    assert.match(markup, /exploratory: 1/);
-    assert.match(markup, /Strict eligibility/);
-    assert.match(markup, /Fresh directional before final gates/);
-    assert.match(markup, /decision decision-7 · cycle cycle-42/);
+    assert.match(markup, /Raw signals[\s\S]*?2/);
+    assert.match(markup, /Eligible[\s\S]*?2/);
+    assert.match(markup, /Conversion[\s\S]*?denominator not defined/);
+    assert.match(markup, /Cycle-level blocker[\s\S]*?capital unavailable/);
+    assert.doesNotMatch(markup, /<th[^>]*>cycle-42<\/th>/);
+    assert.match(markup, /Cycle identity<\/dt><dd>cycle-42/);
+    assert.match(markup, /BTC-USDT · trend-50-200/);
     assert.match(markup, /observed 3 bps &gt;= 5 bps · failed/);
     assert.match(markup, /Reported reasons \(unordered\)/);
-    assert.match(markup, /Unknown/);
     assert.match(markup, /Filter by cycle/);
     assert.match(markup, /Group candidates by/);
-    assert.doesNotMatch(markup, /strict eligibility: Eligible/);
+    assert.match(markup, /Failed measurement · net_edge/);
+    assert.match(markup, /One candidate may contribute multiple records/);
   });
 
   it('distinguishes no reports from a report with zero candidate details', () => {
@@ -135,16 +136,76 @@ describe('DecisionFunnelPanel', () => {
     const unavailable = renderToStaticMarkup(
       createElement(DecisionFunnelPanel, { cycles: [] }),
     );
-    assert.match(zeroRows, /No candidate detail records are available/);
-    assert.match(unavailable, /no entry-cycle reports were received/);
-    assert.match(
-      zeroRows,
-      /Showing 1 of 1 cycle reports returned by API \(view cap 35\); server history completeness is unknown/,
+    assert.match(zeroRows, /No candidate detail rows for these filters/);
+    assert.match(zeroRows, /Raw signals[\s\S]*?2/);
+    assert.match(unavailable, /No entry-cycle report is available/);
+    assert.match(unavailable, /Directional[\s\S]*?—/);
+    assert.match(unavailable, /server history completeness is unknown/);
+  });
+
+  it('shows strict or exploratory classification coverage without treating unknowns as failures', () => {
+    const markup = renderToStaticMarkup(
+      createElement(DecisionFunnelPanel, {
+        initialTab: 'heatmap',
+        nowMs: 1_800_000_000_000,
+        cycles: [
+          cycle([
+            {
+              decisionId: 'decision-a',
+              workerEventId: 'event-a',
+              symbol: 'BTC-USDT',
+              strategy: 'momentum',
+              stage: 'selected',
+              observed: {},
+              required: {},
+              checks: {},
+              evidenceContract: null,
+              reasons: [],
+              selectionMode: 'strict',
+              strictEligibility: true,
+              exploratoryEligibility: false,
+            },
+            {
+              decisionId: 'decision-b',
+              symbol: 'BTC-USDT',
+              strategy: 'momentum',
+              stage: 'rejected',
+              observed: {},
+              required: {},
+              checks: {},
+              evidenceContract: null,
+              reasons: [],
+              selectionMode: null,
+              strictEligibility: false,
+              exploratoryEligibility: null,
+            },
+            {
+              decisionId: 'decision-c',
+              symbol: 'ETH-USDT',
+              strategy: 'momentum',
+              stage: 'rejected',
+              observed: {},
+              required: {},
+              checks: {},
+              evidenceContract: null,
+              reasons: [],
+              selectionMode: null,
+              strictEligibility: null,
+              exploratoryEligibility: null,
+            },
+          ]),
+        ],
+      }),
     );
     assert.match(
-      unavailable,
-      /Showing 0 of 0 cycle reports returned by API \(view cap 35\); server history completeness is unknown/,
+      markup,
+      /aria-label="Symbol and strategy eligibility heatmap"/,
     );
+    assert.match(markup, /50% · 1\/2/);
+    assert.match(markup, /data-eligibility="unknown"/);
+    assert.match(markup, /Unknown classifications are excluded/);
+    assert.match(markup, /Exploratory/);
+    assert.doesNotMatch(markup, /100% · 1\/1/);
   });
 
   it('keeps repeated worker-event candidate rows renderable without duplicate React keys', () => {

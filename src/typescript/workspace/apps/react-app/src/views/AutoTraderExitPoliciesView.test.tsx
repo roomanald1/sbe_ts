@@ -728,9 +728,10 @@ describe('AutoTrader global controls and fallback summary', () => {
           stopLossPercent: 0.5,
           takeProfitPercent: 0.8,
         },
+        onViewLearnedPolicies() {},
       }),
     );
-    assert.match(html, /Effective global trading limits/);
+    assert.match(html, /Global risk limits/);
     assert.match(html, /Daily loss limit/);
     assert.doesNotMatch(html, /Stop loss|Take profit|0\.50%|0\.80%/);
   });

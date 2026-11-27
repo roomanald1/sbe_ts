@@ -1,6 +1,6 @@
 # v35 Trading UI View Plan
 
-> **Superseded:** the eight-widget requirements and profile-owned exit-policy extension below are incorporated into the authoritative [v35 Trading Improvements master plan](../src/rust/auto_trader/TRADING_IMPROVEMENTS.MD), Section 15. Use that master plan for current behavior, implementation order and acceptance. The permanent visual targets are the PNGs and matching HTML references in [research/v35-ui-mocks/](./v35-ui-mocks/), indexed in [START_HERE.md](./v35-ui-mocks/START_HERE.md) and mapped in master-plan UI 4.0. In particular, Orders & Positions must be visually reviewed against [03-positions.png](./v35-ui-mocks/03-positions.png) and [03b-closed.png](./v35-ui-mocks/03b-closed.png); automated tests and the previous redesign do not establish operator visual acceptance. This file remains aligned source context and must not be maintained as a competing specification.
+> **Superseded:** the eight-widget requirements and profile-owned exit-policy extension below are incorporated into the authoritative [v35 Trading Improvements master plan](../src/rust/auto_trader/TRADING_IMPROVEMENTS.MD), Section 15. Use that master plan for current behavior, implementation order and acceptance. The permanent visual targets are the PNGs and matching HTML references in [research/v35-ui-mocks/](./v35-ui-mocks/), indexed in [START_HERE.md](./v35-ui-mocks/START_HERE.md) and mapped in master-plan UI 4.0. In particular, Orders & Positions must be visually reviewed against [03-positions.png](./v35-ui-mocks/03-positions.png) and [03b-closed.png](./v35-ui-mocks/03b-closed.png); automated tests and the previous redesign do not establish operator visual acceptance. User clarification on 2026-11-27 supersedes saved-layout migration language below: do not migrate or rewrite saved dashboard views/layouts. This file remains aligned source context and must not be maintained as a competing specification.
 
 ## Goal
 
@@ -250,15 +250,12 @@ and widget rendering is in
 
 | Portfolio hedging and dated futures carry | **Outside v35 operator minimum; defer** | Retain in the broader app unless a confirmed v35 operator workflow depends on them. |
 
-Retirement means removing the widget from the v35 operator catalog/layout, not
-
-deleting shared backend research data. If persisted layouts reference retired
-
-types, provide a migration or clear unavailable-widget handling before removal.
-
-Usage evidence can guide migration timing; it does not decide whether a view is
-
-needed for v35.
+Retirement means removing a widget from the add-widget catalog, not deleting
+shared backend research data or rewriting saved views. Preserve any saved view
+that references a retired type exactly as stored; render a non-destructive
+unavailable-widget state (or minimal compatibility renderer) until the operator
+manually replaces or removes that widget. Usage evidence can inform sequencing,
+but does not authorize automatic migration.
 
 ## Delivery order and acceptance
 
@@ -288,11 +285,13 @@ needed for v35.
 
    insufficient-evidence states.
 
-6. **Consolidate redundant widgets:** migrate persisted layouts, remove redundant
+6. **Consolidate redundant widgets:** preserve saved views without migration,
 
-   v35 catalog entries and verify safety, diagnostics and evidence tasks remain
+   remove redundant v35 catalog entries only after replacements and all data
 
-   possible with the required widgets alone.
+   consumers are verified, and keep v35 safety/diagnostics/evidence workflows
+
+   usable through non-destructive handling of retired widget types.
 
 Acceptance also requires rendered-browser checks of independent widget instances, resizing, persisted configuration, exact drill-down populations, Scout/AutoTrader separation, shared detail components and bounded hidden-widget requests.
 

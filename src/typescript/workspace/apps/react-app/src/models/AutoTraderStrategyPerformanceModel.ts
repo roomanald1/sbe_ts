@@ -1,5 +1,8 @@
 import { BehaviorSubject, Subscription } from 'rxjs';
-import type { AutoTraderModel } from './AutoTraderModel';
+import type {
+  AutoTraderModel,
+  AutoTraderStrategyProfile,
+} from './AutoTraderModel';
 import type { AutoTraderOutcomesModel } from './AutoTraderOutcomesModel';
 import type { AutoTraderScoutModel } from './AutoTraderScoutModel';
 import type { AutoTraderOutcome } from './AutoTraderOutcomesModel';
@@ -55,6 +58,49 @@ export function summarizeStrategyOutcomeEvidence(
   return summary;
 }
 
+export type WalkForwardProfileRow = {
+  id: string;
+  symbol: string;
+  strategy: string;
+  samples: number | null;
+  winRate: number | null;
+  averageNet: number | null;
+  expectancyCiLowPercent: number | null;
+  expectancyCiHighPercent: number | null;
+  effectiveSamples: number | null;
+  windows: number | null;
+  maxDrawdown: number | null;
+  meanDownside: number | null;
+  lastSampleTimestampMs: number | null;
+};
+
+/**
+ * Keeps walk-forward values source-backed and gives the table an independently
+ * testable row projection. Missing profile evidence remains unavailable.
+ */
+export function projectWalkForwardProfileRows(
+  profiles: readonly AutoTraderStrategyProfile[],
+): WalkForwardProfileRow[] {
+  return profiles.map((profile) => {
+    const evidence = profile.walk_forward_evidence;
+    return {
+      id: `${profile.symbol}:${profile.strategy}`,
+      symbol: profile.symbol,
+      strategy: profile.strategy,
+      samples: evidence?.sampleCount ?? null,
+      winRate: evidence?.positiveNetRate ?? null,
+      averageNet: evidence?.averageNetReturnPercent ?? null,
+      expectancyCiLowPercent: evidence?.expectancyCiLowPercent ?? null,
+      expectancyCiHighPercent: evidence?.expectancyCiHighPercent ?? null,
+      effectiveSamples: evidence?.effectiveSampleSize ?? null,
+      windows: evidence?.windowCount ?? null,
+      maxDrawdown: evidence?.maxDrawdownPercent ?? null,
+      meanDownside: evidence?.downsideLossPercent ?? null,
+      lastSampleTimestampMs: evidence?.lastSampleTimestampMs ?? null,
+    };
+  });
+}
+
 export type StrategyPerformanceColumnGroup =
   | 'performance'
   | 'entryEvidence'
@@ -62,6 +108,248 @@ export type StrategyPerformanceColumnGroup =
   | 'status'
   | 'profile'
   | 'learning';
+
+export type StrategyPerformanceView =
+  | 'performance'
+  | 'heatmap'
+  | 'history'
+  | 'exit-policies';
+export type StrategyPerformanceSource = 'autotrader' | 'scouts';
+
+export type ScoutOutcomeCountRow = {
+  strategy: string;
+  outcomes: number;
+  positiveOutcomes: number;
+};
+
+export function projectScoutOutcomeCounts(
+  rows: readonly { strategy: string; count: number; positive: number }[],
+): ScoutOutcomeCountRow[] {
+  return rows
+    .filter((row) => Number.isFinite(row.count) && row.count >= 0)
+    .map((row) => ({
+      strategy: row.strategy,
+      outcomes: row.count,
+      positiveOutcomes: Number.isFinite(row.positive) ? row.positive : 0,
+    }))
+    .sort((a, b) => a.strategy.localeCompare(b.strategy));
+}
+
+export type StrategyOutcomeCoverageRow = {
+  strategy: string;
+  symbol: string;
+  closedAuditRows: number;
+  strictRows: number;
+  exploratoryRows: number;
+  scoutRows: number;
+  carryRows: number;
+  unknownRows: number;
+  latestClosedAt: number | null;
+};
+
+export type StrategyCoverageHeatmap = {
+  symbols: string[];
+  rows: Array<{
+    strategy: string;
+    cells: Array<{
+      symbol: string;
+      closedAuditRows: number;
+      intensity: number;
+    }>;
+  }>;
+};
+
+export type StrategyOutcomeHistoryRow = {
+  rowId: string;
+  symbol: string;
+  strategy: string;
+  source: string;
+  closedAt: number | null;
+  entryProfileId: string | null;
+  entryProfileVersion: number | null;
+};
+
+export type ExitProfileSnapshotRow = {
+  symbol: string;
+  strategy: string;
+  profile: string | null;
+  parameters: Array<{ label: string; value: number | null; unit: string }>;
+  effectiveSamples: number | null;
+  validation: 'validated' | 'not-validated' | 'unavailable';
+};
+
+/** Groups audit-derived outcomes by strategy and symbol without interpreting
+ * their financial fields as independently reconciled performance. */
+export function projectStrategyOutcomeCoverage(
+  rows: readonly AutoTraderOutcome[],
+): StrategyOutcomeCoverageRow[] {
+  const grouped = new Map<string, StrategyOutcomeCoverageRow>();
+  for (const row of rows) {
+    if (row.status !== 'Closed') continue;
+    const strategy = row.strategy || 'Unattributed';
+    const symbol = row.symbol || 'Unattributed';
+    const key = `${strategy}\u0000${symbol}`;
+    const result = grouped.get(key) ?? {
+      strategy,
+      symbol,
+      closedAuditRows: 0,
+      strictRows: 0,
+      exploratoryRows: 0,
+      scoutRows: 0,
+      carryRows: 0,
+      unknownRows: 0,
+      latestClosedAt: null,
+    };
+    result.closedAuditRows += 1;
+    switch (row.source) {
+      case 'strict':
+        result.strictRows += 1;
+        break;
+      case 'exploratory':
+        result.exploratoryRows += 1;
+        break;
+      case 'scout':
+        result.scoutRows += 1;
+        break;
+      case 'paper-carry':
+        result.carryRows += 1;
+        break;
+      default:
+        result.unknownRows += 1;
+    }
+    if (typeof row.closedAt === 'number' && Number.isFinite(row.closedAt)) {
+      result.latestClosedAt = Math.max(
+        result.latestClosedAt ?? 0,
+        row.closedAt,
+      );
+    }
+    grouped.set(key, result);
+  }
+  return [...grouped.values()].sort(
+    (a, b) =>
+      a.strategy.localeCompare(b.strategy) || a.symbol.localeCompare(b.symbol),
+  );
+}
+
+export function isValidatedWalkForwardProfile(
+  evidence: AutoTraderStrategyProfile['walk_forward_evidence'],
+): boolean | null {
+  if (!evidence) return null;
+  if (evidence.finalHoldoutStatus !== 'validated') return false;
+  if (
+    evidence.historyCoverage !== 'complete' ||
+    evidence.costCoverage !== 'complete' ||
+    evidence.searchFamilyCoverage !== 'complete' ||
+    (evidence.oosFoldCount ?? 0) <= 0 ||
+    evidence.effectiveSampleSize === undefined ||
+    evidence.effectiveSampleSize === null ||
+    evidence.effectiveSampleSize <= 0
+  )
+    return false;
+  return true;
+}
+
+export function projectStrategyCoverageByStrategy(
+  rows: readonly StrategyOutcomeCoverageRow[],
+): Array<{ strategy: string; closedAuditRows: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows)
+    counts.set(
+      row.strategy,
+      (counts.get(row.strategy) ?? 0) + row.closedAuditRows,
+    );
+  return [...counts]
+    .map(([strategy, closedAuditRows]) => ({ strategy, closedAuditRows }))
+    .sort((a, b) => a.strategy.localeCompare(b.strategy));
+}
+
+export function projectStrategyCoverageHeatmap(
+  rows: readonly StrategyOutcomeCoverageRow[],
+): StrategyCoverageHeatmap {
+  const symbols = [...new Set(rows.map((row) => row.symbol))].sort();
+  const strategies = [...new Set(rows.map((row) => row.strategy))].sort();
+  const counts = new Map(
+    rows.map((row) => [
+      `${row.strategy}\u0000${row.symbol}`,
+      row.closedAuditRows,
+    ]),
+  );
+  const maximum = Math.max(0, ...rows.map((row) => row.closedAuditRows));
+  return {
+    symbols,
+    rows: strategies.map((strategy) => ({
+      strategy,
+      cells: symbols.map((symbol) => {
+        const closedAuditRows = counts.get(`${strategy}\u0000${symbol}`) ?? 0;
+        return {
+          symbol,
+          closedAuditRows,
+          intensity:
+            maximum === 0 || closedAuditRows === 0
+              ? 0
+              : Math.max(1, Math.ceil((closedAuditRows / maximum) * 5)),
+        };
+      }),
+    })),
+  };
+}
+
+export function projectStrategyOutcomeHistory(
+  rows: readonly AutoTraderOutcome[],
+  limit = 50,
+): StrategyOutcomeHistoryRow[] {
+  return rows
+    .filter((row) => row.status === 'Closed')
+    .slice()
+    .sort((a, b) => (b.closedAt ?? 0) - (a.closedAt ?? 0))
+    .slice(0, Math.max(0, limit))
+    .map((row) => ({
+      rowId: row.rowId,
+      symbol: row.symbol,
+      strategy: row.strategy,
+      source: row.source,
+      closedAt:
+        typeof row.closedAt === 'number' && Number.isFinite(row.closedAt)
+          ? row.closedAt
+          : null,
+      entryProfileId: row.entryProfileId ?? null,
+      entryProfileVersion: row.entryProfileVersion ?? null,
+    }));
+}
+
+export function projectExitProfileSnapshot(
+  profiles: readonly AutoTraderStrategyProfile[],
+): ExitProfileSnapshotRow[] {
+  return profiles.map((profile) => {
+    const evidence = profile.walk_forward_evidence;
+    const validated = isValidatedWalkForwardProfile(evidence);
+    return {
+      symbol: profile.symbol,
+      strategy: profile.strategy,
+      profile: profile.profile_id
+        ? `${profile.profile_id}${profile.profile_version === undefined ? '' : ` · v${profile.profile_version}`}`
+        : null,
+      parameters: profile.parameters
+        .filter((parameter) =>
+          /stop|target|profit|hold|trailing|breakeven/i.test(
+            `${parameter.key} ${parameter.label}`,
+          ),
+        )
+        .map((parameter) => ({
+          label: parameter.label,
+          value: Number.isFinite(parameter.value) ? parameter.value : null,
+          unit: parameter.unit,
+        })),
+      effectiveSamples: evidence?.effectiveSampleSize ?? null,
+      validation:
+        validated === true
+          ? 'validated'
+          : validated === false
+            ? 'not-validated'
+            : 'unavailable',
+    };
+  });
+}
 
 export const STRATEGY_PERFORMANCE_COLUMN_GROUPS: Array<{
   id: StrategyPerformanceColumnGroup;
@@ -136,6 +424,8 @@ export type AutoTraderStrategyPerformanceState = {
   visibleColumnGroups: StrategyPerformanceColumnVisibility;
   expandedEntryStrategies: Set<string>;
   gridColumnStateJson: string | null;
+  view: StrategyPerformanceView;
+  sourceView: StrategyPerformanceSource;
   error?: string;
 };
 
@@ -195,6 +485,8 @@ export class AutoTraderStrategyPerformanceModel {
       visibleColumnGroups: this.readColumnGroups(),
       expandedEntryStrategies: new Set(),
       gridColumnStateJson: this.readGridState(),
+      view: 'performance',
+      sourceView: 'autotrader',
     });
   }
 
@@ -262,6 +554,16 @@ export class AutoTraderStrategyPerformanceModel {
       return;
     this.persist(this.hideDisabledKey, String(value));
     this.patch({ hideDisabledStrategies: value });
+  }
+
+  setView(view: StrategyPerformanceView): void {
+    if (this.disposed || this.state$.value.view === view) return;
+    this.patch({ view });
+  }
+
+  setSourceView(sourceView: StrategyPerformanceSource): void {
+    if (this.disposed || this.state$.value.sourceView === sourceView) return;
+    this.patch({ sourceView });
   }
 
   setColumnGroupVisible(

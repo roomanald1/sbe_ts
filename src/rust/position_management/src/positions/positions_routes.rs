@@ -146,6 +146,7 @@ fn position_router(store: Arc<PositionStore>) -> Router {
     Router::new()
         .route("/internal/persistence-timing", get(get_persistence_timing))
         .route("/positions", get(get_positions))
+        .route("/positions/operational", get(get_operational_positions))
         .route("/positions/realized-pnl", get(get_realized_pnl))
         .route("/positions/fee-summary", get(get_fee_summary))
         .route("/positions/financial-snapshot", get(get_financial_snapshot))
@@ -415,6 +416,12 @@ fn dated_carry_fill(
         paper_exchange_source_quantity: None,
         paper_exchange_source_price: None,
         paper_exchange_source_complete: None,
+        paper_exchange_fee_amount: None,
+        paper_exchange_fee_currency: None,
+        paper_exchange_fee_schedule_id: None,
+        paper_exchange_fee_schedule_version: None,
+        paper_exchange_fee_order_class: None,
+        paper_exchange_fee_schedule_evidence: None,
         symbol: symbol.to_owned(),
         side,
         quantity: position.quantity,
@@ -818,12 +825,14 @@ fn start_position_rsocket(
 
 #[cfg(test)]
 mod position_rsocket_contract_tests {
-    use super::{PositionRpcRequest, is_position_rpc_path};
+    use super::{is_position_rpc_path, PositionRpcRequest};
 
     #[test]
     fn accepts_only_position_management_rpc_routes() {
         for route in [
             "/positions?source=auto",
+            "/positions/operational?source=auto",
+            "/positions/portfolio-evidence/intervals?limit=10",
             "/positions/account",
             "/positions/trades?limit=100",
             "/account/topups",

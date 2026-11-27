@@ -1,6 +1,10 @@
 import { useEffect, useMemo } from 'react';
-import { useBehaviorSnapshot } from '@workspace/ui-platform';
-import { FeedToolbar } from './FeedToolbar';
+import {
+  CompactTable,
+  OperatorMetricStrip,
+  OperatorTabBar,
+  useBehaviorSnapshot,
+} from '@workspace/ui-platform';
 import {
   financialSnapshotValue,
   PortfolioReconciliationWidgetModel,
@@ -10,8 +14,8 @@ import {
   visiblePortfolioIntervals,
 } from '../models/PortfolioReconciliationWidgetModel';
 
-function amount(value: unknown, currency = 'USD'): string {
-  return typeof value === 'number' && Number.isFinite(value)
+function amount(value: unknown, currency: string | null): string {
+  return typeof value === 'number' && Number.isFinite(value) && currency
     ? new Intl.NumberFormat(undefined, {
         style: 'currency',
         currency,
@@ -39,26 +43,7 @@ function statusLabel(
   return value.replaceAll('_', ' ');
 }
 
-const panelStyle = {
-  background: '#20252b',
-  border: '1px solid #3a424c',
-  borderRadius: 8,
-  padding: 12,
-  color: '#d7dde5',
-} as const;
 const mutedStyle = { color: '#9ba7b4', fontSize: 12 } as const;
-const tileStyle = {
-  background: '#29323c',
-  border: '1px solid #3a4652',
-  borderRadius: 6,
-  padding: '8px 10px',
-  minWidth: 130,
-} as const;
-const sectionStyle = {
-  borderTop: '1px solid #3a424c',
-  marginTop: 12,
-  paddingTop: 10,
-} as const;
 
 function badgeStyle(status: EvidenceStatus | string | null | undefined) {
   const normalized = status ?? 'unavailable';
@@ -95,22 +80,6 @@ function statusClass(
   )
     return 'is-warning';
   return 'is-unavailable';
-}
-
-function metric(label: string, value: string, detail?: string) {
-  return (
-    <div
-      className="position-total-card v35-operator-metric"
-      key={label}
-      style={tileStyle}
-    >
-      <span style={mutedStyle}>{label}</span>
-      <strong style={{ display: 'block', fontSize: 16, margin: '4px 0' }}>
-        {value}
-      </strong>
-      {detail && <small style={mutedStyle}>{detail}</small>}
-    </div>
-  );
 }
 
 function reportedReturnChart(intervals: PortfolioInterval[]) {
@@ -205,7 +174,7 @@ function intervalRow(interval: PortfolioInterval) {
       <td>
         {interval.netPnlUsd === null
           ? 'Unavailable'
-          : amount(interval.netPnlUsd)}
+          : amount(interval.netPnlUsd, 'USD')}
       </td>
       <td>
         <span
@@ -334,26 +303,23 @@ export function PortfolioReconciliationPanel({
   ) => void;
   onRefresh?: () => void;
 }) {
-  const tab = state.tab;
   const snapshot = state.snapshot;
   const account = financialSnapshotValue(snapshot, 'account');
   const ledgerCoverage = financialSnapshotValue(snapshot, 'ledger_coverage');
   const accountCurrency = financialSnapshotValue(account, 'currency');
   const currency =
-    typeof accountCurrency === 'string' ? accountCurrency : 'USD';
-  const latest = state.intervals.at(-1);
-  const cashBalances = currencyRows(latest?.raw.cash_balances_by_currency);
-  const contributions = currencyRows(
-    latest?.raw.external_contributions_by_currency,
-  );
-  const allocation = state.allocation;
-  const allocationRows = allocation?.rows ?? [];
+    typeof accountCurrency === 'string' && accountCurrency.trim()
+      ? accountCurrency
+      : null;
+  const initialCash = financialSnapshotValue(account, 'initial_cash');
   const cashValue = financialSnapshotValue(account, 'cash');
   const equityValue = financialSnapshotValue(account, 'equity');
   const realizedValue = financialSnapshotValue(account, 'realized_pnl');
   const unrealizedValue = financialSnapshotValue(account, 'unrealized_pnl');
   const paidFeesValue = financialSnapshotValue(account, 'fees_paid');
   const exitFeesValue = financialSnapshotValue(account, 'estimated_exit_fees');
+  const equityAvailable =
+    financialSnapshotValue(account, 'equity_available') === true;
   const snapshotCapturedAt = financialSnapshotValue(snapshot, 'captured_at_ms');
   const epoch = financialSnapshotValue(ledgerCoverage, 'ledger_evidence_epoch');
   const epochStatus = financialSnapshotValue(
@@ -370,430 +336,478 @@ export function PortfolioReconciliationPanel({
       : independent === false
         ? 'incomplete'
         : 'unavailable';
-  const allocationUtilization =
-    allocation &&
-    Number.isFinite(allocation.used) &&
-    Number.isFinite(allocation.reserved) &&
-    Number.isFinite(allocation.poolLimit) &&
-    allocation.poolLimit > 0
-      ? `${(((allocation.used + allocation.reserved) / allocation.poolLimit) * 100).toFixed(2)}%`
+  const latest = state.intervals.at(-1);
+  const openingBalances = new Map(
+    currencyRows(latest?.raw.opening_cash_balances_by_currency),
+  );
+  const closingBalances = new Map(
+    currencyRows(latest?.raw.cash_balances_by_currency),
+  );
+  const contributions = new Map(
+    currencyRows(latest?.raw.external_contributions_by_currency),
+  );
+  const openingUsdValues = new Map(
+    currencyRows(latest?.raw.opening_cash_value_usd_by_currency),
+  );
+  const closingUsdValues = new Map(
+    currencyRows(latest?.raw.closing_cash_value_usd_by_currency),
+  );
+  const openingFxRates = new Map(
+    currencyRows(latest?.raw.opening_fx_rates_usd_by_currency),
+  );
+  const closingFxRates = new Map(
+    currencyRows(latest?.raw.closing_fx_rates_usd_by_currency),
+  );
+  const openingFxTimestamps = new Map(
+    currencyRows(latest?.raw.opening_fx_rates_updated_at_by_currency),
+  );
+  const closingFxTimestamps = new Map(
+    currencyRows(latest?.raw.closing_fx_rates_updated_at_by_currency),
+  );
+  const currencyCodes = [
+    ...new Set([
+      ...openingBalances.keys(),
+      ...closingBalances.keys(),
+      ...contributions.keys(),
+    ]),
+  ].sort();
+  const completeCount = state.intervals.filter(
+    (interval) => interval.completeness === 'complete',
+  ).length;
+  const dataLabel = state.stale
+    ? 'Stale'
+    : state.dataStatus === 'available'
+      ? 'Available'
+      : state.dataStatus === 'partial'
+        ? 'Partial'
+        : state.dataStatus === 'loading'
+          ? 'Loading'
+          : 'Unavailable';
+  const latestReturn =
+    latest?.returnPercent === null || latest?.returnPercent === undefined
+      ? 'Unavailable'
+      : latest.returnPercent.toFixed(4) + '%';
+  const sourceDate = timestamp(state.refreshedAtMs);
+  const statusTone = statusClass(
+    state.stale
+      ? 'stale'
+      : state.dataStatus === 'available'
+        ? 'complete'
+        : state.dataStatus === 'partial'
+          ? 'provisional'
+          : 'unavailable',
+  );
+  const formatFxRate = (value: number | undefined) =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? new Intl.NumberFormat(undefined, {
+          maximumSignificantDigits: 8,
+        }).format(value)
       : 'Unavailable';
+  const amountFrom = (map: Map<string, number>, code: string) =>
+    map.has(code) ? amount(map.get(code), code) : 'Unavailable';
+  const usdValueFrom = (map: Map<string, number>, code: string) =>
+    map.has(code) ? amount(map.get(code), 'USD') : 'Unavailable';
+  const fxTimeFrom = (map: Map<string, number>, code: string) => {
+    const value = map.get(code);
+    return typeof value === 'number' && value > 0
+      ? timestamp(value)
+      : 'Unavailable';
+  };
+  const fxAge = (map: Map<string, number>, code: string) => {
+    const value = map.get(code);
+    return typeof value === 'number' &&
+      value > 0 &&
+      latest?.endMs !== null &&
+      latest?.endMs !== undefined
+      ? Math.max(0, latest.endMs - value).toLocaleString() + ' ms'
+      : 'Unavailable';
+  };
 
   return (
     <section
-      className="feed-section portfolio-reconciliation-widget v35-operator-card"
+      className="portfolio-reconciliation-widget operator-panel"
       aria-label="Portfolio and reconciliation"
-      style={panelStyle}
     >
-      <FeedToolbar title="Portfolio and reconciliation" />
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          margin: '8px 0',
-        }}
-      >
-        <span
-          className={`v35-operator-status ${statusClass(state.stale ? 'stale' : state.dataStatus === 'available' ? 'complete' : state.dataStatus === 'partial' ? 'provisional' : 'unavailable')}`}
-          style={badgeStyle(
-            state.stale
-              ? 'stale'
-              : state.dataStatus === 'available'
-                ? 'complete'
-                : state.dataStatus === 'partial'
-                  ? 'provisional'
-                  : 'unavailable',
-          )}
-        >
-          {state.stale
-            ? 'Showing stale evidence'
-            : `Data ${state.dataStatus.replaceAll('_', ' ')}`}
+      <div className="portfolio-widget-toolbar">
+        <span className={'portfolio-widget-state ' + statusTone}>
+          {dataLabel}
         </span>
-        {state.refreshedAtMs !== null && (
-          <span style={mutedStyle}>
-            Updated {timestamp(state.refreshedAtMs)}
-          </span>
-        )}
+        <span className="portfolio-widget-updated">As of {sourceDate}</span>
         <button
           type="button"
           onClick={onRefresh}
           disabled={!onRefresh || state.loading}
-          style={{ ...mutedStyle, marginLeft: 'auto' }}
+          aria-label="Refresh portfolio evidence"
         >
-          Refresh
+          {state.loading ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
+
+      <OperatorMetricStrip
+        label="Portfolio summary"
+        metrics={[
+          {
+            label: 'Equity',
+            value: equityAvailable
+              ? amount(equityValue, currency)
+              : 'Unavailable',
+          },
+          {
+            label: 'Cash',
+            value: amount(cashValue, currency),
+          },
+          {
+            label: 'Net realised',
+            value: amount(realizedValue, currency),
+            tone:
+              typeof realizedValue === 'number' && realizedValue > 0
+                ? 'positive'
+                : typeof realizedValue === 'number' && realizedValue < 0
+                  ? 'negative'
+                  : 'neutral',
+          },
+          {
+            label: 'Unrealised',
+            value: equityAvailable
+              ? amount(unrealizedValue, currency)
+              : 'Unavailable',
+            tone:
+              typeof unrealizedValue === 'number' && unrealizedValue > 0
+                ? 'positive'
+                : typeof unrealizedValue === 'number' && unrealizedValue < 0
+                  ? 'negative'
+                  : 'neutral',
+          },
+          {
+            label: 'Fees paid',
+            value: amount(paidFeesValue, currency),
+          },
+        ]}
+      />
+
+      <OperatorTabBar
+        label="Portfolio views"
+        selectedId={state.tab}
+        onSelect={(id) =>
+          onTabChange?.(id as PortfolioReconciliationState['tab'])
+        }
+        tabs={[
+          { id: 'summary', label: 'Overview' },
+          { id: 'balances', label: 'Balances' },
+          { id: 'intervals', label: 'Reconciliation' },
+        ]}
+      />
+
       {state.error && (
-        <div
-          className="positions-error"
-          role="alert"
-          style={badgeStyle('incomplete')}
-        >
+        <p className="portfolio-widget-message is-error" role="alert">
           {state.error}
-        </div>
+        </p>
       )}
       {state.intervalError && (
-        <div
-          className="positions-error"
-          role="status"
-          style={badgeStyle('provisional')}
-        >
+        <p className="portfolio-widget-message is-warning" role="status">
           {state.intervalError}
-        </div>
+        </p>
       )}
-      {state.loading && (
-        <p role="status">Loading authoritative portfolio evidence…</p>
+      {state.loading && !snapshot && (
+        <p className="portfolio-widget-message" role="status">
+          Loading portfolio evidence…
+        </p>
       )}
-      <p style={mutedStyle}>
-        Values below are sourced from the Position Management financial snapshot
-        and append-only portfolio intervals. Fees paid are already included in
-        ledger P&amp;L; estimated exit fees remain separate. No React-side
-        accounting is applied.
-      </p>
-      <nav
-        className="v35-operator-tabs"
-        aria-label="Portfolio views"
-        style={{
-          display: 'flex',
-          gap: 6,
-          borderBottom: '1px solid #3a424c',
-          paddingBottom: 8,
-        }}
-      >
-        <button
-          type="button"
-          aria-pressed={tab === 'summary'}
-          onClick={() => onTabChange?.('summary')}
-          style={
-            tab === 'summary'
-              ? { ...tileStyle, borderColor: '#8ca8c1' }
-              : {
-                  ...mutedStyle,
-                  background: 'transparent',
-                  border: '1px solid #3a424c',
-                  borderRadius: 5,
-                  padding: '6px 10px',
-                }
-          }
-        >
-          Summary
-        </button>
-        <button
-          type="button"
-          aria-pressed={tab === 'intervals'}
-          onClick={() => onTabChange?.('intervals')}
-          style={
-            tab === 'intervals'
-              ? { ...tileStyle, borderColor: '#8ca8c1' }
-              : {
-                  ...mutedStyle,
-                  background: 'transparent',
-                  border: '1px solid #3a424c',
-                  borderRadius: 5,
-                  padding: '6px 10px',
-                }
-          }
-        >
-          Intervals ({state.intervals.length})
-        </button>
-        <span
-          className={`v35-operator-status ${statusClass(independentStatus)}`}
-          style={{
-            ...badgeStyle(independentStatus),
-            marginLeft: 'auto',
-            alignSelf: 'center',
-          }}
-        >
-          Independent reconciliation:{' '}
-          {independent === true
-            ? 'complete'
-            : independent === false
-              ? 'not reconciled'
-              : 'unavailable'}
-        </span>
-      </nav>
-      <p style={{ ...mutedStyle, margin: '8px 0' }}>
-        Match probes are not settlements or fills. Independent evidence requires
-        authoritative execution and settlement records; matching PM projections
-        alone is insufficient.
-      </p>
-      {tab === 'summary' && (
-        <>
-          <div
-            className="positions-totals v35-operator-metrics"
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit,minmax(145px,1fr))',
-              gap: 7,
-              marginTop: 10,
-            }}
-          >
-            {metric(
-              'PM opening capital',
-              amount(financialSnapshotValue(account, 'initial_cash'), currency),
-              'Position Management account contract',
-            )}
-            {metric(
-              'Current cash',
-              amount(cashValue, currency),
-              'PM account snapshot',
-            )}
-            {metric(
-              'Current equity',
-              financialSnapshotValue(account, 'equity_available') === true
-                ? amount(equityValue, currency)
-                : 'Unavailable',
-              'Only when PM marks report equity available',
-            )}
-            {metric(
-              'Shared-pool available',
-              allocation ? amount(allocation.available) : 'Unavailable',
-              allocation
-                ? `Pool limit ${amount(allocation.poolLimit)}`
-                : 'Allocation contract unavailable',
-            )}
-            {metric(
-              'Reserved capital',
-              allocation ? amount(allocation.reserved) : 'Unavailable',
-              allocation
-                ? 'AutoTrader shared-pool reservations'
-                : 'Allocation contract unavailable',
-            )}
-            {metric(
-              'Deployed capital',
-              allocation ? amount(allocation.used) : 'Unavailable',
-              allocation
-                ? 'AutoTrader shared-pool usage'
-                : 'Allocation contract unavailable',
-            )}
-            {metric(
-              'Capital utilisation',
-              allocationUtilization,
-              allocation
-                ? `${allocationRows.length} strategy/symbol/horizon allocation rows`
-                : 'Allocation contract unavailable',
-            )}
-            {metric(
-              'Realised P&L',
-              amount(realizedValue, currency),
-              'PM ledger projection; fees already reflected',
-            )}
-            {metric(
-              'Unrealised P&L',
-              financialSnapshotValue(account, 'equity_available') === true
-                ? amount(unrealizedValue, currency)
-                : 'Unavailable',
-              'PM ledger projection',
-            )}
-            {metric(
-              'Fees paid',
-              amount(paidFeesValue, currency),
-              'Already reflected in PM ledger P&L',
-            )}
-            {metric(
-              'Estimated exit fees',
-              financialSnapshotValue(account, 'equity_available') === true
-                ? amount(exitFeesValue, currency)
-                : 'Unavailable',
-              'Estimated; not yet paid',
-            )}
-            {metric(
-              'Current drawdown',
-              'Unavailable',
-              'No authoritative drawdown series in the supplied contract',
-            )}
-            {metric(
-              'Maximum drawdown',
-              'Unavailable',
-              'No authoritative drawdown series in the supplied contract',
-            )}
-          </div>
 
+      {state.tab === 'summary' && (
+        <div className="portfolio-overview">
           <section
-            aria-label="Portfolio currency balances"
-            style={sectionStyle}
+            className="portfolio-overview-chart"
+            aria-label="Portfolio interval return history"
           >
-            <h3 style={{ margin: '0 0 5px', fontSize: 14 }}>
-              Cash by currency
-            </h3>
-            {cashBalances.length ? (
-              <ul>
-                {cashBalances.map(([code, value]) => (
-                  <li key={code}>
-                    {code}: {amount(value, code)}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p>Per-currency interval cash balances unavailable.</p>
-            )}
-            <h3 style={{ margin: '10px 0 5px', fontSize: 14 }}>
-              External contributions and withdrawals
-            </h3>
-            {contributions.length ? (
-              <ul>
-                {contributions.map(([code, value]) => (
-                  <li key={code}>
-                    {code}: {amount(value, code)}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p>
-                Contribution totals unavailable; trade cashflows are not treated
-                as contributions.
-              </p>
-            )}
+            <header>
+              <strong>Contribution-adjusted interval return</strong>
+              <span>Last 40 complete intervals</span>
+            </header>
+            {reportedReturnChart(state.intervals)}
           </section>
 
-          <section aria-label="Portfolio evidence status" style={sectionStyle}>
-            <h3 style={{ margin: '0 0 6px', fontSize: 14 }}>
-              Evidence and reconciliation
-            </h3>
-            <dl
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))',
-                gap: '5px 14px',
-                ...mutedStyle,
-              }}
-            >
+          <section
+            className="portfolio-pnl-attribution"
+            aria-label="Portfolio P&L attribution"
+          >
+            <header>
+              <strong>Realised attribution</strong>
+              <span>PM ledger values</span>
+            </header>
+            <dl>
               <div>
-                <dt>Snapshot</dt>
-                <dd>{timestamp(snapshotCapturedAt)}</dd>
+                <dt>Net realised</dt>
+                <dd>{amount(realizedValue, currency)}</dd>
               </div>
               <div>
-                <dt>Financial evidence epoch</dt>
+                <dt>Gross winning outcomes</dt>
+                <dd>Unavailable</dd>
+              </div>
+              <div>
+                <dt>Gross losing outcomes</dt>
+                <dd>Unavailable</dd>
+              </div>
+              <div>
+                <dt>Fees paid</dt>
+                <dd>{amount(paidFeesValue, currency)}</dd>
+              </div>
+              <div>
+                <dt>Unrealised</dt>
                 <dd>
-                  {String(epoch ?? 'Unavailable')} ·{' '}
-                  {String(epochStatus ?? 'Unavailable')}
+                  {equityAvailable
+                    ? amount(unrealizedValue, currency)
+                    : 'Unavailable'}
                 </dd>
               </div>
               <div>
-                <dt>PM interval coverage</dt>
+                <dt>Estimated exit fees</dt>
                 <dd>
-                  {state.intervalCoverage ?? 'Unavailable'}
-                  {state.truncated === true ? ' (truncated)' : ''}
-                </dd>
-              </div>
-              <div>
-                <dt>Independent execution comparison</dt>
-                <dd>
-                  {independent === true
-                    ? 'Complete'
-                    : independent === false
-                      ? 'Not reconciled'
-                      : 'Unavailable'}
-                </dd>
-              </div>
-              <div>
-                <dt>Independent matched / unmatched records</dt>
-                <dd>Unavailable in the PM snapshot contract</dd>
-              </div>
-              <div>
-                <dt>Intervals returned</dt>
-                <dd>{state.intervals.length}</dd>
-              </div>
-              <div>
-                <dt>Complete intervals</dt>
-                <dd>
-                  {
-                    state.intervals.filter(
-                      (item) => item.completeness === 'complete',
-                    ).length
-                  }{' '}
-                  / {state.intervals.length}
-                </dd>
-              </div>
-              <div>
-                <dt>Independent evidence</dt>
-                <dd>
-                  PM and Paper Exchange source records are distinct inputs where
-                  linked; agreement between PM projections alone is not
-                  independent reconciliation.
+                  {equityAvailable
+                    ? amount(exitFeesValue, currency)
+                    : 'Unavailable'}
                 </dd>
               </div>
             </dl>
-            <p style={{ ...mutedStyle, ...badgeStyle('not_evaluated') }}>
-              Flat-cash interval agreement does not establish trade
-              profitability.
+            <p>
+              Fees paid are already reflected in realised P&amp;L; exit fees are
+              estimates.
             </p>
           </section>
-        </>
+
+          <CompactTable label="Portfolio account summary">
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Currency</th>
+                <th>Trading capital</th>
+                <th>Cash</th>
+                <th>Equity</th>
+                <th>Net P&amp;L</th>
+                <th>Fees</th>
+                <th>Latest return</th>
+                <th>Coverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Position Management</td>
+                <td>{currency ?? 'Unavailable'}</td>
+                <td>{amount(initialCash, currency)}</td>
+                <td>{amount(cashValue, currency)}</td>
+                <td>
+                  {equityAvailable
+                    ? amount(equityValue, currency)
+                    : 'Unavailable'}
+                </td>
+                <td>{amount(realizedValue, currency)}</td>
+                <td>{amount(paidFeesValue, currency)}</td>
+                <td>{latestReturn}</td>
+                <td>
+                  {state.intervalCoverage
+                    ? statusLabel(state.intervalCoverage) +
+                      (state.truncated ? ' · truncated' : '')
+                    : 'Unavailable'}
+                </td>
+              </tr>
+            </tbody>
+          </CompactTable>
+
+          <div
+            className="portfolio-reconciliation-banner"
+            data-status={independentStatus}
+          >
+            <span>
+              Independent reconciliation:{' '}
+              {independent === true
+                ? 'Reconciled'
+                : independent === false
+                  ? 'Not reconciled'
+                  : 'Unavailable'}
+            </span>
+            <span>
+              {latest?.completeness === 'complete'
+                ? 'Latest interval complete'
+                : latest
+                  ? 'Latest interval ' + statusLabel(latest.completeness)
+                  : 'No interval evidence'}
+            </span>
+            <button type="button" onClick={() => onTabChange?.('intervals')}>
+              Review evidence
+            </button>
+          </div>
+        </div>
       )}
-      {tab === 'intervals' && (
+
+      {state.tab === 'balances' && (
         <section
-          aria-label="Portfolio historical evidence"
-          style={sectionStyle}
+          className="portfolio-balances"
+          aria-label="Portfolio balances by currency"
         >
-          <h3 style={{ margin: '0 0 6px', fontSize: 14 }}>
-            Contribution-adjusted interval returns
-          </h3>
-          <label style={mutedStyle}>
-            Interval status{' '}
-            <select
-              aria-label="Interval status filter"
-              value={state.intervalFilter}
-              onChange={(event) =>
-                onIntervalFilterChange?.(
-                  event.target
-                    .value as PortfolioReconciliationState['intervalFilter'],
-                )
-              }
-            >
-              <option value="all">All intervals</option>
-              <option value="complete">Complete</option>
-              <option value="incomplete">Incomplete or unavailable</option>
-            </select>
-          </label>
-          {reportedReturnChart(visiblePortfolioIntervals(state))}
-          <h3 style={{ margin: '10px 0 6px', fontSize: 14 }}>
-            Interval evidence and drill-down
-          </h3>
-          {visiblePortfolioIntervals(state).length ? (
-            <div style={{ overflowX: 'auto' }}>
-              <table
-                className="v35-operator-table"
-                style={{
-                  width: '100%',
-                  borderCollapse: 'collapse',
-                  textAlign: 'left',
-                  fontSize: 12,
-                }}
-              >
-                <thead>
-                  <tr>
-                    {[
-                      'End time',
-                      'Evidence ID',
-                      'PM completeness',
-                      'Reported return',
-                      'Net P&L',
-                      'Independent status',
-                      'Drill-down',
-                    ].map((heading) => (
-                      <th
-                        key={heading}
-                        style={{
-                          color: '#9ba7b4',
-                          padding: '6px',
-                          borderBottom: '1px solid #3a424c',
-                        }}
-                      >
-                        {heading}
-                      </th>
-                    ))}
+          <header className="portfolio-section-heading">
+            <strong>Per-currency valuation and contributions</strong>
+            <span>
+              Latest interval ·{' '}
+              {latest ? timestamp(latest.endMs) : 'Unavailable'}
+              {latest ? ' · ' + statusLabel(latest.completeness) : ''}
+            </span>
+          </header>
+          {currencyCodes.length > 0 ? (
+            <CompactTable label="Opening and closing balances by currency">
+              <thead>
+                <tr>
+                  <th>Currency</th>
+                  <th>Opening cash</th>
+                  <th>External contributions</th>
+                  <th>Closing cash</th>
+                  <th>Opening USD value</th>
+                  <th>Closing USD value</th>
+                  <th>Opening FX rate</th>
+                  <th>Opening FX as of</th>
+                  <th>Closing FX rate</th>
+                  <th>FX as of</th>
+                  <th>FX age at interval end</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currencyCodes.map((code) => (
+                  <tr key={code}>
+                    <td>{code}</td>
+                    <td>{amountFrom(openingBalances, code)}</td>
+                    <td>{amountFrom(contributions, code)}</td>
+                    <td>{amountFrom(closingBalances, code)}</td>
+                    <td>{usdValueFrom(openingUsdValues, code)}</td>
+                    <td>{usdValueFrom(closingUsdValues, code)}</td>
+                    <td>{formatFxRate(openingFxRates.get(code))}</td>
+                    <td>{fxTimeFrom(openingFxTimestamps, code)}</td>
+                    <td>{formatFxRate(closingFxRates.get(code))}</td>
+                    <td>{fxTimeFrom(closingFxTimestamps, code)}</td>
+                    <td>{fxAge(closingFxTimestamps, code)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {visiblePortfolioIntervals(state).map(intervalRow)}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </CompactTable>
           ) : (
-            <p style={mutedStyle}>
-              No durable portfolio interval evidence is available.
+            <p className="portfolio-widget-message">
+              Per-currency opening values, contributions, closing cash and FX
+              valuation are unavailable in the latest interval.
+            </p>
+          )}
+          <div className="portfolio-balance-evidence">
+            <OperatorMetricStrip
+              label="Currency valuation evidence"
+              metrics={[
+                {
+                  label: 'Cash movements',
+                  value: currencyRows(latest?.raw.cash_movements_by_currency)
+                    .length
+                    ? currencyRows(
+                        latest?.raw.cash_movements_by_currency,
+                      ).length.toLocaleString()
+                    : 'Unavailable',
+                },
+                {
+                  label: 'Contribution events',
+                  value: Array.isArray(latest?.raw.external_contribution_events)
+                    ? latest.raw.external_contribution_events.length.toLocaleString()
+                    : 'Unavailable',
+                },
+                {
+                  label: 'Opening FX sources',
+                  value: openingFxRates.size.toLocaleString(),
+                },
+                {
+                  label: 'Closing FX sources',
+                  value: closingFxRates.size.toLocaleString(),
+                },
+              ]}
+            />
+          </div>
+        </section>
+      )}
+
+      {state.tab === 'intervals' && (
+        <section
+          className="portfolio-reconciliation"
+          aria-label="Financial reconciliation"
+        >
+          <div className="portfolio-reconciliation-summary">
+            <span data-status={statusClass(independentStatus)}>
+              Independent ledger:{' '}
+              {independent === true
+                ? 'reconciled'
+                : independent === false
+                  ? 'not reconciled'
+                  : 'unavailable'}
+            </span>
+            <span>Epoch: {String(epoch ?? 'Unavailable')}</span>
+            <span>Epoch status: {String(epochStatus ?? 'Unavailable')}</span>
+            <span>
+              Interval coverage: {state.intervalCoverage ?? 'Unavailable'}
+            </span>
+            <span>
+              Complete intervals: {completeCount.toLocaleString()} /{' '}
+              {state.intervals.length.toLocaleString()}
+            </span>
+            <span>
+              History:{' '}
+              {state.truncated === null
+                ? 'truncation unknown'
+                : state.truncated
+                  ? 'truncated'
+                  : 'not reported truncated'}
+            </span>
+            <span>Snapshot: {timestamp(snapshotCapturedAt)}</span>
+          </div>
+          <p className="portfolio-widget-message">
+            Independent comparison requires authoritative execution events,
+            settlements, fees and sourced FX; PM projections alone are not an
+            independent reconciliation.
+          </p>
+
+          <div className="portfolio-interval-toolbar">
+            <label>
+              Interval status
+              <select
+                aria-label="Interval status filter"
+                value={state.intervalFilter}
+                onChange={(event) =>
+                  onIntervalFilterChange?.(
+                    event.target
+                      .value as PortfolioReconciliationState['intervalFilter'],
+                  )
+                }
+              >
+                <option value="all">All</option>
+                <option value="complete">Complete</option>
+                <option value="incomplete">Incomplete or unavailable</option>
+              </select>
+            </label>
+            <span>
+              {visiblePortfolioIntervals(state).length.toLocaleString()} shown
+            </span>
+          </div>
+
+          {reportedReturnChart(visiblePortfolioIntervals(state))}
+
+          {visiblePortfolioIntervals(state).length > 0 ? (
+            <CompactTable label="Portfolio valuation interval reconciliation">
+              <thead>
+                <tr>
+                  <th>End time</th>
+                  <th>Evidence ID</th>
+                  <th>PM completeness</th>
+                  <th>Reported return</th>
+                  <th>Net P&amp;L</th>
+                  <th>Independent status</th>
+                  <th>Drill-down</th>
+                </tr>
+              </thead>
+              <tbody>{visiblePortfolioIntervals(state).map(intervalRow)}</tbody>
+            </CompactTable>
+          ) : (
+            <p className="portfolio-widget-message">
+              No portfolio intervals match this filter.
             </p>
           )}
         </section>

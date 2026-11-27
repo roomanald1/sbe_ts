@@ -2,6 +2,7 @@ import { BehaviorSubject, type Subscription } from 'rxjs';
 import {
   AutoTraderOutcomesModel,
   type AutoTraderOutcome,
+  type OperationalPositionsSummary,
 } from './AutoTraderOutcomesModel';
 import { positionFetch } from '../position_api';
 
@@ -112,6 +113,7 @@ export type OrdersPositionsState = {
   pmError?: string;
   outcomesLoading: boolean;
   outcomesError?: string;
+  operationalSummary: OperationalPositionsSummary | null;
   positions: AutoTraderOutcome[];
   closedPositions: ClosedPositionRecord[];
   activityOrders: ActivityOrderIdentity[];
@@ -304,6 +306,7 @@ const emptyState: OrdersPositionsState = {
   loading: true,
   pmAvailable: false,
   outcomesLoading: true,
+  operationalSummary: null,
   positions: [],
   closedPositions: [],
   activityOrders: [],
@@ -553,6 +556,7 @@ type OutcomeModelState = {
   rows: AutoTraderOutcome[];
   closedLedgerRows: AutoTraderOutcome[];
   strategyOrders: ActivityOrderIdentity[];
+  operationalSummary?: OperationalPositionsSummary | null;
   loading: boolean;
   error?: string;
 };
@@ -591,6 +595,7 @@ export class OrdersPositionsWidgetModel {
         activityOrders: state.strategyOrders ?? [],
         outcomesLoading: state.loading,
         outcomesError: state.error,
+        operationalSummary: state.operationalSummary ?? null,
       });
     });
     void this.refreshHistory();

@@ -107,6 +107,29 @@ fn append_entry_fill_evidence(
             .as_str()
             .filter(|currency| !currency.trim().is_empty())
             .map(str::to_owned);
+        let paper_exchange_fee_amount = fill["paper_exchange_fee_amount"]
+            .as_f64()
+            .filter(|value| value.is_finite());
+        let paper_exchange_fee_currency = fill["paper_exchange_fee_currency"]
+            .as_str()
+            .filter(|currency| !currency.trim().is_empty())
+            .map(str::to_owned);
+        let paper_exchange_fee_schedule_id = fill["paper_exchange_fee_schedule_id"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        let paper_exchange_fee_schedule_version = fill["paper_exchange_fee_schedule_version"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
+        let paper_exchange_fee_order_class = fill["paper_exchange_fee_order_class"]
+            .as_str()
+            .filter(|value| matches!(*value, "maker" | "taker"))
+            .map(str::to_owned);
+        let paper_exchange_fee_schedule_evidence = fill
+            .get("paper_exchange_fee_schedule_evidence")
+            .filter(|value| value.is_object())
+            .cloned();
         if let Some(currency) = fee_currency.as_ref() {
             page_fee_currencies.insert(currency.clone());
             if !position
@@ -137,6 +160,12 @@ fn append_entry_fill_evidence(
             fee_known,
             fee_amount,
             fee_currency,
+            paper_exchange_fee_amount,
+            paper_exchange_fee_currency,
+            paper_exchange_fee_schedule_id,
+            paper_exchange_fee_schedule_version,
+            paper_exchange_fee_order_class,
+            paper_exchange_fee_schedule_evidence,
         };
         if let Some(existing) = position
             .entry_fill_links
@@ -151,6 +180,14 @@ fn append_entry_fill_evidence(
                 || existing.timestamp_ms != link.timestamp_ms
                 || existing.fee_amount != link.fee_amount
                 || existing.fee_currency != link.fee_currency
+                || existing.paper_exchange_fee_amount != link.paper_exchange_fee_amount
+                || existing.paper_exchange_fee_currency != link.paper_exchange_fee_currency
+                || existing.paper_exchange_fee_schedule_id != link.paper_exchange_fee_schedule_id
+                || existing.paper_exchange_fee_schedule_version
+                    != link.paper_exchange_fee_schedule_version
+                || existing.paper_exchange_fee_order_class != link.paper_exchange_fee_order_class
+                || existing.paper_exchange_fee_schedule_evidence
+                    != link.paper_exchange_fee_schedule_evidence
             {
                 valid = false;
             }
@@ -449,7 +486,14 @@ fn apply_auto_fill(
             position.price_path.clear();
             position.price_path_total_samples = 0;
             position.price_path_truncated = false;
+            position.price_path_memory_window_truncated = false;
+            position.price_path_finalized = false;
             position.price_path_restart_interrupted = false;
+            position.price_path_gross_mfe_percent = None;
+            position.price_path_gross_mae_percent = None;
+            position.price_path_event_sample_count = 0;
+            position.price_path_event_metrics_complete = false;
+            position.price_path_threshold_crossings.clear();
             position.initial_entry_notional = incoming.abs() * price;
             position.total_fees_paid = fee;
             position.total_entry_fees_paid = fee;
@@ -548,7 +592,13 @@ fn apply_auto_fill(
         position.price_path.clear();
         position.price_path_total_samples = 0;
         position.price_path_truncated = false;
+        position.price_path_memory_window_truncated = false;
         position.price_path_restart_interrupted = false;
+        position.price_path_gross_mfe_percent = None;
+        position.price_path_gross_mae_percent = None;
+        position.price_path_event_sample_count = 0;
+        position.price_path_event_metrics_complete = false;
+        position.price_path_threshold_crossings.clear();
         position.price_path_epoch = None;
         position.entry_timestamp_ms = current_time_ms();
         position.entry_decision_id = None;

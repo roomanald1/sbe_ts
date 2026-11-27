@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
-import { sharedGet } from './shared_get';
+import {
+  sharedGet,
+  usesExecutionRSocket,
+  usesPositionManagementRSocket,
+} from './shared_get';
 
 const originalFetch = globalThis.fetch;
 
@@ -9,6 +13,17 @@ afterEach(() => {
 });
 
 describe('sharedGet', () => {
+  it('routes operational position reads to Position Management', () => {
+    assert.equal(
+      usesPositionManagementRSocket('/positions/operational?source=auto'),
+      true,
+    );
+    assert.equal(
+      usesExecutionRSocket('/positions/operational?source=auto'),
+      false,
+    );
+  });
+
   it('shares concurrent GETs while giving each caller a readable response', async () => {
     let calls = 0;
     globalThis.fetch = (async () => {

@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { BehaviorSubject } from 'rxjs';
 import { AutoTraderModel } from './AutoTraderModel';
 import {
   AutoTraderDiagnosticsModel,
@@ -9,6 +10,26 @@ import {
   type FunnelCycle,
   buildAutoTraderDiagnosticRows,
 } from './AutoTraderDiagnosticsModel';
+
+function diagnosticsSourceFixture() {
+  const base = new AutoTraderModel().state$.value;
+  const state$ = new BehaviorSubject(base);
+  let starts = 0;
+  let stops = 0;
+  return {
+    source: {
+      state$,
+      start: () => starts++,
+      stop: () => stops++,
+    } as unknown as AutoTraderModel,
+    get starts() {
+      return starts;
+    },
+    get stops() {
+      return stops;
+    },
+  };
+}
 
 function funnelCycle(
   cycleId: string,
@@ -223,5 +244,64 @@ describe('AutoTraderDiagnosticsModel', () => {
 
     model.toggleGroup('BTC-USDT', 'long');
     assert.equal(model.state$.value.diagnosticRows.length, 1);
+  });
+
+  it('owns funnel navigation and filters independently per widget model', () => {
+    const first = new AutoTraderDiagnosticsModel(
+      diagnosticsSourceFixture().source,
+    );
+    const second = new AutoTraderDiagnosticsModel(
+      diagnosticsSourceFixture().source,
+    );
+    first.setFunnelTab('heatmap');
+    first.setFunnelDimension('pair');
+    first.setEligibilityMode('exploratoryEligibility');
+    first.setSymbolFilter('BTC-USDT');
+    first.setStrategyFilter('trend-50-200');
+    first.setCycleFilter('cycle-a');
+    assert.deepEqual(first.state$.value.funnelView, {
+      tab: 'heatmap',
+      dimension: 'pair',
+      eligibilityMode: 'exploratoryEligibility',
+      symbolFilter: 'BTC-USDT',
+      strategyFilter: 'trend-50-200',
+      cycleFilter: 'cycle-a',
+    });
+    assert.deepEqual(second.state$.value.funnelView, {
+      tab: 'funnel',
+      dimension: 'strategy',
+      eligibilityMode: 'strictEligibility',
+      symbolFilter: '',
+      strategyFilter: '',
+      cycleFilter: 'all',
+    });
+  });
+
+  it('owns the freshness clock lifecycle and disposes its interval once', () => {
+    const fixture = diagnosticsSourceFixture();
+    const callbacks: Array<() => void> = [];
+    const cancelled: Array<ReturnType<typeof setInterval>> = [];
+    let nowMs = 1_000;
+    const model = new AutoTraderDiagnosticsModel(
+      fixture.source,
+      () => nowMs,
+      (callback) => {
+        callbacks.push(callback);
+        return callbacks.length as unknown as ReturnType<typeof setInterval>;
+      },
+      (timer) => cancelled.push(timer),
+    );
+    assert.equal(model.state$.value.nowMs, 1_000);
+    model.start();
+    model.start();
+    assert.equal(fixture.starts, 1);
+    assert.equal(callbacks.length, 1);
+    nowMs = 6_000;
+    callbacks[0]();
+    assert.equal(model.state$.value.nowMs, 6_000);
+    model.stop();
+    model.stop();
+    assert.equal(fixture.stops, 1);
+    assert.deepEqual(cancelled, [1]);
   });
 });

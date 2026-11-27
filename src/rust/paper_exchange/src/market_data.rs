@@ -9,12 +9,14 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use rsocket_rust::{Client, prelude::*, utils::EchoRSocket};
 use rsocket_rust_transport_websocket::WebsocketClientTransport;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -25,11 +27,19 @@ const BOOK_MESSAGE_LENGTH: usize = 272;
 const TICKER_MESSAGE_LENGTH: usize = 64;
 const MAX_MARKET_BOOK_SUBSCRIPTIONS: usize = 256;
 const MAX_TICKER_HISTORY_SYMBOLS: usize = 128;
+const MAX_MARK_EVIDENCE_PER_SYMBOL: usize =
+    (TICKER_HISTORY_RETENTION.as_secs() / TICKER_HISTORY_SAMPLE_INTERVAL.as_secs()) as usize;
+const MAX_MARK_EVIDENCE_RECORDS: usize = MAX_TICKER_HISTORY_SYMBOLS * MAX_MARK_EVIDENCE_PER_SYMBOL;
+const MAX_MARK_EVIDENCE_PAGE_SIZE: u16 = 500;
 const FEED_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const BOOK_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TICKER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TICKER_HISTORY_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const TICKER_HISTORY_RETENTION: Duration = Duration::from_secs(30 * 60);
+const EXECUTABLE_PATH_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const EXECUTABLE_PATH_RETENTION: Duration = Duration::from_secs(10 * 60);
+const MAX_EXECUTABLE_PATH_SYMBOLS: usize = MAX_MARKET_BOOK_SUBSCRIPTIONS;
+const MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL: usize = 600;
 const MARKET_MARK_FRESHNESS: Duration = Duration::from_secs(5);
 const MAX_HELD_SYMBOLS_PER_REQUEST: usize = 64;
 const MAX_HELD_SYMBOLS_QUERY_BYTES: usize = 2_048;
@@ -49,11 +59,66 @@ pub struct BookSnapshot {
     pub bids: Vec<BookLevel>,
     pub asks: Vec<BookLevel>,
     pub updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_record_id: Option<String>,
 }
 
 #[derive(Default)]
 struct Histories {
     by_symbol: HashMap<String, Vec<(u64, f64)>>,
+    executable_paths: HashMap<String, ExecutablePathHistory>,
+}
+
+#[derive(Default)]
+struct ExecutablePathHistory {
+    source_epoch: String,
+    samples: VecDeque<ExecutableQuoteSample>,
+}
+
+#[derive(Clone, Copy)]
+struct ExecutableQuoteSample {
+    timestamp_ms: u64,
+    bid: f64,
+    ask: f64,
+    source_cursor: u64,
+}
+
+#[derive(Serialize)]
+struct ExecutableQuotePathResponse {
+    schema_version: u32,
+    symbol: String,
+    source_system: &'static str,
+    persistence_status: &'static str,
+    captured_at_ms: u64,
+    latest_sample_age_ms: Option<u64>,
+    source_epoch: String,
+    sample_interval_ms: u64,
+    retention_ms: u64,
+    coverage_start_ms: Option<u64>,
+    coverage_end_ms: Option<u64>,
+    maximum_observed_gap_ms: u64,
+    truncated: bool,
+    samples: Vec<ExecutableQuotePathPoint>,
+}
+
+#[derive(Serialize)]
+struct ExecutableQuotePathPoint {
+    timestamp_ms: u64,
+    bid: f64,
+    ask: f64,
+    source_cursor: u64,
+    source_record_id: String,
+}
+
+#[derive(Deserialize)]
+struct ExecutableQuotePathQuery {
+    symbol: String,
+    since_ms: Option<u64>,
+    limit: Option<usize>,
 }
 
 struct BookSubscriptionState(AtomicU8);
@@ -77,6 +142,9 @@ pub struct MarketData {
     histories: Mutex<Histories>,
     subscriptions: Mutex<HashMap<String, Arc<BookSubscriptionState>>>,
     feed_client: Mutex<Option<Arc<Client>>>,
+    source_epoch: Option<String>,
+    source_cursor: AtomicU64,
+    mark_evidence_path: PathBuf,
 }
 
 impl MarketData {
@@ -86,6 +154,20 @@ impl MarketData {
             histories: Mutex::new(Histories::default()),
             subscriptions: Mutex::new(HashMap::new()),
             feed_client: Mutex::new(None),
+            source_epoch: now_ms().ok().map(|timestamp| {
+                format!(
+                    "paper-exchange-market-data:v1:{timestamp}:{}",
+                    std::process::id()
+                )
+            }),
+            source_cursor: AtomicU64::new(0),
+            mark_evidence_path: std::env::var_os("PAPER_EXCHANGE_EXECUTION_LEDGER_FILE")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join("paper_exchange_matches.sqlite")
+                }),
         });
         Self::start_ticker_history(Arc::clone(&data));
         data
@@ -161,11 +243,49 @@ impl MarketData {
                             {
                                 Ok(Some(Ok(bytes))) => {
                                     if book_symbol(&bytes) == Some(symbol.as_str())
-                                        && let Some(book) = decode_book(&bytes)
+                                        && let Some(mut book) = decode_book(&bytes)
                                     {
-                                        if let Some((timestamp, mid)) = book_history_sample(&book) {
-                                            data.record_history_sample(&symbol, timestamp, mid)
-                                                .await;
+                                        let source_cursor = data
+                                            .source_cursor
+                                            .fetch_add(1, Ordering::AcqRel)
+                                            .saturating_add(1);
+                                        attach_book_source_identity(
+                                            &mut book,
+                                            &symbol,
+                                            data.source_epoch.as_deref(),
+                                            source_cursor,
+                                        );
+                                        data.record_executable_path_sample(&symbol, &book).await;
+                                        let mut source_evidence_persisted = false;
+                                        if let Some(sample) = book_history_sample(&book) {
+                                            if data
+                                                .record_history_sample(
+                                                    &symbol,
+                                                    sample.timestamp_ms,
+                                                    sample.mid,
+                                                )
+                                                .await
+                                            {
+                                                if let Some(evidence) =
+                                                    sample.into_evidence(&symbol, &book)
+                                                {
+                                                    if let Err(error) = persist_mark_evidence(
+                                                        data.mark_evidence_path.clone(),
+                                                        evidence,
+                                                    )
+                                                    .await
+                                                    {
+                                                        eprintln!(
+                                                            "Paper Exchange market mark evidence write failed for {symbol}: {error:#}"
+                                                        );
+                                                    } else {
+                                                        source_evidence_persisted = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if !source_evidence_persisted {
+                                            clear_book_source_identity(&mut book);
                                         }
                                         data.books
                                             .write()
@@ -270,9 +390,14 @@ impl MarketData {
         }
     }
 
-    async fn record_history_sample(&self, symbol: &str, timestamp: u64, price: f64) {
+    async fn record_history_sample(&self, symbol: &str, timestamp: u64, price: f64) -> bool {
         let mut histories = self.histories.lock().await;
-        record_history_sample(&mut histories, symbol, timestamp, price);
+        record_history_sample(&mut histories, symbol, timestamp, price)
+    }
+
+    async fn record_executable_path_sample(&self, symbol: &str, book: &BookSnapshot) -> bool {
+        let mut histories = self.histories.lock().await;
+        record_executable_path_sample(&mut histories, symbol, book)
     }
 
     pub fn book(&self, symbol: &str) -> Option<Arc<BookSnapshot>> {
@@ -293,6 +418,79 @@ impl MarketData {
             .unwrap_or_default()
     }
 
+    async fn executable_path(
+        &self,
+        symbol: &str,
+        since_ms: Option<u64>,
+        limit: usize,
+    ) -> Option<ExecutableQuotePathResponse> {
+        let histories = self.histories.lock().await;
+        let path = histories.executable_paths.get(symbol)?;
+        let captured_at_ms = now_ms().ok()?;
+        let cutoff = captured_at_ms.saturating_sub(EXECUTABLE_PATH_RETENTION.as_millis() as u64);
+        let retained_start = path
+            .samples
+            .iter()
+            .find(|sample| sample.timestamp_ms >= cutoff)
+            .map(|sample| sample.timestamp_ms);
+        let retained_end = path
+            .samples
+            .iter()
+            .rev()
+            .find(|sample| sample.timestamp_ms >= cutoff)
+            .map(|sample| sample.timestamp_ms);
+        let retained = path
+            .samples
+            .iter()
+            .copied()
+            .filter(|sample| sample.timestamp_ms >= cutoff)
+            .collect::<Vec<_>>();
+        let mut samples = retained
+            .into_iter()
+            .filter(|sample| since_ms.is_none_or(|since| sample.timestamp_ms >= since))
+            .collect::<Vec<_>>();
+        let mut truncated =
+            since_ms.is_some_and(|since| retained_start.is_some_and(|start| since < start));
+        if samples.len() > limit {
+            samples.drain(..samples.len() - limit);
+            truncated = true;
+        }
+        let maximum_observed_gap_ms = samples
+            .windows(2)
+            .map(|pair| pair[1].timestamp_ms.saturating_sub(pair[0].timestamp_ms))
+            .max()
+            .unwrap_or_default();
+        Some(ExecutableQuotePathResponse {
+            schema_version: 1,
+            symbol: symbol.to_owned(),
+            source_system: "feed_handlers.book_stream",
+            persistence_status: "volatile_process_epoch",
+            captured_at_ms,
+            latest_sample_age_ms: retained_end
+                .map(|timestamp| captured_at_ms.saturating_sub(timestamp)),
+            source_epoch: path.source_epoch.clone(),
+            sample_interval_ms: EXECUTABLE_PATH_SAMPLE_INTERVAL.as_millis() as u64,
+            retention_ms: EXECUTABLE_PATH_RETENTION.as_millis() as u64,
+            coverage_start_ms: samples.first().map(|sample| sample.timestamp_ms),
+            coverage_end_ms: samples.last().map(|sample| sample.timestamp_ms),
+            maximum_observed_gap_ms,
+            truncated,
+            samples: samples
+                .into_iter()
+                .map(|sample| ExecutableQuotePathPoint {
+                    timestamp_ms: sample.timestamp_ms,
+                    bid: sample.bid,
+                    ask: sample.ask,
+                    source_cursor: sample.source_cursor,
+                    source_record_id: format!(
+                        "paper-book:v1:{}:{symbol}:{}",
+                        path.source_epoch, sample.source_cursor
+                    ),
+                })
+                .collect(),
+        })
+    }
+
     async fn histories(&self) -> HashMap<String, Vec<(u64, f64)>> {
         self.histories.lock().await.by_symbol.clone()
     }
@@ -303,6 +501,39 @@ struct SymbolQuery {
     symbol: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct MarketMarkEvidence {
+    evidence_cursor: i64,
+    symbol: String,
+    quote_timestamp_ms: u64,
+    bid: f64,
+    ask: f64,
+    source_epoch: String,
+    source_cursor: u64,
+    source_record_id: String,
+}
+
+#[derive(Deserialize)]
+struct MarketMarkEvidenceQuery {
+    symbol: String,
+    source_epoch: Option<String>,
+    source_cursor: Option<u64>,
+    source_record_id: Option<String>,
+    after_cursor: Option<i64>,
+    limit: Option<u16>,
+}
+
+#[derive(Serialize)]
+struct MarketMarkEvidencePage {
+    evidence: Vec<MarketMarkEvidence>,
+    next_cursor: Option<i64>,
+    has_more: bool,
+    contract_version: u16,
+    retention_ms: u64,
+    sample_interval_ms: u64,
+    freshness_max_age_ms: u64,
+}
+
 #[derive(Serialize)]
 struct MarketMark {
     symbol: String,
@@ -311,6 +542,10 @@ struct MarketMark {
     mid: Option<f64>,
     worst_ask: Option<f64>,
     updated_at_ms: u64,
+    source_system: &'static str,
+    source_epoch: Option<String>,
+    source_cursor: Option<u64>,
+    source_record_id: Option<String>,
     symbol_freshness: SymbolMarkFreshness,
 }
 
@@ -356,6 +591,10 @@ async fn get_market_mark(
         mid: bid.zip(ask).map(|(bid, ask)| (bid + ask) / 2.0),
         worst_ask: book.asks.last().map(|level| level.price),
         updated_at_ms: book.updated_at_ms,
+        source_system: "paper_exchange.market_data_cache",
+        source_epoch: book.source_epoch.clone(),
+        source_cursor: book.source_cursor,
+        source_record_id: book.source_record_id.clone(),
         symbol_freshness: SymbolMarkFreshness {
             contract_version: 1,
             scope: "symbol",
@@ -410,6 +649,125 @@ async fn get_market_history(
     }
     Ok(Json(MarketHistory {
         samples: data.history(&symbol).await,
+    }))
+}
+
+async fn get_market_quote_path(
+    State(data): State<Arc<MarketData>>,
+    Query(query): Query<ExecutableQuotePathQuery>,
+) -> Result<Json<ExecutableQuotePathResponse>, (StatusCode, String)> {
+    let symbol = query.symbol.to_ascii_uppercase();
+    if !valid_symbol(&symbol) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A valid market symbol is required".into(),
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL)
+        .clamp(1, MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL);
+    data.executable_path(&symbol, query.since_ms, limit)
+        .await
+        .map(Json)
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("No retained executable quote path for {symbol}"),
+        ))
+}
+
+async fn get_market_mark_evidence(
+    State(data): State<Arc<MarketData>>,
+    Query(query): Query<MarketMarkEvidenceQuery>,
+) -> Result<Json<MarketMarkEvidencePage>, (StatusCode, String)> {
+    let symbol = query.symbol.to_ascii_uppercase();
+    if !valid_symbol(&symbol) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A valid market symbol is required".into(),
+        ));
+    }
+    let identity_parts = [
+        query.source_epoch.is_some(),
+        query.source_cursor.is_some(),
+        query.source_record_id.is_some(),
+    ];
+    if identity_parts.iter().any(|present| *present) {
+        if !identity_parts.iter().all(|present| *present) || query.after_cursor.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Provide a complete source identity or a page cursor".into(),
+            ));
+        }
+        if query
+            .source_cursor
+            .is_some_and(|cursor| cursor > i64::MAX as u64)
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "source_cursor is out of range".into(),
+            ));
+        }
+        let retention_cutoff = mark_evidence_retention_cutoff()
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+        let evidence = lookup_mark_evidence(
+            data.mark_evidence_path.clone(),
+            symbol,
+            query.source_epoch.unwrap_or_default(),
+            query.source_cursor.unwrap_or_default(),
+            query.source_record_id.unwrap_or_default(),
+            retention_cutoff,
+        )
+        .await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Market mark source identity was not found".into(),
+        ))?;
+        return Ok(Json(MarketMarkEvidencePage {
+            evidence: vec![evidence],
+            next_cursor: None,
+            has_more: false,
+            contract_version: 1,
+            retention_ms: TICKER_HISTORY_RETENTION.as_millis() as u64,
+            sample_interval_ms: TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64,
+            freshness_max_age_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
+        }));
+    }
+
+    let limit = query.limit.unwrap_or(100);
+    if limit == 0
+        || limit > MAX_MARK_EVIDENCE_PAGE_SIZE
+        || query.after_cursor.is_some_and(|cursor| cursor < 0)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("limit must be between 1 and {MAX_MARK_EVIDENCE_PAGE_SIZE}"),
+        ));
+    }
+    let (evidence, has_more) = page_mark_evidence(
+        data.mark_evidence_path.clone(),
+        symbol,
+        query.after_cursor.unwrap_or(0),
+        limit,
+        mark_evidence_retention_cutoff()
+            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?,
+    )
+    .await
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let next_cursor = if has_more {
+        evidence.last().map(|mark| mark.evidence_cursor)
+    } else {
+        None
+    };
+    Ok(Json(MarketMarkEvidencePage {
+        evidence,
+        next_cursor,
+        has_more,
+        contract_version: 1,
+        retention_ms: TICKER_HISTORY_RETENTION.as_millis() as u64,
+        sample_interval_ms: TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64,
+        freshness_max_age_ms: MARKET_MARK_FRESHNESS.as_millis() as u64,
     }))
 }
 
@@ -473,6 +831,12 @@ struct MarketHistories {
 struct MarketMarkSnapshot {
     mid: Option<f64>,
     updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_record_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -655,6 +1019,9 @@ fn market_mark_snapshot(book: &BookSnapshot) -> MarketMarkSnapshot {
     MarketMarkSnapshot {
         mid: market_mid(book),
         updated_at_ms: book.updated_at_ms,
+        source_epoch: book.source_epoch.clone(),
+        source_cursor: book.source_cursor,
+        source_record_id: book.source_record_id.clone(),
     }
 }
 
@@ -679,14 +1046,19 @@ fn parse_held_symbols(input: Option<&str>) -> Result<Vec<String>, String> {
     Ok(symbols)
 }
 
-fn record_history_sample(histories: &mut Histories, symbol: &str, timestamp: u64, price: f64) {
+fn record_history_sample(
+    histories: &mut Histories,
+    symbol: &str,
+    timestamp: u64,
+    price: f64,
+) -> bool {
     if !valid_symbol(symbol) || !price.is_finite() || price <= 0.0 {
-        return;
+        return false;
     }
     if !histories.by_symbol.contains_key(symbol)
         && histories.by_symbol.len() >= MAX_TICKER_HISTORY_SYMBOLS
     {
-        return;
+        return false;
     }
     let samples = histories.by_symbol.entry(symbol.to_owned()).or_default();
     if samples.last().is_none_or(|(last, _)| {
@@ -696,7 +1068,81 @@ fn record_history_sample(histories: &mut Histories, symbol: &str, timestamp: u64
         samples.retain(|(time, _)| {
             timestamp.saturating_sub(*time) <= TICKER_HISTORY_RETENTION.as_millis() as u64
         });
+        true
+    } else {
+        false
     }
+}
+
+fn record_executable_path_sample(
+    histories: &mut Histories,
+    symbol: &str,
+    book: &BookSnapshot,
+) -> bool {
+    if !valid_symbol(symbol) || book.updated_at_ms == 0 {
+        return false;
+    }
+    let Some(source_epoch) = book
+        .source_epoch
+        .as_deref()
+        .filter(|epoch| !epoch.trim().is_empty())
+    else {
+        return false;
+    };
+    let Some(source_cursor) = book.source_cursor.filter(|cursor| *cursor > 0) else {
+        return false;
+    };
+    let Some((bid, ask)) = book
+        .bids
+        .first()
+        .zip(book.asks.first())
+        .map(|(bid, ask)| (bid.price, ask.price))
+    else {
+        return false;
+    };
+    if !bid.is_finite() || bid <= 0.0 || !ask.is_finite() || ask < bid {
+        return false;
+    }
+    if !histories.executable_paths.contains_key(symbol)
+        && histories.executable_paths.len() >= MAX_EXECUTABLE_PATH_SYMBOLS
+    {
+        return false;
+    }
+    let path = histories
+        .executable_paths
+        .entry(symbol.to_owned())
+        .or_default();
+    if path.source_epoch != source_epoch {
+        path.source_epoch = source_epoch.to_owned();
+        path.samples.clear();
+    }
+    if path.samples.back().is_some_and(|last| {
+        book.updated_at_ms <= last.timestamp_ms
+            || book.updated_at_ms.saturating_sub(last.timestamp_ms)
+                < EXECUTABLE_PATH_SAMPLE_INTERVAL.as_millis() as u64
+    }) {
+        return false;
+    }
+    path.samples.push_back(ExecutableQuoteSample {
+        timestamp_ms: book.updated_at_ms,
+        bid,
+        ask,
+        source_cursor,
+    });
+    let cutoff = book
+        .updated_at_ms
+        .saturating_sub(EXECUTABLE_PATH_RETENTION.as_millis() as u64);
+    while path
+        .samples
+        .front()
+        .is_some_and(|sample| sample.timestamp_ms < cutoff)
+    {
+        path.samples.pop_front();
+    }
+    while path.samples.len() > MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL {
+        path.samples.pop_front();
+    }
+    true
 }
 
 fn history_freshness_max_age_ms() -> u64 {
@@ -740,8 +1186,222 @@ fn market_mark_is_fresh(book: &BookSnapshot, now: u64) -> bool {
         && now.saturating_sub(book.updated_at_ms) <= MARKET_MARK_FRESHNESS.as_millis() as u64
 }
 
-fn book_history_sample(book: &BookSnapshot) -> Option<(u64, f64)> {
-    market_mid(book).map(|mid| (book.updated_at_ms, mid))
+struct BookHistorySample {
+    timestamp_ms: u64,
+    mid: f64,
+}
+
+impl BookHistorySample {
+    fn into_evidence(self, symbol: &str, book: &BookSnapshot) -> Option<MarketMarkEvidence> {
+        let evidence = MarketMarkEvidence {
+            evidence_cursor: 0,
+            symbol: symbol.to_owned(),
+            quote_timestamp_ms: self.timestamp_ms,
+            bid: book.bids.first()?.price,
+            ask: book.asks.first()?.price,
+            source_epoch: book.source_epoch.clone()?,
+            source_cursor: book.source_cursor?,
+            source_record_id: book.source_record_id.clone()?,
+        };
+        let expected_mid = (evidence.bid + evidence.ask) / 2.0;
+        (evidence.quote_timestamp_ms == book.updated_at_ms
+            && expected_mid.is_finite()
+            && (expected_mid - self.mid).abs() <= f64::EPSILON * self.mid.abs().max(1.0))
+        .then_some(evidence)
+    }
+}
+
+fn book_history_sample(book: &BookSnapshot) -> Option<BookHistorySample> {
+    market_mid(book).map(|mid| BookHistorySample {
+        timestamp_ms: book.updated_at_ms,
+        mid,
+    })
+}
+
+fn mark_evidence_db(path: &PathBuf) -> anyhow::Result<Connection> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS executable_market_mark_evidence (
+             evidence_cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+             symbol TEXT NOT NULL,
+             quote_timestamp_ms INTEGER NOT NULL,
+             bid REAL NOT NULL,
+             ask REAL NOT NULL,
+             source_epoch TEXT NOT NULL,
+             source_cursor INTEGER NOT NULL,
+             source_record_id TEXT NOT NULL,
+             UNIQUE(source_epoch, source_cursor, source_record_id)
+         );
+         CREATE INDEX IF NOT EXISTS executable_market_mark_symbol_page
+             ON executable_market_mark_evidence(symbol, evidence_cursor);
+         CREATE INDEX IF NOT EXISTS executable_market_mark_timestamp
+             ON executable_market_mark_evidence(quote_timestamp_ms);",
+    )?;
+    Ok(connection)
+}
+
+fn mark_evidence_retention_cutoff() -> anyhow::Result<i64> {
+    let cutoff = now_ms()?.saturating_sub(TICKER_HISTORY_RETENTION.as_millis() as u64);
+    Ok(cutoff.min(i64::MAX as u64) as i64)
+}
+
+async fn persist_mark_evidence(path: PathBuf, evidence: MarketMarkEvidence) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || persist_mark_evidence_sync(&path, &evidence)).await??;
+    Ok(())
+}
+
+fn persist_mark_evidence_sync(path: &PathBuf, evidence: &MarketMarkEvidence) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        valid_symbol(&evidence.symbol),
+        "invalid mark evidence symbol"
+    );
+    anyhow::ensure!(
+        evidence.quote_timestamp_ms > 0
+            && evidence.quote_timestamp_ms <= i64::MAX as u64
+            && evidence.bid.is_finite()
+            && evidence.bid > 0.0
+            && evidence.ask.is_finite()
+            && evidence.ask >= evidence.bid
+            && !evidence.source_epoch.is_empty()
+            && evidence.source_cursor > 0
+            && evidence.source_cursor <= i64::MAX as u64
+            && !evidence.source_record_id.is_empty(),
+        "incomplete or invalid source mark evidence"
+    );
+    anyhow::ensure!(
+        evidence.source_record_id
+            == format!(
+                "paper-book:v1:{}:{}:{}",
+                evidence.source_epoch, evidence.symbol, evidence.source_cursor
+            ),
+        "source record ID does not match its symbol, epoch, and cursor"
+    );
+    let mut connection = mark_evidence_db(path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO executable_market_mark_evidence
+         (symbol, quote_timestamp_ms, bid, ask, source_epoch, source_cursor, source_record_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            evidence.symbol,
+            evidence.quote_timestamp_ms as i64,
+            evidence.bid,
+            evidence.ask,
+            evidence.source_epoch,
+            evidence.source_cursor as i64,
+            evidence.source_record_id,
+        ],
+    )?;
+    let stored: (String, i64, f64, f64, String) = transaction.query_row(
+        "SELECT symbol, quote_timestamp_ms, bid, ask, source_record_id
+         FROM executable_market_mark_evidence
+         WHERE source_epoch = ?1 AND source_cursor = ?2 AND source_record_id = ?3",
+        params![
+            evidence.source_epoch,
+            evidence.source_cursor as i64,
+            evidence.source_record_id
+        ],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    anyhow::ensure!(
+        stored.0 == evidence.symbol
+            && stored.1 == evidence.quote_timestamp_ms as i64
+            && stored.2 == evidence.bid
+            && stored.3 == evidence.ask
+            && stored.4 == evidence.source_record_id,
+        "source identity was reused for different market mark evidence"
+    );
+    let cutoff = mark_evidence_retention_cutoff()? as u64;
+    transaction.execute(
+        "DELETE FROM executable_market_mark_evidence WHERE quote_timestamp_ms < ?1",
+        [cutoff as i64],
+    )?;
+    transaction.execute(
+        "DELETE FROM executable_market_mark_evidence WHERE evidence_cursor IN (
+             SELECT evidence_cursor FROM executable_market_mark_evidence
+             WHERE symbol = ?1 ORDER BY evidence_cursor DESC LIMIT -1 OFFSET ?2
+         )",
+        params![evidence.symbol, MAX_MARK_EVIDENCE_PER_SYMBOL as i64],
+    )?;
+    transaction.execute(
+        "DELETE FROM executable_market_mark_evidence WHERE evidence_cursor IN (
+             SELECT evidence_cursor FROM executable_market_mark_evidence
+             ORDER BY evidence_cursor DESC LIMIT -1 OFFSET ?1
+         )",
+        [MAX_MARK_EVIDENCE_RECORDS as i64],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+async fn lookup_mark_evidence(
+    path: PathBuf,
+    symbol: String,
+    source_epoch: String,
+    source_cursor: u64,
+    source_record_id: String,
+    retention_cutoff_ms: i64,
+) -> anyhow::Result<Option<MarketMarkEvidence>> {
+    tokio::task::spawn_blocking(move || {
+        let connection = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.query_row(
+            "SELECT evidence_cursor, symbol, quote_timestamp_ms, bid, ask, source_epoch, source_cursor, source_record_id
+             FROM executable_market_mark_evidence
+             WHERE symbol = ?1 AND source_epoch = ?2 AND source_cursor = ?3 AND source_record_id = ?4
+               AND quote_timestamp_ms >= ?5",
+            params![symbol, source_epoch, source_cursor as i64, source_record_id, retention_cutoff_ms],
+            |row| Ok(MarketMarkEvidence {
+                evidence_cursor: row.get(0)?, symbol: row.get(1)?, quote_timestamp_ms: row.get::<_, i64>(2)? as u64,
+                bid: row.get(3)?, ask: row.get(4)?, source_epoch: row.get(5)?, source_cursor: row.get::<_, i64>(6)? as u64,
+                source_record_id: row.get(7)?,
+            }),
+        ).optional().map_err(Into::into)
+    }).await?
+}
+
+async fn page_mark_evidence(
+    path: PathBuf,
+    symbol: String,
+    after_cursor: i64,
+    limit: u16,
+    retention_cutoff_ms: i64,
+) -> anyhow::Result<(Vec<MarketMarkEvidence>, bool)> {
+    tokio::task::spawn_blocking(move || {
+        let connection = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        let mut statement = connection.prepare(
+            "SELECT evidence_cursor, symbol, quote_timestamp_ms, bid, ask, source_epoch, source_cursor, source_record_id
+             FROM executable_market_mark_evidence WHERE symbol = ?1 AND evidence_cursor > ?2
+               AND quote_timestamp_ms >= ?3
+             ORDER BY evidence_cursor LIMIT ?4",
+        )?;
+        let rows = statement.query_map(params![symbol, after_cursor, retention_cutoff_ms, i64::from(limit) + 1], |row| Ok(MarketMarkEvidence {
+            evidence_cursor: row.get(0)?, symbol: row.get(1)?, quote_timestamp_ms: row.get::<_, i64>(2)? as u64,
+            bid: row.get(3)?, ask: row.get(4)?, source_epoch: row.get(5)?, source_cursor: row.get::<_, i64>(6)? as u64,
+            source_record_id: row.get(7)?,
+        }))?;
+        let mut evidence = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let has_more = evidence.len() > usize::from(limit);
+        evidence.truncate(usize::from(limit));
+        Ok((evidence, has_more))
+    }).await?
 }
 
 fn book_symbol(bytes: &[u8]) -> Option<&str> {
@@ -754,6 +1414,11 @@ pub fn router(data: Arc<MarketData>) -> Router {
         .route("/internal/market-book", get(get_market_book))
         .route("/internal/market-mark", get(get_market_mark))
         .route("/internal/market-history", get(get_market_history))
+        .route("/internal/market-quote-path", get(get_market_quote_path))
+        .route(
+            "/internal/market-mark-evidence",
+            get(get_market_mark_evidence),
+        )
         .route("/internal/insights-inputs", get(get_insights_inputs))
         .route("/internal/market-histories", get(get_market_histories))
         .with_state(data)
@@ -765,6 +1430,10 @@ fn decode_book(bytes: &Bytes) -> Option<BookSnapshot> {
     }
     let symbol = std::str::from_utf8(&bytes[8..40]).ok()?.trim();
     if !valid_symbol(symbol) {
+        return None;
+    }
+    let updated_at_ms = u64::from_le_bytes(bytes.get(40..48)?.try_into().ok()?);
+    if updated_at_ms == 0 {
         return None;
     }
     let mut bids = Vec::with_capacity(BOOK_DEPTH);
@@ -782,8 +1451,35 @@ fn decode_book(bytes: &Bytes) -> Option<BookSnapshot> {
     Some(BookSnapshot {
         bids,
         asks,
-        updated_at_ms: now_ms().ok()?,
+        updated_at_ms,
+        source_epoch: None,
+        source_cursor: None,
+        source_record_id: None,
     })
+}
+
+fn attach_book_source_identity(
+    book: &mut BookSnapshot,
+    symbol: &str,
+    source_epoch: Option<&str>,
+    source_cursor: u64,
+) {
+    let Some(source_epoch) = source_epoch.filter(|epoch| !epoch.trim().is_empty()) else {
+        book.source_epoch = None;
+        book.source_cursor = None;
+        book.source_record_id = None;
+        return;
+    };
+    book.source_epoch = Some(source_epoch.to_owned());
+    book.source_cursor = (source_cursor > 0).then_some(source_cursor);
+    book.source_record_id = (source_cursor > 0)
+        .then(|| format!("paper-book:v1:{source_epoch}:{symbol}:{source_cursor}"));
+}
+
+fn clear_book_source_identity(book: &mut BookSnapshot) {
+    book.source_epoch = None;
+    book.source_cursor = None;
+    book.source_record_id = None;
 }
 
 fn read_level(bytes: &[u8], offset: usize) -> Option<BookLevel> {
@@ -822,7 +1518,37 @@ mod tests {
             histories: Mutex::new(Histories::default()),
             subscriptions: Mutex::new(HashMap::new()),
             feed_client: Mutex::new(None),
+            source_epoch: Some("paper-exchange-market-data:v1:test".to_owned()),
+            source_cursor: AtomicU64::new(0),
+            mark_evidence_path: test_database_path("empty"),
         }
+    }
+
+    fn test_database_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "paper-exchange-market-marks-{label}-{}-{}.sqlite",
+            std::process::id(),
+            now_ms().unwrap_or_default()
+        ))
+    }
+
+    fn sample_evidence(epoch: &str, cursor: u64, timestamp: u64) -> MarketMarkEvidence {
+        MarketMarkEvidence {
+            evidence_cursor: 0,
+            symbol: "BTC-USDT".to_owned(),
+            quote_timestamp_ms: timestamp,
+            bid: 99.0,
+            ask: 101.0,
+            source_epoch: epoch.to_owned(),
+            source_cursor: cursor,
+            source_record_id: format!("paper-book:v1:{epoch}:BTC-USDT:{cursor}"),
+        }
+    }
+
+    fn remove_test_database(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[test]
@@ -830,6 +1556,8 @@ mod tests {
         let mut bytes = vec![0; BOOK_MESSAGE_LENGTH];
         bytes[8..40].fill(b' ');
         bytes[8..16].copy_from_slice(b"BTC-USDT");
+        let source_updated_at_ms = 1_700_000_000_000_u64;
+        bytes[40..48].copy_from_slice(&source_updated_at_ms.to_le_bytes());
         bytes[48..56].copy_from_slice(&100.0_f64.to_le_bytes());
         bytes[56..64].copy_from_slice(&2.0_f64.to_le_bytes());
         bytes[160..168].copy_from_slice(&101.0_f64.to_le_bytes());
@@ -837,7 +1565,30 @@ mod tests {
         let snapshot = decode_book(&Bytes::from(bytes)).unwrap();
         assert_eq!(snapshot.bids[0].price, 100.0);
         assert_eq!(snapshot.asks[0].price, 101.0);
-        assert!(snapshot.updated_at_ms > 0);
+        assert_eq!(snapshot.updated_at_ms, source_updated_at_ms);
+        assert!(
+            !market_mark_is_fresh(
+                &snapshot,
+                source_updated_at_ms + MARKET_MARK_FRESHNESS.as_millis() as u64 + 1
+            ),
+            "old source quotes must not be refreshed by local decode time"
+        );
+        assert!(market_mark_is_fresh(
+            &snapshot,
+            source_updated_at_ms + MARKET_MARK_FRESHNESS.as_millis() as u64
+        ));
+        let mut sourced = snapshot;
+        attach_book_source_identity(&mut sourced, "BTC-USDT", Some("book-epoch-1"), 7);
+        assert_eq!(sourced.source_epoch.as_deref(), Some("book-epoch-1"));
+        assert_eq!(sourced.source_cursor, Some(7));
+        assert_eq!(
+            sourced.source_record_id.as_deref(),
+            Some("paper-book:v1:book-epoch-1:BTC-USDT:7")
+        );
+        attach_book_source_identity(&mut sourced, "BTC-USDT", None, 8);
+        assert!(sourced.source_epoch.is_none());
+        assert!(sourced.source_cursor.is_none());
+        assert!(sourced.source_record_id.is_none());
     }
 
     #[tokio::test]
@@ -867,6 +1618,9 @@ mod tests {
                 MarketMarkSnapshot {
                     mid: Some(42.5),
                     updated_at_ms: 1_100,
+                    source_epoch: None,
+                    source_cursor: None,
+                    source_record_id: None,
                 },
             )]),
             history_freshness: HashMap::from([(
@@ -913,6 +1667,10 @@ mod tests {
             mid: Some(100.0),
             worst_ask: Some(101.0),
             updated_at_ms: 10_000,
+            source_system: "paper_exchange.market_data_cache",
+            source_epoch: Some("market-epoch".into()),
+            source_cursor: Some(3),
+            source_record_id: Some("paper-book:v1:market-epoch:BTC-USDT:3".into()),
             symbol_freshness: SymbolMarkFreshness {
                 contract_version: 1,
                 scope: "symbol",
@@ -1000,6 +1758,9 @@ mod tests {
                 size: 1.0,
             }],
             updated_at_ms: 10_000,
+            source_epoch: None,
+            source_cursor: None,
+            source_record_id: None,
         };
         let too_soon_book = BookSnapshot {
             updated_at_ms: 19_999,
@@ -1010,12 +1771,122 @@ mod tests {
             ..first_book.clone()
         };
         for book in [&first_book, &too_soon_book, &next_sample_book] {
-            let (timestamp, mid) = book_history_sample(book).unwrap();
-            record_history_sample(&mut histories, "BTC-USDT", timestamp, mid);
+            let sample = book_history_sample(book).unwrap();
+            record_history_sample(&mut histories, "BTC-USDT", sample.timestamp_ms, sample.mid);
         }
         assert_eq!(
             histories.by_symbol.get("BTC-USDT").unwrap(),
             &vec![(10_000, 100.0), (20_000, 100.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_quote_buffer_is_one_second_sampled_and_retained_for_ten_minutes() {
+        let make_book = |timestamp_ms: u64, source_cursor: u64| BookSnapshot {
+            bids: vec![BookLevel {
+                price: 99.0 + source_cursor as f64 / 1_000.0,
+                size: 1.0,
+            }],
+            asks: vec![BookLevel {
+                price: 101.0 + source_cursor as f64 / 1_000.0,
+                size: 1.0,
+            }],
+            updated_at_ms: timestamp_ms,
+            source_epoch: Some("book-epoch".into()),
+            source_cursor: Some(source_cursor),
+            source_record_id: Some(format!("paper-book:v1:book-epoch:BTC-USDT:{source_cursor}")),
+        };
+        let mut histories = Histories::default();
+        assert!(record_executable_path_sample(
+            &mut histories,
+            "BTC-USDT",
+            &make_book(10_000, 1)
+        ));
+        assert!(!record_executable_path_sample(
+            &mut histories,
+            "BTC-USDT",
+            &make_book(10_999, 2)
+        ));
+        assert!(record_executable_path_sample(
+            &mut histories,
+            "BTC-USDT",
+            &make_book(11_000, 3)
+        ));
+        assert!(record_executable_path_sample(
+            &mut histories,
+            "BTC-USDT",
+            &make_book(611_001, 4)
+        ));
+        let path = histories.executable_paths.get("BTC-USDT").unwrap();
+        assert_eq!(
+            path.samples.len(),
+            1,
+            "observations older than ten minutes must roll out"
+        );
+        assert_eq!(path.samples[0].source_cursor, 4);
+        assert_eq!(std::mem::size_of::<ExecutableQuoteSample>(), 32);
+        assert!(
+            MAX_EXECUTABLE_PATH_SYMBOLS * 1_024 * std::mem::size_of::<ExecutableQuoteSample>()
+                <= 8 * 1_024 * 1_024,
+            "worst-case power-of-two ring payload stays under 8 MiB"
+        );
+
+        let mut retained = Histories::default();
+        for second in 0..(MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL + 100) {
+            let ts = 1_000 + second as u64 * 1_000;
+            assert!(record_executable_path_sample(
+                &mut retained,
+                "BTC-USDT",
+                &make_book(ts, second as u64 + 1)
+            ));
+        }
+        assert_eq!(
+            retained.executable_paths["BTC-USDT"].samples.len(),
+            MAX_EXECUTABLE_PATH_SAMPLES_PER_SYMBOL
+        );
+    }
+
+    #[tokio::test]
+    async fn executable_quote_path_endpoint_exposes_chronological_source_identity() {
+        let data = empty_data();
+        {
+            let mut histories = data.histories.lock().await;
+            let timestamp = now_ms().unwrap();
+            let book = BookSnapshot {
+                bids: vec![BookLevel {
+                    price: 99.0,
+                    size: 1.0,
+                }],
+                asks: vec![BookLevel {
+                    price: 101.0,
+                    size: 1.0,
+                }],
+                updated_at_ms: timestamp,
+                source_epoch: Some("epoch".into()),
+                source_cursor: Some(7),
+                source_record_id: Some("paper-book:v1:epoch:BTC-USDT:7".into()),
+            };
+            assert!(record_executable_path_sample(
+                &mut histories,
+                "BTC-USDT",
+                &book
+            ));
+        }
+        let response = data
+            .executable_path(
+                "BTC-USDT",
+                Some(now_ms().unwrap().saturating_sub(1_000)),
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.source_system, "feed_handlers.book_stream");
+        assert_eq!(response.source_epoch, "epoch");
+        assert_eq!(response.maximum_observed_gap_ms, 0);
+        assert_eq!(response.samples[0].source_cursor, 7);
+        assert_eq!(
+            response.samples[0].source_record_id,
+            "paper-book:v1:epoch:BTC-USDT:7"
         );
     }
 
@@ -1056,6 +1927,9 @@ mod tests {
                     size: 1.0,
                 }],
                 updated_at_ms: now_ms().unwrap(),
+                source_epoch: None,
+                source_cursor: None,
+                source_record_id: None,
             }),
         );
 
@@ -1086,5 +1960,255 @@ mod tests {
         let subscriptions = data.subscriptions.lock().await;
         assert_eq!(subscriptions.get("BTC-USDT").unwrap().status(), "pending");
         assert!(data.book("BTC-USDT").is_none());
+    }
+
+    #[tokio::test]
+    async fn sampled_mark_evidence_survives_restart_and_preserves_executable_sides() {
+        let path = test_database_path("restart-sides");
+        let mut evidence = sample_evidence("market-epoch-1", 41, now_ms().unwrap());
+        evidence.bid = 99.25;
+        evidence.ask = 100.75;
+        persist_mark_evidence_sync(&path, &evidence).unwrap();
+
+        // A newly constructed market-data owner has no in-memory quote state,
+        // but the exact sampled source identity remains independently queryable.
+        let mut restarted = empty_data();
+        restarted.mark_evidence_path = path.clone();
+        assert!(restarted.book("BTC-USDT").is_none());
+        let recovered = lookup_mark_evidence(
+            restarted.mark_evidence_path.clone(),
+            "BTC-USDT".into(),
+            evidence.source_epoch.clone(),
+            evidence.source_cursor,
+            evidence.source_record_id.clone(),
+            mark_evidence_retention_cutoff().unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered.quote_timestamp_ms, evidence.quote_timestamp_ms);
+        assert_eq!(
+            recovered.bid, 99.25,
+            "long valuation must use the executable bid"
+        );
+        assert_eq!(
+            recovered.ask, 100.75,
+            "short valuation must use the executable ask"
+        );
+        assert!(recovered.evidence_cursor > 0);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn sampled_mark_evidence_rejects_reuse_of_a_source_identity_for_changed_quote() {
+        let path = test_database_path("mismatch");
+        let evidence = sample_evidence("market-epoch-2", 7, now_ms().unwrap());
+        persist_mark_evidence_sync(&path, &evidence).unwrap();
+        let mut changed = evidence.clone();
+        changed.bid = 98.0;
+        assert!(persist_mark_evidence_sync(&path, &changed).is_err());
+        let mut mismatched_identity = evidence.clone();
+        mismatched_identity.source_record_id.push_str("-other");
+        assert!(persist_mark_evidence_sync(&path, &mismatched_identity).is_err());
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn sampled_mark_evidence_is_retained_within_per_symbol_resource_bound() {
+        let path = test_database_path("retention-bound");
+        let start = now_ms().unwrap();
+        for cursor in 1..=(MAX_MARK_EVIDENCE_PER_SYMBOL as u64 + 1) {
+            let evidence = sample_evidence(
+                "market-epoch-retention",
+                cursor,
+                start + (cursor - 1) * TICKER_HISTORY_SAMPLE_INTERVAL.as_millis() as u64,
+            );
+            persist_mark_evidence_sync(&path, &evidence).unwrap();
+        }
+
+        let connection = Connection::open(&path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM executable_market_mark_evidence WHERE symbol = 'BTC-USDT'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count <= MAX_MARK_EVIDENCE_PER_SYMBOL as i64);
+        let first_cursor = 1;
+        let old = connection.query_row(
+            "SELECT COUNT(*) FROM executable_market_mark_evidence WHERE source_epoch = ?1 AND source_cursor = ?2",
+            params!["market-epoch-retention", first_cursor],
+            |row| row.get::<_, i64>(0),
+        ).unwrap();
+        assert_eq!(old, 0, "the per-symbol cap must roll out the oldest sample");
+        drop(connection);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn sampled_mark_evidence_enforces_global_record_cap() {
+        let path = test_database_path("global-bound");
+        let connection = mark_evidence_db(&path).unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        let seed_timestamp = now_ms().unwrap() as i64;
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO executable_market_mark_evidence
+                 (symbol, quote_timestamp_ms, bid, ask, source_epoch, source_cursor, source_record_id)
+                 VALUES (?1, ?2, 99.0, 101.0, 'seed-epoch', ?3, ?4)",
+            ).unwrap();
+            for cursor in 0..MAX_MARK_EVIDENCE_RECORDS as u64 {
+                let symbol = format!("S{}-USDT", cursor / MAX_MARK_EVIDENCE_PER_SYMBOL as u64);
+                insert
+                    .execute(params![
+                        symbol,
+                        seed_timestamp,
+                        cursor as i64 + 1,
+                        format!("seed-{cursor}")
+                    ])
+                    .unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+
+        persist_mark_evidence_sync(
+            &path,
+            &sample_evidence("global-cap-epoch", 1, now_ms().unwrap()),
+        )
+        .unwrap();
+        let connection = Connection::open(&path).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM executable_market_mark_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count <= MAX_MARK_EVIDENCE_RECORDS as i64);
+        drop(connection);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn sampled_mark_evidence_expires_rows_older_than_the_retention_window() {
+        let path = test_database_path("age-retention");
+        let now = now_ms().unwrap();
+        let connection = mark_evidence_db(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO executable_market_mark_evidence
+             (symbol, quote_timestamp_ms, bid, ask, source_epoch, source_cursor, source_record_id)
+             VALUES (?1, ?2, 99.0, 101.0, ?3, 1, ?4)",
+                params![
+                    "BTC-USDT",
+                    now.saturating_sub(TICKER_HISTORY_RETENTION.as_millis() as u64 + 1) as i64,
+                    "age-retention-epoch",
+                    "paper-book:v1:age-retention-epoch:BTC-USDT:1"
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        let recent = sample_evidence("age-retention-epoch", 2, now);
+        persist_mark_evidence_sync(&path, &recent).unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let old_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM executable_market_mark_evidence WHERE source_epoch = ?1 AND source_cursor = 1",
+                params!["age-retention-epoch"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_count, 0,
+            "rows beyond quote-time retention must be removed"
+        );
+        drop(connection);
+        remove_test_database(&path);
+    }
+
+    #[tokio::test]
+    async fn sampled_mark_evidence_pages_are_bounded_and_use_durable_cursors() {
+        let path = test_database_path("paging");
+        let timestamp = now_ms().unwrap();
+        for cursor in 1..=3 {
+            persist_mark_evidence_sync(
+                &path,
+                &sample_evidence("paging-epoch", cursor, timestamp + cursor),
+            )
+            .unwrap();
+        }
+        let cutoff = mark_evidence_retention_cutoff().unwrap();
+        let (first, has_more) = page_mark_evidence(path.clone(), "BTC-USDT".into(), 0, 2, cutoff)
+            .await
+            .unwrap();
+        assert!(has_more);
+        assert_eq!(first.len(), 2);
+        assert!(first[0].evidence_cursor < first[1].evidence_cursor);
+
+        let (second, has_more) = page_mark_evidence(
+            path.clone(),
+            "BTC-USDT".into(),
+            first.last().unwrap().evidence_cursor,
+            2,
+            cutoff,
+        )
+        .await
+        .unwrap();
+        assert!(!has_more);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].evidence_cursor > first[1].evidence_cursor);
+        remove_test_database(&path);
+    }
+
+    #[test]
+    fn mark_evidence_requires_complete_source_identity_before_persistence() {
+        let book = BookSnapshot {
+            bids: vec![BookLevel {
+                price: 99.0,
+                size: 1.0,
+            }],
+            asks: vec![BookLevel {
+                price: 101.0,
+                size: 1.0,
+            }],
+            updated_at_ms: 1_700_000_000_000,
+            source_epoch: None,
+            source_cursor: Some(1),
+            source_record_id: Some("record-1".into()),
+        };
+        let sample = book_history_sample(&book).unwrap();
+        assert!(sample.into_evidence("BTC-USDT", &book).is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_mark_source_identity_fails_closed_as_not_found() {
+        let path = test_database_path("missing-source");
+        persist_mark_evidence_sync(
+            &path,
+            &sample_evidence("present-epoch", 9, now_ms().unwrap()),
+        )
+        .unwrap();
+        let mut data = empty_data();
+        data.mark_evidence_path = path.clone();
+        let result = get_market_mark_evidence(
+            State(Arc::new(data)),
+            Query(MarketMarkEvidenceQuery {
+                symbol: "BTC-USDT".into(),
+                source_epoch: Some("absent-epoch".into()),
+                source_cursor: Some(9),
+                source_record_id: Some("paper-book:v1:absent-epoch:BTC-USDT:9".into()),
+                after_cursor: None,
+                limit: None,
+            }),
+        )
+        .await;
+        match result {
+            Err((status, _)) => assert_eq!(status, StatusCode::NOT_FOUND),
+            Ok(_) => panic!("missing market mark source identity must fail closed"),
+        }
+        remove_test_database(&path);
     }
 }

@@ -34,9 +34,8 @@ describe('WalkForwardWidget', () => {
       }),
     );
 
-    assert.match(markup, />37</);
-    assert.match(markup, />60\.0%<\/b>/);
-    assert.match(markup, />\+0\.120%<\/b>/);
+    // AG Grid does not server-render virtualized data rows. The row values
+    // are verified through projectWalkForwardProfileRows in the model suite.
     assert.match(markup, /trend: 14 samples/);
   });
 });

@@ -552,6 +552,10 @@ async fn evaluate_position_exit(
         .as_u64()
         .and_then(|version| u16::try_from(version).ok());
     let freshness_max_age_ms = market["symbol_freshness"]["max_age_ms"].as_u64();
+    let quote_source_system = market["source_system"].as_str().map(str::to_owned);
+    let quote_source_epoch = market["source_epoch"].as_str().map(str::to_owned);
+    let quote_source_cursor = market["source_cursor"].as_u64();
+    let quote_source_record_id = market["source_record_id"].as_str().map(str::to_owned);
     let source_fresh = match (
         freshness_contract_version,
         market["symbol_freshness"]["state"].as_str(),
@@ -573,11 +577,14 @@ async fn evaluate_position_exit(
             .get_mut(&symbol)
             .and_then(|lots| lots.get_mut(&strategy_key))
         {
-            let should_sample = current
-                .price_path
-                .last()
-                .is_none_or(|sample| observed_at.saturating_sub(sample.timestamp) >= 5_000);
+            let should_sample = trade_price_path_sample_due(
+                current.price_path.last().map(|sample| sample.timestamp),
+                observed_at,
+            );
             if should_sample {
+                let previous_sample_timestamp =
+                    current.price_path.last().map(|sample| sample.timestamp);
+                let gap_ms = previous_sample_timestamp.map(|last| observed_at.saturating_sub(last));
                 if current.price_path_epoch.is_none() {
                     current.price_path_epoch = current.trade_id.as_ref().map(|trade_id| {
                         format!(
@@ -600,17 +607,64 @@ async fn evaluate_position_exit(
                     freshness_contract_version,
                     freshness_max_age_ms,
                     source_fresh,
+                    quote_source_system: quote_source_system.clone(),
+                    quote_source_epoch: quote_source_epoch.clone(),
+                    quote_source_cursor,
+                    quote_source_record_id: quote_source_record_id.clone(),
                 });
                 current.price_path_total_samples = sequence;
+                let quote_identity_complete = quote_source_system
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                    && quote_source_epoch
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && quote_source_cursor.is_some_and(|cursor| cursor > 0)
+                    && quote_source_record_id
+                        .as_deref()
+                        .is_some_and(|value| !value.trim().is_empty());
+                let return_percent = (source_fresh == Some(true))
+                    .then(|| {
+                        gross_executable_return_percent(
+                            position.quantity,
+                            position.average_entry_price,
+                            bid,
+                            ask,
+                        )
+                    })
+                    .flatten();
+                let cadence_complete = match (previous_sample_timestamp, gap_ms) {
+                    (None, _) => {
+                        position.entry_timestamp_ms > 0
+                            && observed_at >= position.entry_timestamp_ms
+                            && observed_at.saturating_sub(position.entry_timestamp_ms)
+                                <= TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
+                    }
+                    (Some(_), Some(gap)) => gap <= TRADE_PRICE_PATH_MAX_GAP_MS,
+                    _ => false,
+                };
+                record_event_driven_gross_excursion(
+                    current,
+                    return_percent,
+                    quote_identity_complete,
+                    source_fresh == Some(true),
+                    cadence_complete,
+                    previous_sample_timestamp.is_none(),
+                );
                 if current.price_path.len() > 4096 {
                     current.price_path.drain(..current.price_path.len() - 4096);
-                    current.price_path_truncated = true;
+                    current.price_path_memory_window_truncated = true;
                 }
                 position.price_path = current.price_path.clone();
                 position.price_path_total_samples = current.price_path_total_samples;
                 position.price_path_truncated = current.price_path_truncated;
                 position.price_path_restart_interrupted = current.price_path_restart_interrupted;
                 position.price_path_epoch = current.price_path_epoch.clone();
+                position.price_path_gross_mfe_percent = current.price_path_gross_mfe_percent;
+                position.price_path_gross_mae_percent = current.price_path_gross_mae_percent;
+                position.price_path_event_sample_count = current.price_path_event_sample_count;
+                position.price_path_event_metrics_complete =
+                    current.price_path_event_metrics_complete;
                 request_price_path_persist_if_due(state)?;
             } else {
                 position.price_path = current.price_path.clone();
@@ -618,6 +672,11 @@ async fn evaluate_position_exit(
                 position.price_path_truncated = current.price_path_truncated;
                 position.price_path_restart_interrupted = current.price_path_restart_interrupted;
                 position.price_path_epoch = current.price_path_epoch.clone();
+                position.price_path_gross_mfe_percent = current.price_path_gross_mfe_percent;
+                position.price_path_gross_mae_percent = current.price_path_gross_mae_percent;
+                position.price_path_event_sample_count = current.price_path_event_sample_count;
+                position.price_path_event_metrics_complete =
+                    current.price_path_event_metrics_complete;
             }
         }
     }
@@ -697,6 +756,101 @@ async fn evaluate_position_exit(
                 position.breakeven_protection_activated =
                     profile_exit_protection.breakeven_activated;
                 request_settings_persist(state)?;
+            }
+        }
+    }
+    let threshold_crossings = price_path_threshold_crossings_for_event(
+        &position,
+        observed_at,
+        bid,
+        ask,
+        source_fresh,
+        quote_source_system.as_deref(),
+        quote_source_epoch.as_deref(),
+        quote_source_cursor,
+        quote_source_record_id.as_deref(),
+        stop_loss_percent,
+        take_profit_percent,
+        immediate_net_return_percent,
+        profit_exit_net_return_percent,
+        immediate_exit_fee_rate,
+        profit_exit_fee_rate,
+        position
+            .exit_parameter_provenance
+            .as_ref()
+            .and_then(|provenance| provenance["stop_loss"]["source"].as_str())
+            .unwrap_or(if position.stop_loss_percent.is_some() {
+                "persisted_position_parameter"
+            } else {
+                "global_fallback"
+            }),
+        take_profit_source,
+    );
+    if !threshold_crossings.is_empty() {
+        let mut settings = state.settings.lock().await;
+        if let Some(current) = settings
+            .strategy_positions
+            .get_mut(&symbol)
+            .and_then(|lots| lots.get_mut(&strategy_key))
+        {
+            if (current.quantity - position.quantity).abs() <= 1e-12
+                && (current.average_entry_price - position.average_entry_price).abs() <= 1e-12
+            {
+                let mut changed = false;
+                for crossing in threshold_crossings {
+                    let kind = crossing
+                        .get("threshold_type")
+                        .and_then(serde_json::Value::as_str);
+                    if kind.is_some_and(|kind| {
+                        current
+                            .price_path_threshold_crossings
+                            .iter()
+                            .any(|existing| {
+                                existing
+                                    .get("threshold_type")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some(kind)
+                            })
+                    }) {
+                        continue;
+                    }
+                    current.price_path_threshold_crossings.push(crossing);
+                    changed = true;
+                }
+                current
+                    .price_path_threshold_crossings
+                    .sort_by(|left, right| {
+                        left.get("timestamp_ms")
+                            .and_then(serde_json::Value::as_u64)
+                            .cmp(
+                                &right
+                                    .get("timestamp_ms")
+                                    .and_then(serde_json::Value::as_u64),
+                            )
+                            .then_with(|| {
+                                left.get("quote_source_epoch")
+                                    .and_then(serde_json::Value::as_str)
+                                    .cmp(
+                                        &right
+                                            .get("quote_source_epoch")
+                                            .and_then(serde_json::Value::as_str),
+                                    )
+                            })
+                            .then_with(|| {
+                                left.get("quote_source_cursor")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .cmp(
+                                        &right
+                                            .get("quote_source_cursor")
+                                            .and_then(serde_json::Value::as_u64),
+                                    )
+                            })
+                    });
+                if changed {
+                    position.price_path_threshold_crossings =
+                        current.price_path_threshold_crossings.clone();
+                    request_settings_persist(state)?;
+                }
             }
         }
     }

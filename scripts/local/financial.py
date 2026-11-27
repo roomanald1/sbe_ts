@@ -1077,6 +1077,7 @@ def reconstruct_portfolio_intervals_from_paper_exchange(page, pm_intervals, pm_t
             ):
                 pm_rates = pm.get(rates_key)
                 pm_times = pm.get(times_key)
+                pm_source_ids = pm.get(f"{boundary}_fx_source_record_ids_by_currency")
                 if not isinstance(pm_rates, dict) or not isinstance(pm_times, dict):
                     return None
                 marks_for_boundary = {}
@@ -1101,6 +1102,10 @@ def reconstruct_portfolio_intervals_from_paper_exchange(page, pm_intervals, pm_t
                         source_cursor = stored.get("source_cursor")
                         source_epoch = stored.get("source_epoch")
                         source_system = stored.get("source_system")
+                    if (isinstance(pm_source_ids, dict)
+                            and currency in pm_source_ids
+                            and pm_source_ids[currency] != source_record_id):
+                        return None
                     marks_for_boundary[currency] = (rate, timestamp)
                     fx_marks.append({"boundary": boundary, "currency": currency,
                                      "rate_usd": rate, "updated_at_utc_ms": timestamp,
@@ -1162,6 +1167,186 @@ def reconstruct_portfolio_intervals_from_paper_exchange(page, pm_intervals, pm_t
     }
 
 
+def reconcile_interval_position_marks(position_intervals, independent_contract=None):
+    """Validate PM executable close marks without overstating independence.
+
+    PM's durable rows can prove that each interval captured an exact, fresh
+    Paper Exchange mark and timestamped FX conversion. Independent validation
+    additionally requires the source book event in the Paper Exchange financial
+    evidence bundle. The current bundle does not publish those events, so this
+    result deliberately remains unreconciled even when PM-side checks pass.
+    """
+    result = {
+        "status": "BLOCKED",
+        "pm_mark_rows_valid": False,
+        "independent_market_mark_history_reconciled": False,
+        "interval_count": 0,
+        "position_mark_count": 0,
+        "blockers": [],
+        "note": "PM-side source integrity does not independently reconcile executable marks or establish returns.",
+    }
+    if not isinstance(position_intervals, list) or not position_intervals:
+        result["blockers"].append("Position interval rows are unavailable for mark validation")
+        return result
+    result["interval_count"] = len(position_intervals)
+    valid_rows = 0
+    errors = []
+    normalized_marks = {}
+    for interval in position_intervals:
+        if not isinstance(interval, dict):
+            errors.append("PM portfolio interval row is invalid")
+            continue
+        interval_end = interval.get("interval_end_utc_ms")
+        positions = interval.get("positions")
+        valuations = interval.get("position_valuations", [])
+        if not isinstance(interval_end, int) or isinstance(interval_end, bool) or not isinstance(positions, list) or not isinstance(valuations, list):
+            errors.append("PM interval lacks timestamped position valuation rows")
+            continue
+        open_positions = {}
+        try:
+            for position in positions:
+                if not isinstance(position, dict):
+                    raise ValueError("PM position row is invalid")
+                if "quantity" not in position:
+                    if isinstance(position.get("status"), str) and position["status"].startswith("closed"):
+                        continue
+                    raise ValueError("PM interval includes an unrecognized non-spot position")
+                quantity = dec(position["quantity"])
+                symbol = position.get("symbol")
+                if not isinstance(symbol, str) or not symbol:
+                    raise ValueError("PM position symbol is unavailable")
+                if abs(quantity) > Decimal("1e-12"):
+                    if symbol in open_positions:
+                        raise ValueError("PM interval repeats an open position symbol")
+                    open_positions[symbol] = quantity
+            if len(valuations) != len(open_positions):
+                raise ValueError("PM interval mark coverage does not match open position inventory")
+            rows = {}
+            for row in valuations:
+                if not isinstance(row, dict):
+                    raise ValueError("PM position valuation row is invalid")
+                symbol = row.get("symbol")
+                if not isinstance(symbol, str) or symbol not in open_positions or symbol in rows:
+                    raise ValueError("PM position valuation symbol is missing, unexpected, or duplicated")
+                quantity = dec(row.get("quantity"))
+                if quantity != open_positions[symbol]:
+                    raise ValueError(f"PM position quantity mismatch for {symbol}")
+                close_side = "bid" if quantity > 0 else "ask"
+                if row.get("close_side") != close_side:
+                    raise ValueError(f"PM position close side is not executable for {symbol}")
+                price = dec(row.get("close_price"))
+                fx_rate = dec(row.get("fx_rate_usd"))
+                quote = symbol.rsplit("-", 1)[-1]
+                if row.get("quote_currency") != quote or price <= 0 or fx_rate <= 0:
+                    raise ValueError(f"PM position close price or FX currency is invalid for {symbol}")
+                pm_fx_rates = interval.get("closing_fx_rates_usd_by_currency")
+                pm_fx_times = interval.get("closing_fx_rates_updated_at_by_currency")
+                pm_fx_ids = interval.get("closing_fx_source_record_ids_by_currency")
+                if isinstance(pm_fx_rates, dict) and quote in pm_fx_rates:
+                    if dec(pm_fx_rates[quote]) != fx_rate:
+                        raise ValueError(f"PM position FX rate differs from closing currency valuation for {symbol}")
+                if isinstance(pm_fx_times, dict) and quote in pm_fx_times:
+                    if pm_fx_times[quote] != row.get("fx_updated_at_utc_ms"):
+                        raise ValueError(f"PM position FX timestamp differs from closing currency valuation for {symbol}")
+                if isinstance(pm_fx_ids, dict) and quote in pm_fx_ids:
+                    if pm_fx_ids[quote] != row.get("fx_source_record_id"):
+                        raise ValueError(f"PM position FX source identity differs from closing currency valuation for {symbol}")
+                value_quote = dec(row.get("signed_close_value_quote"))
+                value_usd = dec(row.get("signed_close_value_usd"))
+                if abs(value_quote - quantity * price) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                    raise ValueError(f"PM marked quote value mismatch for {symbol}")
+                if abs(value_usd - value_quote * fx_rate) > PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE:
+                    raise ValueError(f"PM marked USD value mismatch for {symbol}")
+                mark_time = row.get("mark_updated_at_utc_ms")
+                valued_at = row.get("valued_at_utc_ms")
+                fx_time = row.get("fx_updated_at_utc_ms")
+                if any(not isinstance(value, int) or isinstance(value, bool) for value in (mark_time, valued_at, fx_time)):
+                    raise ValueError(f"PM position mark timestamps are missing for {symbol}")
+                if valued_at != interval_end or mark_time <= 0 or mark_time > interval_end or interval_end - mark_time > 5_000:
+                    raise ValueError(f"PM executable mark is future-dated, stale, or misaligned for {symbol}")
+                if fx_time > interval_end or (quote != "USD" and interval_end - fx_time > PORTFOLIO_FX_MAX_AGE_MS):
+                    raise ValueError(f"PM position FX mark is future-dated or stale for {symbol}")
+                if (row.get("mark_source_system") != "paper_exchange.market_data_cache"
+                        or not isinstance(row.get("mark_source_epoch"), str) or not row.get("mark_source_epoch")
+                        or not isinstance(row.get("mark_source_cursor"), int) or row.get("mark_source_cursor") <= 0
+                        or not isinstance(row.get("mark_source_record_id"), str) or not row.get("mark_source_record_id")
+                        or not isinstance(row.get("fx_source_record_id"), str) or not row.get("fx_source_record_id")):
+                    raise ValueError(f"PM position mark or FX source identity is incomplete for {symbol}")
+                rows[symbol] = row
+                normalized_marks[(row["mark_source_epoch"], row["mark_source_cursor"], row["mark_source_record_id"])] = row
+            if interval.get("open_position_valuation_complete") is not (len(open_positions) == len(rows)):
+                if "open_position_valuation_complete" in interval or open_positions:
+                    raise ValueError("PM interval open-position valuation completeness flag disagrees with marks")
+            if interval.get("open_position_valuation_reasons") not in ([], None):
+                raise ValueError("PM interval reports position valuation blockers")
+            if open_positions and interval.get("market_mark_at_utc_ms") != interval_end:
+                raise ValueError("PM interval market mark timestamp does not match valuation boundary")
+            if not open_positions and rows:
+                raise ValueError("PM flat interval unexpectedly contains position marks")
+            valid_rows += 1
+            result["position_mark_count"] += len(rows)
+        except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+            errors.append(f"{interval.get('evidence_id', 'unknown interval')}: {error}")
+    if errors:
+        result["blockers"].extend(errors[:100])
+        result["status"] = "MISMATCH"
+        return result
+    result["pm_mark_rows_valid"] = valid_rows == len(position_intervals)
+    if not result["pm_mark_rows_valid"]:
+        result["blockers"].append("One or more PM intervals failed position mark validation")
+        return result
+    if result["position_mark_count"] == 0:
+        result["status"] = "NOT_APPLICABLE_FLAT_INTERVALS"
+        return result
+
+    market_history = independent_contract.get("market_mark_history") if isinstance(independent_contract, dict) else None
+    if (not isinstance(market_history, dict)
+            or market_history.get("schema_version") != 1
+            or market_history.get("source_system") != "paper_exchange.market_data_cache"
+            or market_history.get("complete") is not True
+            or not isinstance(market_history.get("marks"), list)):
+        result["status"] = "VALIDATED_PENDING_INDEPENDENT_MARK_HISTORY"
+        result["blockers"].append(
+            "Paper Exchange financial evidence provides no complete durable executable book-mark history contract"
+        )
+        return result
+    external_marks = {}
+    for row in market_history["marks"]:
+        if not isinstance(row, dict):
+            result["blockers"].append("Independent Paper Exchange market mark row is invalid")
+            return result
+        key = (row.get("source_epoch"), row.get("source_cursor"), row.get("source_record_id"))
+        if key in external_marks or key not in normalized_marks:
+            result["status"] = "MISMATCH"
+            result["blockers"].append("Independent market mark identity is duplicated or not present in PM evidence")
+            return result
+        external_marks[key] = row
+        pm_row = normalized_marks[key]
+        try:
+            independently_selected_price = dec(row.get(pm_row["close_side"]))
+            pm_selected_price = dec(pm_row["close_price"])
+        except (KeyError, TypeError, ValueError) as error:
+            result["status"] = "MISMATCH"
+            result["blockers"].append(f"Independent executable book mark is incomplete: {error}")
+            return result
+        if (row.get("symbol") != pm_row["symbol"]
+                or row.get("updated_at_ms") != pm_row["mark_updated_at_utc_ms"]
+                or independently_selected_price != pm_selected_price):
+            result["status"] = "MISMATCH"
+            result["blockers"].append("Independent executable book mark does not match PM valuation evidence")
+            return result
+    if not set(normalized_marks).issubset(external_marks):
+        result["status"] = "MISMATCH"
+        result["blockers"].append("Independent market mark history does not cover every PM executable mark")
+        return result
+    result.update({
+        "status": "RECONCILED",
+        "independent_market_mark_history_reconciled": True,
+        "blockers": [],
+    })
+    return result
+
+
 def reconcile_independent_portfolio_intervals(
     position_intervals,
     independent_contract,
@@ -1188,6 +1373,9 @@ def reconcile_independent_portfolio_intervals(
         "reconciled_flat_cash_period_return_percent": None,
         "source_is_synthetic_test_fixture": False,
         "blockers": [],
+        "position_mark_reconciliation": reconcile_interval_position_marks(
+            position_intervals, independent_contract
+        ),
         "note": (
             "Return fields require complete independent interval, fill, contribution, "
             "balance and timestamp-aligned FX reconciliation; this is not a profitability conclusion."
@@ -1474,6 +1662,7 @@ def reconcile_independent_portfolio_intervals(
         ):
             pm_rates = money_map(pm.get(pm_rates_key), f"PM {boundary} FX rates")
             pm_times = int_map(pm.get(pm_times_key), f"PM {boundary} FX timestamps")
+            pm_source_ids = pm.get(f"{boundary}_fx_source_record_ids_by_currency")
             external_values = money_map(external.get(independent_values_key), f"Independent {boundary} USD valuation")
             pm_values = money_map(pm.get(pm_values_key), f"PM {boundary} USD valuation")
             if set(pm_rates) != set(balances) or set(pm_times) != set(balances):
@@ -1485,6 +1674,9 @@ def reconcile_independent_portfolio_intervals(
                 mark = mark_map.get((boundary, currency))
                 if mark is None:
                     raise ValueError(f"Missing independent {boundary} FX mark for {currency}")
+                if isinstance(pm_source_ids, dict) and currency in pm_source_ids:
+                    if pm_source_ids[currency] != mark.get("source_record_id"):
+                        raise ValueError(f"{boundary.title()} FX source record ID mismatch for {currency}")
                 rate = number(mark.get("rate_usd"), f"Independent {boundary} FX rate {currency}")
                 updated_at = mark.get("updated_at_utc_ms")
                 if (

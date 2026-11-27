@@ -679,6 +679,777 @@ fn cached_position_summary(
     indexed_position_summary(store, ledger, source)
 }
 
+fn net_unrealized_quote(
+    gross: Option<f64>,
+    entry_fee_cashflow: f64,
+    estimated_close_fee: Option<f64>,
+    fees_complete: bool,
+) -> Option<f64> {
+    let (Some(gross), Some(close_fee)) = (gross, estimated_close_fee) else {
+        return None;
+    };
+    (fees_complete && gross.is_finite() && entry_fee_cashflow.is_finite() && close_fee.is_finite())
+        .then_some(gross + entry_fee_cashflow - close_fee)
+}
+
+fn executable_breakeven_price(
+    quantity: f64,
+    entry_price: f64,
+    entry_fee_cashflow: f64,
+    estimated_close_fee_rate: f64,
+    fees_complete: bool,
+) -> Option<f64> {
+    let qty = quantity.abs();
+    let rate = estimated_close_fee_rate.abs();
+    if !fees_complete
+        || !quantity.is_finite()
+        || qty <= EPSILON
+        || !entry_price.is_finite()
+        || entry_price <= 0.0
+        || !entry_fee_cashflow.is_finite()
+        || !rate.is_finite()
+        || rate >= 1.0
+    {
+        return None;
+    }
+    let price = if quantity > 0.0 {
+        (entry_price * qty - entry_fee_cashflow) / (qty * (1.0 - rate))
+    } else {
+        (entry_price * qty + entry_fee_cashflow) / (qty * (1.0 + rate))
+    };
+    (price.is_finite() && price > 0.0).then_some(price)
+}
+
+struct ActivePositionIdentity {
+    position_identity: Option<String>,
+    canonical_trade_ids: Vec<String>,
+    parent_order_ids: Vec<String>,
+    sources: Vec<String>,
+    entry_fill_ids: Vec<String>,
+    all_entry_fills_known: bool,
+    entry_fee_currency_is_quote: bool,
+}
+
+fn barrier_matches_active_position(
+    barrier_symbol: &str,
+    barrier_source: &str,
+    barrier_trade_id: Option<&str>,
+    barrier_parent_order_id: Option<&str>,
+    position_symbol: &str,
+    source_filter: Option<&str>,
+    identity: &ActivePositionIdentity,
+) -> bool {
+    barrier_symbol == position_symbol
+        && source_filter.map_or_else(
+            || {
+                identity
+                    .sources
+                    .iter()
+                    .any(|source| source == barrier_source)
+            },
+            |source| source == barrier_source,
+        )
+        && (barrier_trade_id.is_some_and(|id| {
+            identity
+                .canonical_trade_ids
+                .iter()
+                .any(|current| current == id)
+        }) || barrier_parent_order_id.is_some_and(|id| {
+            identity
+                .parent_order_ids
+                .iter()
+                .any(|current| current == id)
+        }))
+}
+
+fn active_position_fill_identities(
+    trades: &[PositionTrade],
+    symbol: &str,
+    source: Option<&str>,
+) -> ActivePositionIdentity {
+    struct ActiveLot<'a> {
+        signed_quantity: f64,
+        fill_id: Option<String>,
+        trade_id: Option<String>,
+        parent_order_id: Option<String>,
+        source: String,
+        fee_known: bool,
+        fee_currency: &'a str,
+    }
+    let mut lots: Vec<ActiveLot<'_>> = Vec::new();
+    for trade in trades.iter().filter(|trade| {
+        trade.symbol == symbol && source.is_none_or(|source| trade.source == source)
+    }) {
+        let incoming_sign = if matches!(&trade.side, TradeSide::Buy) {
+            1.0
+        } else {
+            -1.0
+        };
+        let mut remaining = trade.quantity.abs();
+        while remaining > EPSILON
+            && lots
+                .first()
+                .is_some_and(|lot| lot.signed_quantity.signum() != incoming_sign)
+        {
+            let old_remaining = lots[0].signed_quantity.abs();
+            let closed = old_remaining.min(remaining);
+            remaining -= closed;
+            if old_remaining - closed <= EPSILON {
+                lots.remove(0);
+            } else {
+                lots[0].signed_quantity =
+                    lots[0].signed_quantity.signum() * (old_remaining - closed);
+            }
+        }
+        if remaining > EPSILON {
+            lots.push(ActiveLot {
+                signed_quantity: incoming_sign * remaining,
+                fill_id: trade.fill_id.clone(),
+                trade_id: trade
+                    .lifecycle
+                    .as_ref()
+                    .map(|lifecycle| lifecycle.trade_id.clone()),
+                parent_order_id: trade.parent_order_id.clone(),
+                source: trade.source.clone(),
+                fee_known: trade.fee_known,
+                fee_currency: &trade.fee_currency,
+            });
+        }
+    }
+    let fill_ids = lots
+        .iter()
+        .filter_map(|lot| lot.fill_id.clone())
+        .collect::<Vec<_>>();
+    let identity = (!lots.is_empty() && fill_ids.len() == lots.len())
+        .then(|| format!("pm-position:v1:{}", fill_ids.join(",")));
+    let canonical_ids = lots
+        .iter()
+        .filter_map(|lot| lot.trade_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let parent_order_ids = lots
+        .iter()
+        .filter_map(|lot| lot.parent_order_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let sources = lots
+        .iter()
+        .map(|lot| lot.source.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let all_entry_fills_known = !lots.is_empty() && lots.iter().all(|lot| lot.fee_known);
+    let entry_fee_currency_is_quote = !lots.is_empty()
+        && lots.iter().all(|lot| {
+            symbol
+                .split_once('-')
+                .is_some_and(|(_, quote)| lot.fee_currency == quote)
+        });
+    ActivePositionIdentity {
+        position_identity: identity,
+        canonical_trade_ids: canonical_ids,
+        parent_order_ids,
+        sources,
+        entry_fill_ids: fill_ids,
+        all_entry_fills_known,
+        entry_fee_currency_is_quote,
+    }
+}
+
+#[derive(Clone)]
+struct OperationalFeeSchedule {
+    symbol: String,
+    ledger_epoch: String,
+    ledger_high_water_cursor: u64,
+    id: String,
+    version: String,
+    source_epoch: String,
+    source_cursor: u64,
+    source_record_id: String,
+    source_timestamp_ms: u64,
+    effective_from_ms: u64,
+    effective_to_ms: Option<u64>,
+    taker_rate: f64,
+}
+
+fn valid_exit_fee_schedule(
+    schedule: Option<&OperationalFeeSchedule>,
+    symbol: &str,
+    at_ms: u64,
+) -> bool {
+    schedule.is_some_and(|schedule| {
+        schedule.symbol == symbol
+            && !schedule.ledger_epoch.trim().is_empty()
+            && schedule.source_cursor <= schedule.ledger_high_water_cursor
+            && !schedule.id.trim().is_empty()
+            && !schedule.version.trim().is_empty()
+            && !schedule.source_epoch.trim().is_empty()
+            && schedule.source_cursor > 0
+            && !schedule.source_record_id.trim().is_empty()
+            && schedule.source_timestamp_ms <= at_ms
+            && schedule.effective_from_ms > 0
+            && schedule.effective_from_ms <= at_ms
+            && schedule.effective_to_ms.is_none_or(|end| at_ms < end)
+            && schedule.taker_rate.is_finite()
+            && (0.0..=0.1).contains(&schedule.taker_rate)
+    })
+}
+
+fn active_entry_fee_evidence_valid(
+    trade: &PositionTrade,
+    symbol: &str,
+    quote_currency: &str,
+) -> bool {
+    let Some(event) = trade.paper_exchange_fee_schedule_evidence.as_ref() else {
+        return false;
+    };
+    let payload_symbol = event.get("symbol").and_then(serde_json::Value::as_str);
+    let schedule_id = event
+        .get("fee_schedule_id")
+        .and_then(serde_json::Value::as_str);
+    let schedule_version = event
+        .get("fee_schedule_version")
+        .and_then(serde_json::Value::as_str);
+    let schedule_time = event
+        .get("source_timestamp_utc_ms")
+        .and_then(serde_json::Value::as_u64);
+    let effective_from = event
+        .get("effective_from_utc_ms")
+        .and_then(serde_json::Value::as_u64);
+    let effective_to = event
+        .get("effective_to_utc_ms")
+        .and_then(serde_json::Value::as_u64);
+    let source_epoch = event
+        .get("source_epoch")
+        .and_then(serde_json::Value::as_str);
+    let source_record_id = event
+        .get("source_record_id")
+        .and_then(serde_json::Value::as_str);
+    let source_cursor = event
+        .get("source_cursor")
+        .and_then(serde_json::Value::as_u64);
+    let order_class = trade.paper_exchange_fee_order_class.as_deref();
+    let independent_fee = trade.paper_exchange_fee_amount;
+    let independent_currency = trade.paper_exchange_fee_currency.as_deref();
+    event.get("event_type").and_then(serde_json::Value::as_str) == Some("fee_schedule")
+        && payload_symbol == Some(symbol)
+        && schedule_id == trade.paper_exchange_fee_schedule_id.as_deref()
+        && schedule_version == trade.paper_exchange_fee_schedule_version.as_deref()
+        && schedule_time.is_some_and(|time| time <= trade.timestamp)
+        && effective_from.is_some_and(|start| start > 0 && start <= trade.timestamp)
+        && effective_to.is_none_or(|end| trade.timestamp < end)
+        && source_epoch.is_some_and(|value| !value.trim().is_empty())
+        && source_record_id.is_some_and(|value| !value.trim().is_empty())
+        && source_cursor.is_some_and(|cursor| cursor > 0)
+        && matches!(order_class, Some("maker" | "taker"))
+        && trade.fee_known
+        && trade.fee_currency == quote_currency
+        && independent_currency == Some(quote_currency)
+        && independent_fee.is_some_and(|fee| {
+            fee.is_finite() && (fee.abs() - trade.fee.abs()).abs() <= 1e-8_f64.max(fee.abs() * 1e-8)
+        })
+}
+
+#[derive(Clone)]
+struct CachedOperationalFeeSchedule {
+    cached_at_ms: u64,
+    schedule: Option<OperationalFeeSchedule>,
+}
+
+static OPERATIONAL_FEE_SCHEDULE_CACHE: std::sync::OnceLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, CachedOperationalFeeSchedule>>,
+> = std::sync::OnceLock::new();
+
+async fn current_operational_fee_schedules(
+    symbols: &[String],
+    at_ms: u64,
+) -> std::collections::HashMap<String, Option<OperationalFeeSchedule>> {
+    const CACHE_TTL_MS: u64 = 10_000;
+    const NEGATIVE_CACHE_TTL_MS: u64 = 1_000;
+    const MAX_CACHE_SYMBOLS: usize = 256;
+    let cache = OPERATIONAL_FEE_SCHEDULE_CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut result = std::collections::HashMap::new();
+    let mut uncached = Vec::new();
+    {
+        let cache = cache.lock().await;
+        for symbol in symbols {
+            if let Some(cached) = cache.get(symbol) {
+                let ttl = if cached.schedule.is_some() {
+                    CACHE_TTL_MS
+                } else {
+                    NEGATIVE_CACHE_TTL_MS
+                };
+                if at_ms.saturating_sub(cached.cached_at_ms) <= ttl
+                    && cached.schedule.as_ref().is_none_or(|schedule| {
+                        valid_exit_fee_schedule(Some(schedule), symbol, at_ms)
+                    })
+                {
+                    result.insert(symbol.clone(), cached.schedule.clone());
+                    continue;
+                }
+            }
+            uncached.push(symbol.clone());
+        }
+    }
+    let fetched = if uncached.is_empty() {
+        Some(std::collections::HashMap::new())
+    } else {
+        let path = format!(
+            "/internal/financial/fee-schedules?symbols={}&at_utc_ms={at_ms}",
+            uncached.join(",")
+        );
+        let snapshot = paper_exchange_client::paper_exchange_get(&path).await.ok();
+        snapshot.and_then(|snapshot| {
+            if snapshot
+                .get("captured_at_utc_ms")
+                .and_then(serde_json::Value::as_u64)
+                != Some(at_ms)
+            {
+                return None;
+            }
+            let ledger_epoch = snapshot
+                .get("ledger_epoch")
+                .and_then(serde_json::Value::as_str)?;
+            if ledger_epoch.trim().is_empty() {
+                return None;
+            }
+            let high_water = snapshot
+                .get("observed_max_cursor")
+                .and_then(serde_json::Value::as_u64)?;
+            let entries = snapshot
+                .get("schedules")
+                .and_then(serde_json::Value::as_array)?;
+            let mut fetched = std::collections::HashMap::new();
+            for entry in entries {
+                let symbol = entry.get("symbol").and_then(serde_json::Value::as_str)?;
+                if !uncached.iter().any(|requested| requested == symbol) {
+                    continue;
+                }
+                let schedule =
+                    if entry.get("status").and_then(serde_json::Value::as_str) != Some("matched") {
+                        None
+                    } else {
+                        let (
+                            Some(id),
+                            Some(version),
+                            Some(source_epoch),
+                            Some(source_cursor),
+                            Some(source_record_id),
+                            Some(source_timestamp_ms),
+                            Some(effective_from_ms),
+                            Some(taker_rate),
+                        ) = (
+                            entry
+                                .get("fee_schedule_id")
+                                .and_then(serde_json::Value::as_str),
+                            entry
+                                .get("fee_schedule_version")
+                                .and_then(serde_json::Value::as_str),
+                            entry
+                                .get("source_epoch")
+                                .and_then(serde_json::Value::as_str),
+                            entry
+                                .get("source_cursor")
+                                .and_then(serde_json::Value::as_u64),
+                            entry
+                                .get("source_record_id")
+                                .and_then(serde_json::Value::as_str),
+                            entry
+                                .get("source_timestamp_utc_ms")
+                                .and_then(serde_json::Value::as_u64),
+                            entry
+                                .get("effective_from_utc_ms")
+                                .and_then(serde_json::Value::as_u64),
+                            entry.get("taker_rate").and_then(serde_json::Value::as_f64),
+                        )
+                        else {
+                            fetched.insert(symbol.to_owned(), None);
+                            continue;
+                        };
+                        let effective_to_ms = entry
+                            .get("effective_to_utc_ms")
+                            .and_then(serde_json::Value::as_u64);
+                        if source_epoch.trim().is_empty()
+                            || source_cursor == 0
+                            || source_cursor > high_water
+                            || id.trim().is_empty()
+                            || version.trim().is_empty()
+                            || source_record_id.trim().is_empty()
+                            || source_timestamp_ms == 0
+                            || source_timestamp_ms > at_ms
+                            || effective_from_ms == 0
+                            || !taker_rate.is_finite()
+                            || !(0.0..=0.1).contains(&taker_rate.abs())
+                        {
+                            None
+                        } else {
+                            Some(OperationalFeeSchedule {
+                                symbol: symbol.to_owned(),
+                                ledger_epoch: ledger_epoch.to_owned(),
+                                ledger_high_water_cursor: high_water,
+                                id: id.to_owned(),
+                                version: version.to_owned(),
+                                source_epoch: source_epoch.to_owned(),
+                                source_cursor,
+                                source_record_id: source_record_id.to_owned(),
+                                source_timestamp_ms,
+                                effective_from_ms,
+                                effective_to_ms,
+                                taker_rate: taker_rate.abs(),
+                            })
+                        }
+                    };
+                fetched.insert(symbol.to_owned(), schedule);
+            }
+            for symbol in &uncached {
+                fetched.entry(symbol.clone()).or_insert(None);
+            }
+            Some(fetched)
+        })
+    };
+    let fetched = fetched.unwrap_or_else(|| {
+        uncached
+            .iter()
+            .cloned()
+            .map(|symbol| (symbol, None))
+            .collect()
+    });
+    let mut cache = cache.lock().await;
+    for symbol in &uncached {
+        let schedule = fetched.get(symbol).cloned().flatten();
+        if cache.len() >= MAX_CACHE_SYMBOLS && !cache.contains_key(symbol) {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, value)| value.cached_at_ms)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            symbol.clone(),
+            CachedOperationalFeeSchedule {
+                cached_at_ms: at_ms,
+                schedule: schedule.clone(),
+            },
+        );
+        result.insert(symbol.clone(), schedule);
+    }
+    result
+}
+
+#[derive(Serialize)]
+struct OperationalPositionResponse {
+    position_identity: Option<String>,
+    canonical_trade_ids: Vec<String>,
+    symbol: String,
+    quantity: f64,
+    average_entry_price: f64,
+    realized_pnl: f64,
+    entry_fees: f64,
+    fees_paid: f64,
+    last_trade_timestamp: u64,
+    quote_currency: Option<String>,
+    entry_value_quote: Option<f64>,
+    entry_value_usd: Option<f64>,
+    quote_fx_rate: Option<f64>,
+    quote_fx_updated_at_ms: Option<u64>,
+    quote_fx_source_record_id: Option<String>,
+    executable_close_side: Option<String>,
+    executable_mark: Option<f64>,
+    mark_age_ms: Option<u64>,
+    mark_source_system: Option<String>,
+    mark_source_epoch: Option<String>,
+    mark_source_cursor: Option<u64>,
+    mark_source_record_id: Option<String>,
+    mark_updated_at_ms: Option<u64>,
+    gross_unrealized_quote: Option<f64>,
+    net_unrealized_quote: Option<f64>,
+    net_unrealized_usd: Option<f64>,
+    net_pnl_cost_scope: &'static str,
+    entry_fees_quote: Option<f64>,
+    estimated_exit_fee_rate: f64,
+    projected_exit_fee_rate: Option<f64>,
+    fee_schedule_status: &'static str,
+    exit_fee_schedule_id: Option<String>,
+    exit_fee_schedule_version: Option<String>,
+    exit_fee_schedule_ledger_epoch: Option<String>,
+    exit_fee_schedule_ledger_high_water_cursor: Option<u64>,
+    exit_fee_schedule_source_epoch: Option<String>,
+    exit_fee_schedule_source_cursor: Option<u64>,
+    exit_fee_schedule_source_record_id: Option<String>,
+    exit_fee_schedule_source_timestamp_ms: Option<u64>,
+    known_fee_fills: usize,
+    unknown_fee_fills: usize,
+    signed_exposure_quote: Option<f64>,
+    gross_exposure_quote: Option<f64>,
+    signed_exposure_usd: Option<f64>,
+    gross_exposure_usd: Option<f64>,
+    breakeven_price: Option<f64>,
+    net_edge_vs_breakeven_quote: Option<f64>,
+    net_edge_vs_breakeven_percent: Option<f64>,
+    valuation_status: &'static str,
+    valuation_reasons: Vec<&'static str>,
+    protection_status: &'static str,
+    protection_exception: Option<bool>,
+    protection_orders: Vec<BarrierOrder>,
+    protection_markers: Vec<OperationalProtectionMarker>,
+}
+
+#[derive(Serialize)]
+struct OperationalProtectionMarker {
+    barrier_id: String,
+    order_kind: String,
+    status: String,
+    trigger_price: f64,
+    projected_net_return_percent: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct OperationalPositionsResponse {
+    schema_version: u32,
+    captured_at_ms: u64,
+    trade_count: usize,
+    gross_exposure_usd: Option<f64>,
+    net_unrealized_usd: Option<f64>,
+    protection_exception_count: Option<usize>,
+    aggregate_valuation_status: &'static str,
+    aggregate_valuation_reasons: Vec<&'static str>,
+    positions: Vec<OperationalPositionResponse>,
+}
+
+async fn get_operational_positions(
+    State(store): State<Arc<PositionStore>>,
+    Query(query): Query<PositionSourceQuery>,
+) -> Result<Json<OperationalPositionsResponse>, (StatusCode, String)> {
+    if query
+        .source
+        .as_deref()
+        .is_some_and(|source| !matches!(source, "manual" | "auto"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Position source must be manual or auto".into(),
+        ));
+    }
+    let captured_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(internal_error)?
+        .as_millis() as u64;
+    let rates = get_usd_rates().await.ok().map(|response| response.0);
+    let (summary, trades, barrier_ledger) = {
+        let ledger = store.ledger.lock().await;
+        (
+            cached_position_summary(&store, &ledger, query.source.as_deref()),
+            ledger.trades.clone(),
+            ledger.barrier_orders.clone(),
+        )
+    };
+    let trade_count = summary.trade_count;
+    let marks = store.market_marks_snapshot();
+    let active_symbols = summary
+        .positions
+        .iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .map(|position| position.symbol.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let fee_schedules = current_operational_fee_schedules(&active_symbols, captured_at_ms).await;
+    let positions: Vec<OperationalPositionResponse> = summary.positions.into_iter().filter(|position| position.quantity.abs() > EPSILON).map(|position| {
+        const MAX_MARK_AGE_MS: u64 = 5_000;
+        let mut reasons = Vec::new();
+        let parsed_symbol = position.symbol.split_once('-');
+        let quote = parsed_symbol.map(|(_, quote)| quote.to_owned());
+        let valid_quantity = position.quantity.is_finite() && position.quantity.abs() > EPSILON;
+        let entry_value_quote = (valid_quantity && position.average_entry_price.is_finite()
+            && position.average_entry_price > 0.0)
+            .then_some(position.quantity.abs() * position.average_entry_price);
+        let mark = marks.get(&position.symbol);
+        let close_side = if position.quantity > 0.0 { "bid" } else { "ask" };
+        let close_mark = mark.and_then(|mark| if position.quantity > 0.0 { mark.bid } else { mark.ask });
+        let mark_age_ms = mark.map(|mark| captured_at_ms.saturating_sub(mark.updated_at_ms));
+        let mark_is_valid = mark.zip(close_mark).is_some_and(|(mark, price)| {
+            price.is_finite() && price > 0.0 && mark.updated_at_ms > 0
+                && mark.bid.is_some_and(|bid| bid.is_finite() && bid > 0.0)
+                && mark.ask.is_some_and(|ask| ask.is_finite() && ask > 0.0)
+                && mark.bid.zip(mark.ask).is_some_and(|(bid, ask)| ask >= bid)
+                && mark.updated_at_ms <= captured_at_ms
+                && captured_at_ms.saturating_sub(mark.updated_at_ms) <= MAX_MARK_AGE_MS
+                && mark.source_system.as_deref() == Some("paper_exchange.market_data_cache")
+                && mark.source_epoch.as_deref().is_some_and(|value| !value.is_empty())
+                && mark.source_cursor.is_some_and(|cursor| cursor > 0)
+                && mark.source_record_id.as_deref().is_some_and(|value| !value.is_empty())
+        });
+        if !valid_quantity { reasons.push("position_quantity_invalid_or_flat"); }
+        if entry_value_quote.is_none() { reasons.push("entry_value_unavailable"); }
+        if mark.is_none() { reasons.push("executable_mark_missing"); }
+        else if !mark_is_valid { reasons.push("executable_mark_stale_or_unproven"); }
+        let quote_currency = quote.as_deref();
+        let identity = active_position_fill_identities(&trades, &position.symbol, query.source.as_deref());
+        let position_identity = identity.position_identity.clone();
+        let canonical_trade_ids = identity.canonical_trade_ids.clone();
+        let active_fill_ids = identity.entry_fill_ids.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let active_fills = trades.iter().filter(|trade| trade.fill_id.as_ref().is_some_and(|id| active_fill_ids.contains(id))).collect::<Vec<_>>();
+        let fee_currency_is_quote = quote_currency.is_some() && identity.position_identity.is_some()
+            && identity.all_entry_fills_known && identity.entry_fee_currency_is_quote
+            && !active_fills.is_empty() && active_fills.len() == identity.entry_fill_ids.len();
+        let entry_fee_evidence_valid = fee_currency_is_quote && active_fills.iter()
+            .all(|trade| active_entry_fee_evidence_valid(trade, &position.symbol, quote_currency.unwrap()));
+        if !identity.all_entry_fills_known { reasons.push("active_entry_fee_unknown_or_identity_missing"); }
+        if !fee_currency_is_quote { reasons.push("fee_currency_not_proven_in_quote_currency"); }
+        if !entry_fee_evidence_valid { reasons.push("active_entry_fee_source_evidence_missing_or_mismatched"); }
+        let exit_fee_schedule = fee_schedules.get(&position.symbol).and_then(Clone::clone)
+            .filter(|schedule| valid_exit_fee_schedule(Some(schedule), &position.symbol, captured_at_ms));
+        if exit_fee_schedule.is_none() { reasons.push("authoritative_exit_fee_schedule_missing_ambiguous_or_stale"); }
+        let fx = if quote_currency == Some("USD") { Some(1.0) } else {
+            quote_currency.and_then(|quote| rates.as_ref().and_then(|rates| rates.rates.get(quote).copied()))
+        };
+        let fx_at = quote_currency.and_then(|quote| rates.as_ref().and_then(|rates| rates.updated_at_by_currency.get(quote).copied()));
+        let fx_id = quote_currency.and_then(|quote| rates.as_ref().and_then(|rates| rates.source_record_id_by_currency.get(quote)));
+        let fx_valid = quote_currency == Some("USD") || (fx.zip(fx_at).zip(fx_id).is_some_and(|((rate, at), id)|
+            rate.is_finite() && rate > 0.0 && at > 0 && at <= captured_at_ms
+                && captured_at_ms.saturating_sub(at) <= USD_RATE_STREAM_MAX_AGE.as_millis() as u64
+                && !id.trim().is_empty()));
+        if !fx_valid { reasons.push("quote_fx_missing_stale_or_unproven"); }
+        let valid_fx = fx.filter(|_| fx_valid);
+        let gross = (mark_is_valid && position.average_entry_price.is_finite() && position.average_entry_price > 0.0)
+            .then(|| position.quantity * (close_mark.unwrap() - position.average_entry_price));
+        let exit_fee_rate = exit_fee_schedule.as_ref().map(|schedule| schedule.taker_rate);
+        let exit_fee_rate_valid = exit_fee_rate.is_some_and(|rate| rate.is_finite() && (0.0..1.0).contains(&rate));
+        if !exit_fee_rate_valid { reasons.push("estimated_exit_fee_rate_unavailable_or_invalid"); }
+        let exit_fee = (mark_is_valid && exit_fee_rate_valid)
+            .then(|| position.quantity.abs() * close_mark.unwrap() * exit_fee_rate.unwrap());
+        let fees_complete = entry_fee_evidence_valid && exit_fee_schedule.is_some();
+        let net = net_unrealized_quote(gross, position.entry_fees, exit_fee, fees_complete);
+        let breakeven = executable_breakeven_price(position.quantity, position.average_entry_price,
+            position.entry_fees, exit_fee_rate.unwrap_or_default(), fees_complete);
+        let edge = net;
+        let edge_percent = edge.zip(entry_value_quote)
+            .map(|(edge, entry_value)| edge / entry_value * 100.0);
+        let exposure_quote = mark_is_valid.then(|| position.quantity * close_mark.unwrap());
+        let net_usd = net.zip(valid_fx).map(|(value, rate)| value * rate);
+        let exposure_usd = exposure_quote.zip(valid_fx).map(|(value, rate)| value * rate);
+        let entry_value_usd = entry_value_quote.zip(valid_fx).map(|(value, rate)| value * rate);
+        let protection_orders = barrier_ledger.iter().filter(|barrier| {
+            barrier_matches_active_position(
+                &barrier.symbol,
+                &barrier.source,
+                barrier.lifecycle.as_ref().map(|lifecycle| lifecycle.trade_id.as_str()),
+                barrier.parent_order_id.as_deref(),
+                &position.symbol,
+                query.source.as_deref(),
+                &identity,
+            )
+                && matches!(barrier.status.as_str(), "armed" | "triggering" | "interrupted" | "failed" | "rejected" | "error")
+        }).cloned().collect::<Vec<_>>();
+        let protection_markers = protection_orders.iter().map(|barrier| {
+            let projected_net_return_percent = if fees_complete && exit_fee_rate_valid
+                && barrier.trigger_price.is_finite() && barrier.trigger_price > 0.0 {
+                entry_value_quote.map(|entry_value| {
+                    let gross = position.quantity * (barrier.trigger_price - position.average_entry_price);
+                    let close_fee = position.quantity.abs() * barrier.trigger_price * exit_fee_rate.unwrap();
+                    if entry_value.is_finite() && entry_value > 0.0 {
+                        net_unrealized_quote(Some(gross), position.entry_fees, Some(close_fee), fees_complete)
+                            .map(|net| net / entry_value * 100.0)
+                    } else { None }
+                }).flatten().filter(|value| value.is_finite())
+            } else { None };
+            OperationalProtectionMarker {
+                barrier_id: barrier.id.clone(), order_kind: barrier.order_kind.clone(),
+                status: barrier.status.clone(), trigger_price: barrier.trigger_price,
+                projected_net_return_percent,
+            }
+        }).collect::<Vec<_>>();
+        let protection_exception = protection_orders.iter().any(|barrier|
+            matches!(barrier.status.as_str(), "interrupted" | "failed" | "rejected" | "error"));
+        let protection_status = if protection_exception { "exception" }
+            else if protection_orders.iter().any(|barrier| barrier.status == "armed" || barrier.status == "triggering") { "active" }
+            else { "unknown_no_exact_barrier_link" };
+        let protection_exception = if protection_orders.is_empty() { None } else { Some(protection_exception) };
+        let complete = reasons.is_empty() && net.is_some() && exposure_usd.is_some();
+        OperationalPositionResponse {
+            position_identity, canonical_trade_ids,
+            symbol: position.symbol, quantity: position.quantity, average_entry_price: position.average_entry_price,
+            realized_pnl: position.realized_pnl, entry_fees: position.entry_fees,
+            fees_paid: position.fees_paid, last_trade_timestamp: position.last_trade_timestamp,
+            quote_currency: quote, entry_value_quote, entry_value_usd,
+            quote_fx_rate: valid_fx, quote_fx_updated_at_ms: fx_at.filter(|_| fx_valid),
+            quote_fx_source_record_id: fx_id.filter(|_| fx_valid).cloned(),
+            executable_close_side: mark_is_valid.then(|| close_side.to_owned()),
+            executable_mark: mark_is_valid.then_some(close_mark.unwrap()), mark_age_ms,
+            mark_source_system: mark.and_then(|mark| mark.source_system.clone()),
+            mark_source_epoch: mark.and_then(|mark| mark.source_epoch.clone()),
+            mark_source_cursor: mark.and_then(|mark| mark.source_cursor),
+            mark_source_record_id: mark.and_then(|mark| mark.source_record_id.clone()),
+            mark_updated_at_ms: mark.map(|mark| mark.updated_at_ms), gross_unrealized_quote: gross,
+            net_unrealized_quote: net, net_unrealized_usd: net_usd,
+            net_pnl_cost_scope: "gross mark-to-entry less known quote-denominated entry fees and estimated taker close fee; excludes FX/reconciliation adjustments",
+            entry_fees_quote: entry_fee_evidence_valid.then_some(position.entry_fees),
+            estimated_exit_fee_rate: position.estimated_exit_fee_rate,
+            projected_exit_fee_rate: exit_fee_rate,
+            fee_schedule_status: if exit_fee_schedule.is_some() { "authoritative_versioned_taker_schedule" } else { "unavailable_or_unproven" },
+            exit_fee_schedule_id: exit_fee_schedule.as_ref().map(|schedule| schedule.id.clone()),
+            exit_fee_schedule_version: exit_fee_schedule.as_ref().map(|schedule| schedule.version.clone()),
+            exit_fee_schedule_ledger_epoch: exit_fee_schedule.as_ref().map(|schedule| schedule.ledger_epoch.clone()),
+            exit_fee_schedule_ledger_high_water_cursor: exit_fee_schedule.as_ref().map(|schedule| schedule.ledger_high_water_cursor),
+            exit_fee_schedule_source_epoch: exit_fee_schedule.as_ref().map(|schedule| schedule.source_epoch.clone()),
+            exit_fee_schedule_source_cursor: exit_fee_schedule.as_ref().map(|schedule| schedule.source_cursor),
+            exit_fee_schedule_source_record_id: exit_fee_schedule.as_ref().map(|schedule| schedule.source_record_id.clone()),
+            exit_fee_schedule_source_timestamp_ms: exit_fee_schedule.as_ref().map(|schedule| schedule.source_timestamp_ms),
+            known_fee_fills: position.known_fee_fills, unknown_fee_fills: position.unknown_fee_fills,
+            signed_exposure_quote: exposure_quote,
+            gross_exposure_quote: exposure_quote.map(f64::abs), signed_exposure_usd: exposure_usd,
+            gross_exposure_usd: exposure_usd.map(f64::abs), breakeven_price: breakeven,
+            net_edge_vs_breakeven_quote: edge, net_edge_vs_breakeven_percent: edge_percent,
+            valuation_status: if complete { "complete" } else { "incomplete" },
+            valuation_reasons: reasons, protection_status, protection_exception, protection_orders, protection_markers,
+        }
+    }).collect();
+    let aggregate_valuation_reasons = positions
+        .iter()
+        .flat_map(|position| position.valuation_reasons.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let aggregate_valuation_complete = positions
+        .iter()
+        .all(|position| position.valuation_status == "complete");
+    let gross_exposure_usd = positions
+        .iter()
+        .map(|position| position.gross_exposure_usd)
+        .collect::<Option<Vec<_>>>()
+        .map(|values| values.into_iter().sum());
+    let net_unrealized_usd = positions
+        .iter()
+        .map(|position| position.net_unrealized_usd)
+        .collect::<Option<Vec<_>>>()
+        .map(|values| values.into_iter().sum());
+    let protection_exception_count = positions
+        .iter()
+        .map(|position| position.protection_exception)
+        .collect::<Option<Vec<_>>>()
+        .map(|values| values.into_iter().filter(|exception| *exception).count());
+    Ok(Json(OperationalPositionsResponse {
+        schema_version: 1,
+        captured_at_ms,
+        trade_count,
+        gross_exposure_usd,
+        net_unrealized_usd,
+        protection_exception_count,
+        aggregate_valuation_status: if aggregate_valuation_complete {
+            "complete"
+        } else {
+            "incomplete"
+        },
+        aggregate_valuation_reasons,
+        positions,
+    }))
+}
+
 async fn get_positions(
     State(store): State<Arc<PositionStore>>,
     Query(query): Query<PositionSourceQuery>,
@@ -720,6 +1491,27 @@ mod financial_snapshot_tests {
         }
     }
 
+    #[test]
+    fn operational_net_pnl_and_breakeven_fail_closed_without_complete_fee_inputs() {
+        assert_eq!(
+            net_unrealized_quote(Some(12.0), -2.0, Some(1.0), true),
+            Some(9.0)
+        );
+        assert_eq!(
+            net_unrealized_quote(Some(12.0), -2.0, Some(1.0), false),
+            None
+        );
+        assert_eq!(net_unrealized_quote(Some(12.0), -2.0, None, true), None);
+        let long = executable_breakeven_price(2.0, 100.0, -2.0, 0.01, true).unwrap();
+        assert!((long - 102.020_202_020_202_02).abs() < 1e-10);
+        let short = executable_breakeven_price(-2.0, 100.0, -2.0, 0.01, true).unwrap();
+        assert!((short - 98.019_801_980_198_02).abs() < 1e-10);
+        assert_eq!(
+            executable_breakeven_price(2.0, 100.0, -2.0, 0.01, false),
+            None
+        );
+    }
+
     fn trade(
         id: &str,
         side: TradeSide,
@@ -741,6 +1533,12 @@ mod financial_snapshot_tests {
             paper_exchange_source_quantity: None,
             paper_exchange_source_price: None,
             paper_exchange_source_complete: None,
+            paper_exchange_fee_amount: None,
+            paper_exchange_fee_currency: None,
+            paper_exchange_fee_schedule_id: None,
+            paper_exchange_fee_schedule_version: None,
+            paper_exchange_fee_order_class: None,
+            paper_exchange_fee_schedule_evidence: None,
             symbol: "BTC-USDT".to_owned(),
             side,
             quantity,
@@ -767,6 +1565,298 @@ mod financial_snapshot_tests {
             slippage: None,
             slippage_bps: None,
         }
+    }
+
+    #[test]
+    fn operational_position_identity_tracks_remaining_open_fill_lineage() {
+        let mut opening = trade(
+            "open",
+            TradeSide::Buy,
+            2.0,
+            100.0,
+            1,
+            0.0,
+            true,
+            Some("open"),
+        );
+        opening.fill_id = Some("fill-open".into());
+        let mut partial_close = trade(
+            "close",
+            TradeSide::Sell,
+            0.5,
+            101.0,
+            2,
+            0.0,
+            true,
+            Some("close"),
+        );
+        partial_close.fill_id = Some("fill-close".into());
+        let mut scale_in = trade("add", TradeSide::Buy, 1.0, 102.0, 3, 0.0, true, Some("add"));
+        scale_in.fill_id = Some("fill-add".into());
+        let ledger = Ledger {
+            trades: vec![opening, partial_close, scale_in],
+            ..Ledger::default()
+        };
+        let identity = active_position_fill_identities(&ledger.trades, "BTC-USDT", Some("auto"));
+        assert_eq!(
+            identity.position_identity.as_deref(),
+            Some("pm-position:v1:fill-open,fill-add")
+        );
+        assert!(
+            identity.canonical_trade_ids.is_empty(),
+            "missing canonical lifecycle IDs must remain explicit"
+        );
+    }
+
+    #[test]
+    fn closed_same_symbol_fill_does_not_poison_active_fee_currency_identity() {
+        let mut closed_open = trade(
+            "old-open",
+            TradeSide::Buy,
+            1.0,
+            100.0,
+            1,
+            0.0,
+            true,
+            Some("old"),
+        );
+        closed_open.fill_id = Some("old-open-fill".into());
+        closed_open.fee_currency = "BTC".into();
+        let mut closed_close = trade(
+            "old-close",
+            TradeSide::Sell,
+            1.0,
+            101.0,
+            2,
+            0.0,
+            true,
+            Some("old"),
+        );
+        closed_close.fill_id = Some("old-close-fill".into());
+        let mut active_open = trade(
+            "current",
+            TradeSide::Buy,
+            2.0,
+            102.0,
+            3,
+            0.0,
+            true,
+            Some("current"),
+        );
+        active_open.fill_id = Some("active-fill".into());
+        let trades = vec![closed_open, closed_close, active_open];
+        let identity = active_position_fill_identities(&trades, "BTC-USDT", Some("auto"));
+        assert_eq!(identity.entry_fill_ids, vec!["active-fill"]);
+        assert!(identity.entry_fee_currency_is_quote);
+        assert!(identity.all_entry_fills_known);
+    }
+
+    #[test]
+    fn same_symbol_barrier_requires_exact_active_identity_and_source() {
+        let identity = ActivePositionIdentity {
+            position_identity: Some("pm-position:v1:fill".into()),
+            canonical_trade_ids: vec!["trade-1".into()],
+            parent_order_ids: vec!["entry-order-1".into()],
+            sources: vec!["auto".into()],
+            entry_fill_ids: vec!["fill".into()],
+            all_entry_fills_known: true,
+            entry_fee_currency_is_quote: true,
+        };
+        assert!(barrier_matches_active_position(
+            "BTC-USDT",
+            "auto",
+            Some("trade-1"),
+            None,
+            "BTC-USDT",
+            Some("auto"),
+            &identity
+        ));
+        assert!(barrier_matches_active_position(
+            "BTC-USDT",
+            "auto",
+            None,
+            Some("entry-order-1"),
+            "BTC-USDT",
+            Some("auto"),
+            &identity
+        ));
+        assert!(!barrier_matches_active_position(
+            "BTC-USDT",
+            "manual",
+            Some("trade-1"),
+            None,
+            "BTC-USDT",
+            Some("auto"),
+            &identity
+        ));
+        assert!(!barrier_matches_active_position(
+            "BTC-USDT",
+            "auto",
+            Some("trade-other"),
+            None,
+            "BTC-USDT",
+            Some("auto"),
+            &identity
+        ));
+    }
+
+    #[test]
+    fn entry_fee_evidence_requires_matching_version_and_source_identity() {
+        let mut fill = trade(
+            "fee",
+            TradeSide::Buy,
+            1.0,
+            100.0,
+            10,
+            -0.1,
+            true,
+            Some("entry"),
+        );
+        fill.paper_exchange_fee_amount = Some(0.1);
+        fill.paper_exchange_fee_currency = Some("USDT".into());
+        fill.paper_exchange_fee_schedule_id = Some("spot-fees".into());
+        fill.paper_exchange_fee_schedule_version = Some("v1".into());
+        fill.paper_exchange_fee_order_class = Some("taker".into());
+        fill.paper_exchange_fee_schedule_evidence = Some(serde_json::json!({
+            "schema_version":"paper_exchange_financial_evidence.v1", "event_id":"fees-1",
+            "source_system":"simulator", "source_epoch":"epoch-1", "source_cursor":7,
+            "source_record_id":"record-7", "source_timestamp_utc_ms":9,
+            "event_type":"fee_schedule", "fee_schedule_id":"spot-fees", "fee_schedule_version":"v1",
+            "symbol":"BTC-USDT", "effective_from_utc_ms":1, "effective_to_utc_ms":null,
+            "maker_rate":0.0, "taker_rate":0.001
+        }));
+        assert!(active_entry_fee_evidence_valid(&fill, "BTC-USDT", "USDT"));
+        fill.paper_exchange_fee_schedule_version = Some("v2".into());
+        assert!(!active_entry_fee_evidence_valid(&fill, "BTC-USDT", "USDT"));
+        fill.paper_exchange_fee_schedule_version = Some("v1".into());
+        fill.paper_exchange_fee_schedule_evidence = None;
+        assert!(!active_entry_fee_evidence_valid(&fill, "BTC-USDT", "USDT"));
+    }
+
+    #[test]
+    fn exit_fee_schedule_rejects_symbol_mismatch_expired_and_absent_identity() {
+        let schedule = OperationalFeeSchedule {
+            symbol: "BTC-USDT".into(),
+            ledger_epoch: "ledger-epoch".into(),
+            ledger_high_water_cursor: 7,
+            id: "spot-fees".into(),
+            version: "v1".into(),
+            source_epoch: "epoch".into(),
+            source_cursor: 2,
+            source_record_id: "record".into(),
+            source_timestamp_ms: 10,
+            effective_from_ms: 1,
+            effective_to_ms: Some(20),
+            taker_rate: 0.001,
+        };
+        assert!(valid_exit_fee_schedule(Some(&schedule), "BTC-USDT", 15));
+        assert!(!valid_exit_fee_schedule(Some(&schedule), "ETH-USDT", 15));
+        assert!(!valid_exit_fee_schedule(Some(&schedule), "BTC-USDT", 20));
+        assert!(!valid_exit_fee_schedule(None, "BTC-USDT", 15));
+    }
+
+    #[tokio::test]
+    async fn operational_positions_serialize_executable_mark_exposure_and_protection_state() {
+        let store = Arc::new(test_store());
+        let mut opening = trade(
+            "open",
+            TradeSide::Buy,
+            2.0,
+            100.0,
+            1,
+            -0.2,
+            true,
+            Some("open"),
+        );
+        opening.symbol = "BTC-USD".into();
+        opening.fill_id = Some("pm-fill:v1:epoch:1".into());
+        opening.lifecycle = Some(complete_lifecycle_link());
+        opening.fee_currency = "USD".into();
+        let mark_time = now_ms().unwrap();
+        opening.paper_exchange_fee_amount = Some(0.2);
+        opening.paper_exchange_fee_currency = Some("USD".into());
+        opening.paper_exchange_fee_schedule_id = Some("spot-fees".into());
+        opening.paper_exchange_fee_schedule_version = Some("v1".into());
+        opening.paper_exchange_fee_order_class = Some("taker".into());
+        opening.paper_exchange_fee_schedule_evidence = Some(serde_json::json!({
+            "schema_version":"paper_exchange_financial_evidence.v1", "event_id":"fee-schedule-1",
+            "source_system":"simulator", "source_epoch":"fee-epoch", "source_cursor":1,
+            "source_record_id":"fee-schedule-record-1", "source_timestamp_utc_ms":1,
+            "event_type":"fee_schedule", "fee_schedule_id":"spot-fees", "fee_schedule_version":"v1",
+            "symbol":"BTC-USD", "effective_from_utc_ms":1, "effective_to_utc_ms":null,
+            "maker_rate":0.0, "taker_rate":0.001
+        }));
+        OPERATIONAL_FEE_SCHEDULE_CACHE
+            .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .await
+            .insert(
+                "BTC-USD".into(),
+                CachedOperationalFeeSchedule {
+                    cached_at_ms: mark_time,
+                    schedule: Some(OperationalFeeSchedule {
+                        symbol: "BTC-USD".into(),
+                        ledger_epoch: "ledger-epoch".into(),
+                        ledger_high_water_cursor: 1,
+                        id: "spot-fees".into(),
+                        version: "v1".into(),
+                        source_epoch: "fee-epoch".into(),
+                        source_cursor: 1,
+                        source_record_id: "fee-schedule-record-1".into(),
+                        source_timestamp_ms: mark_time.saturating_sub(1),
+                        effective_from_ms: 1,
+                        effective_to_ms: None,
+                        taker_rate: 0.001,
+                    }),
+                },
+            );
+        store.ledger.lock().await.trades.push(opening);
+        store.market_marks.write().unwrap().insert(
+            "BTC-USD".into(),
+            MarketMark {
+                bid: Some(104.0),
+                ask: Some(105.0),
+                mid: Some(104.5),
+                worst_ask: None,
+                updated_at_ms: mark_time,
+                source_system: Some("paper_exchange.market_data_cache".into()),
+                source_epoch: Some("pex-epoch".into()),
+                source_cursor: Some(9),
+                source_record_id: Some("pex-mark:9".into()),
+            },
+        );
+        let response = get_operational_positions(
+            State(store),
+            Query(PositionSourceQuery {
+                source: Some("auto".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(response.schema_version, 1);
+        assert_eq!(response.positions.len(), 1);
+        assert_eq!(response.gross_exposure_usd, Some(208.0));
+        assert_eq!(response.protection_exception_count, None);
+        assert_eq!(response.aggregate_valuation_status, "complete");
+        let position = &response.positions[0];
+        assert_eq!(position.executable_close_side.as_deref(), Some("bid"));
+        assert_eq!(position.executable_mark, Some(104.0));
+        assert_eq!(position.entry_value_quote, Some(200.0));
+        assert_eq!(position.gross_unrealized_quote, Some(8.0));
+        assert!((position.net_unrealized_quote.unwrap() - 7.592).abs() < 1e-12);
+        assert!(
+            (position.net_edge_vs_breakeven_percent.unwrap() - (7.592 / 200.0 * 100.0)).abs()
+                < 1e-12
+        );
+        assert_eq!(
+            position.mark_source_record_id.as_deref(),
+            Some("pex-mark:9")
+        );
+        assert_eq!(position.canonical_trade_ids, vec!["trade-1"]);
+        assert_eq!(position.protection_status, "unknown_no_exact_barrier_link");
+        assert_eq!(position.protection_exception, None);
+        assert_eq!(position.exit_fee_schedule_id.as_deref(), Some("spot-fees"));
     }
 
     fn complete_lifecycle_link() -> CanonicalLifecycleLink {

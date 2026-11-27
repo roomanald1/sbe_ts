@@ -4,6 +4,7 @@ import {
   applyInstanceTodayPnl,
   AutoTraderOutcomesModel,
   mergeLatestStrategyDecisions,
+  operationalPositionForTrade,
   parseLearningSummary,
   projectInitialRiskEvidence,
   projectOpenPositionLifecycleIdentity,
@@ -13,10 +14,44 @@ import {
   strategyInstanceForClose,
 } from './AutoTraderOutcomesModel';
 import type { AutoTraderOutcome } from './AutoTraderOutcomesModel';
+import type { OperationalPosition } from './AutoTraderOutcomesModel';
 import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('joins operational valuation only by one exact canonical trade identity', () => {
+    const exact = {
+      symbol: 'BTC-USDT',
+      quantity: 0.5,
+      average_entry_price: 100,
+      realized_pnl: 0,
+      entry_fees: 0.01,
+      fees_paid: 0.01,
+      estimated_exit_fee_rate: 0.001,
+      last_trade_timestamp: 10,
+      canonical_trade_ids: ['trade-1'],
+      net_unrealized_usd: 0.2,
+    } as OperationalPosition;
+    assert.equal(operationalPositionForTrade([exact], 'trade-1'), exact);
+    assert.equal(operationalPositionForTrade([exact], 'trade-2'), undefined);
+    assert.equal(operationalPositionForTrade([exact], undefined), undefined);
+    assert.equal(operationalPositionForTrade([exact], 'trade-1', 2), undefined);
+    assert.equal(
+      operationalPositionForTrade(
+        [exact, { ...exact, net_unrealized_usd: 0.3 }],
+        'trade-1',
+      ),
+      undefined,
+    );
+    assert.equal(
+      operationalPositionForTrade(
+        [{ ...exact, canonical_trade_ids: ['trade-1', 'trade-2'] }],
+        'trade-1',
+      ),
+      undefined,
+    );
+  });
+
   it('uses selected thresholds and source from the explicit position contract', () => {
     assert.deepEqual(
       projectSelectedExitParameters(

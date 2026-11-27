@@ -135,6 +135,8 @@ describe('PortfolioReconciliationWidgetModel', () => {
         },
       ],
     });
+    model.setTab('balances');
+    assert.equal(model.state$.value.tab, 'balances');
     model.setTab('intervals');
     model.setIntervalFilter('complete');
     assert.equal(model.state$.value.tab, 'intervals');

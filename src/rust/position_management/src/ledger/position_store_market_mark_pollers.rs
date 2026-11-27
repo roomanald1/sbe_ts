@@ -32,6 +32,9 @@ impl PositionStore {
                         if let Ok(mark) = serde_json::from_value::<MarketMark>(value) {
                             let is_new = store.market_mark(&symbol).is_none_or(|previous| {
                                 previous.updated_at_ms != mark.updated_at_ms
+                                    || previous.source_epoch != mark.source_epoch
+                                    || previous.source_cursor != mark.source_cursor
+                                    || previous.source_record_id != mark.source_record_id
                             });
                             store
                                 .market_marks
@@ -218,29 +221,26 @@ impl PositionStore {
                 };
                 let source_evidence = paper_exchange_fill_evidence(
                     &result,
+                    &symbol,
                     result.order_id.as_deref(),
                     requested_quantity,
                 );
-                fills.extend(
-                    result
-                        .fills
-                        .into_iter()
-                        .zip(source_evidence)
-                        .map(|(fill, evidence)| {
-                            (
-                                order.id.clone(),
-                                order.side.clone(),
-                                fill.quantity,
-                                fill.price,
-                                fee_rate,
-                                order.source.clone(),
-                                order.parent_order_id.clone(),
-                                order.client_order_id.clone(),
-                                order.lifecycle.clone(),
-                                evidence,
-                            )
-                        }),
-                );
+                fills.extend(result.fills.into_iter().zip(source_evidence).map(
+                    |(fill, evidence)| {
+                        (
+                            order.id.clone(),
+                            order.side.clone(),
+                            fill.quantity,
+                            fill.price,
+                            fee_rate,
+                            order.source.clone(),
+                            order.parent_order_id.clone(),
+                            order.client_order_id.clone(),
+                            order.lifecycle.clone(),
+                            evidence,
+                        )
+                    },
+                ));
             }
         }
         let mut retained = Vec::with_capacity(ledger.orders.len());
@@ -291,6 +291,12 @@ impl PositionStore {
                     paper_exchange_source_quantity: source_evidence.source_quantity,
                     paper_exchange_source_price: source_evidence.source_price,
                     paper_exchange_source_complete: source_evidence.complete,
+                    paper_exchange_fee_amount: source_evidence.fee,
+                    paper_exchange_fee_currency: source_evidence.fee_currency,
+                    paper_exchange_fee_schedule_id: source_evidence.fee_schedule_id,
+                    paper_exchange_fee_schedule_version: source_evidence.fee_schedule_version,
+                    paper_exchange_fee_order_class: source_evidence.fee_order_class,
+                    paper_exchange_fee_schedule_evidence: source_evidence.fee_schedule_evidence,
                     symbol: symbol.to_owned(),
                     side,
                     quantity,

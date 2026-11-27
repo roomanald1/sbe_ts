@@ -324,10 +324,17 @@ impl PositionStore {
         );
         record_position_persistence_sample(&self.persistence_timings_ms, "snapshot_copy", copy_ms);
         let path = self.path.clone();
+        let market_marks = self.market_marks_snapshot();
         let write_started = Instant::now();
         let observed_at_ms = now_ms()?;
         tokio::task::spawn_blocking(move || {
-            save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, false)
+            save_sqlite_ledger_with_market_marks_at(
+                &path,
+                &snapshot,
+                observed_at_ms,
+                false,
+                &market_marks,
+            )
         })
         .await??;
         record_position_persistence_sample(
@@ -442,9 +449,16 @@ impl PositionStore {
     ) -> anyhow::Result<serde_json::Value> {
         let _write_guard = self.persistence_write_lock.lock().await;
         let (snapshot, _, _, _) = snapshot_position_ledger(&self.ledger).await;
+        let market_marks = self.market_marks_snapshot();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, true)
+            save_sqlite_ledger_with_market_marks_at(
+                &path,
+                &snapshot,
+                observed_at_ms,
+                true,
+                &market_marks,
+            )
         })
         .await??;
         let path = self.path.clone();
@@ -569,14 +583,23 @@ fn save_sqlite_ledger(path: &std::path::Path, ledger: &Ledger) -> anyhow::Result
 /// under the existing USD-rate stream contract. Durable writes never fetch FX.
 fn current_portfolio_fx_marks(
     observed_at_ms: u64,
-) -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+) -> (
+    BTreeMap<String, f64>,
+    BTreeMap<String, u64>,
+    BTreeMap<String, String>,
+) {
     let Some(snapshot) = USD_RATE_ORDER_SNAPSHOT
         .get()
         .and_then(|rates| rates.load_full())
     else {
-        return fixed_usd_parity_fx_mark();
+        let (rates, updated_at, mut source_ids) = fixed_usd_parity_fx_mark();
+        source_ids.insert(
+            "USD".to_owned(),
+            format!("fixed-usd-parity:{observed_at_ms}"),
+        );
+        return (rates, updated_at, source_ids);
     };
-    let (mut rates, mut updated_at) = fixed_usd_parity_fx_mark();
+    let (mut rates, mut updated_at, mut source_record_ids) = fixed_usd_parity_fx_mark();
     for (currency, rate) in &snapshot.rates {
         if currency == "USD" {
             continue;
@@ -597,14 +620,28 @@ fn current_portfolio_fx_marks(
         }
         rates.insert(currency.clone(), *rate);
         updated_at.insert(currency.clone(), timestamp);
+        if let Some(record_id) = snapshot.source_record_id_by_currency.get(currency) {
+            if !record_id.trim().is_empty() {
+                source_record_ids.insert(currency.clone(), record_id.clone());
+            }
+        }
     }
-    (rates, updated_at)
+    source_record_ids.insert(
+        "USD".to_owned(),
+        format!("fixed-usd-parity:{observed_at_ms}"),
+    );
+    (rates, updated_at, source_record_ids)
 }
 
-fn fixed_usd_parity_fx_mark() -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+fn fixed_usd_parity_fx_mark() -> (
+    BTreeMap<String, f64>,
+    BTreeMap<String, u64>,
+    BTreeMap<String, String>,
+) {
     (
         BTreeMap::from([("USD".to_owned(), 1.0)]),
         BTreeMap::from([("USD".to_owned(), 0)]),
+        BTreeMap::from([("USD".to_owned(), "fixed-usd-parity:0".to_owned())]),
     )
 }
 
@@ -612,10 +649,16 @@ fn retain_cash_currency_fx_marks(
     cash_balances_by_currency: &BTreeMap<String, f64>,
     mut rates: BTreeMap<String, f64>,
     mut updated_at: BTreeMap<String, u64>,
-) -> (BTreeMap<String, f64>, BTreeMap<String, u64>) {
+    mut source_record_ids: BTreeMap<String, String>,
+) -> (
+    BTreeMap<String, f64>,
+    BTreeMap<String, u64>,
+    BTreeMap<String, String>,
+) {
     rates.retain(|currency, _| cash_balances_by_currency.contains_key(currency));
     updated_at.retain(|currency, _| cash_balances_by_currency.contains_key(currency));
-    (rates, updated_at)
+    source_record_ids.retain(|currency, _| cash_balances_by_currency.contains_key(currency));
+    (rates, updated_at, source_record_ids)
 }
 
 fn value_cash_balances_usd(
@@ -631,6 +674,27 @@ fn value_cash_balances_usd(
                 .then(|| (currency.clone(), value))
         })
         .collect()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PositionValuationEvidenceV1 {
+    symbol: String,
+    quantity: f64,
+    position_side: String,
+    close_side: String,
+    close_price: f64,
+    quote_currency: String,
+    signed_close_value_quote: f64,
+    signed_close_value_usd: f64,
+    mark_source_system: String,
+    mark_source_epoch: String,
+    mark_source_cursor: u64,
+    mark_source_record_id: String,
+    mark_updated_at_utc_ms: u64,
+    valued_at_utc_ms: u64,
+    fx_rate_usd: f64,
+    fx_updated_at_utc_ms: u64,
+    fx_source_record_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -680,6 +744,8 @@ struct PortfolioEvidenceIntervalV1 {
     opening_fx_rates_usd_by_currency: Option<BTreeMap<String, f64>>,
     #[serde(default)]
     opening_fx_rates_updated_at_by_currency: Option<BTreeMap<String, u64>>,
+    #[serde(default)]
+    opening_fx_source_record_ids_by_currency: Option<BTreeMap<String, String>>,
     known_symbols: Vec<String>,
     positions: Vec<serde_json::Value>,
     explicit_flat_symbols: Vec<String>,
@@ -703,6 +769,14 @@ struct PortfolioEvidenceIntervalV1 {
     closing_fx_rates_usd_by_currency: BTreeMap<String, f64>,
     #[serde(default)]
     closing_fx_rates_updated_at_by_currency: BTreeMap<String, u64>,
+    #[serde(default)]
+    closing_fx_source_record_ids_by_currency: BTreeMap<String, String>,
+    #[serde(default)]
+    position_valuations: Vec<PositionValuationEvidenceV1>,
+    #[serde(default)]
+    open_position_valuation_complete: bool,
+    #[serde(default)]
+    open_position_valuation_reasons: Vec<String>,
     #[serde(default)]
     closing_cash_total_usd: Option<f64>,
     #[serde(default)]
@@ -741,6 +815,130 @@ struct PortfolioEvidenceIntervalV1 {
     #[serde(default)]
     quantitative_eligibility: String,
     completeness_reasons: Vec<String>,
+}
+
+fn capture_open_position_valuations(
+    positions: &[Position],
+    market_marks: &HashMap<String, MarketMark>,
+    fx_rates_usd: &BTreeMap<String, f64>,
+    fx_updated_at_by_currency: &BTreeMap<String, u64>,
+    fx_source_record_ids_by_currency: &BTreeMap<String, String>,
+    observed_at_ms: u64,
+) -> (Vec<PositionValuationEvidenceV1>, bool, Vec<String>) {
+    const MAX_MARK_AGE_MS: u64 = 5_000;
+    let mut rows = Vec::new();
+    let mut reasons = Vec::new();
+    let mut open_symbols = positions
+        .iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .collect::<Vec<_>>();
+    open_symbols.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+
+    for position in open_symbols {
+        let invalid = |reason: &str| format!("{reason}:{}", position.symbol);
+        let Some((_, quote_currency)) = position.symbol.split_once('-') else {
+            reasons.push(invalid("position_symbol_currency_invalid"));
+            continue;
+        };
+        let Some(mark) = market_marks.get(&position.symbol) else {
+            reasons.push(invalid("open_position_market_mark_missing"));
+            continue;
+        };
+        if !position.quantity.is_finite()
+            || mark.updated_at_ms == 0
+            || mark.updated_at_ms > observed_at_ms
+            || observed_at_ms.saturating_sub(mark.updated_at_ms) > MAX_MARK_AGE_MS
+            || mark.source_system.as_deref() != Some("paper_exchange.market_data_cache")
+            || mark.source_epoch.as_deref().is_none_or(str::is_empty)
+            || mark.source_cursor.is_none_or(|cursor| cursor == 0)
+            || mark.source_record_id.as_deref().is_none_or(str::is_empty)
+        {
+            reasons.push(invalid(
+                "open_position_market_mark_provenance_invalid_or_stale",
+            ));
+            continue;
+        }
+        let (close_side, close_price) = if position.quantity > 0.0 {
+            ("bid", mark.bid)
+        } else {
+            ("ask", mark.ask)
+        };
+        let (Some(bid), Some(ask), Some(close_price)) = (mark.bid, mark.ask, close_price) else {
+            reasons.push(invalid("open_position_executable_close_side_unavailable"));
+            continue;
+        };
+        if !bid.is_finite()
+            || !ask.is_finite()
+            || bid <= 0.0
+            || ask < bid
+            || !close_price.is_finite()
+            || close_price <= 0.0
+        {
+            reasons.push(invalid("open_position_executable_book_invalid"));
+            continue;
+        }
+        let Some(fx_rate) = fx_rates_usd.get(quote_currency).copied() else {
+            reasons.push(invalid("open_position_quote_fx_missing"));
+            continue;
+        };
+        let Some(fx_updated_at_ms) = fx_updated_at_by_currency.get(quote_currency).copied() else {
+            reasons.push(invalid("open_position_quote_fx_timestamp_missing"));
+            continue;
+        };
+        let Some(fx_source_record_id) = fx_source_record_ids_by_currency
+            .get(quote_currency)
+            .filter(|record_id| !record_id.trim().is_empty())
+        else {
+            reasons.push(invalid("open_position_quote_fx_source_identity_missing"));
+            continue;
+        };
+        if !fx_rate.is_finite()
+            || fx_rate <= 0.0
+            || fx_updated_at_ms > observed_at_ms
+            || (quote_currency != "USD"
+                && observed_at_ms.saturating_sub(fx_updated_at_ms)
+                    > USD_RATE_STREAM_MAX_AGE.as_millis() as u64)
+        {
+            reasons.push(invalid("open_position_quote_fx_invalid_or_stale"));
+            continue;
+        }
+        let signed_close_value_quote = position.quantity * close_price;
+        let signed_close_value_usd = signed_close_value_quote * fx_rate;
+        if !signed_close_value_quote.is_finite() || !signed_close_value_usd.is_finite() {
+            reasons.push(invalid("open_position_marked_value_non_finite"));
+            continue;
+        }
+        rows.push(PositionValuationEvidenceV1 {
+            symbol: position.symbol.clone(),
+            quantity: position.quantity,
+            position_side: if position.quantity > 0.0 {
+                "long"
+            } else {
+                "short"
+            }
+            .to_owned(),
+            close_side: close_side.to_owned(),
+            close_price,
+            quote_currency: quote_currency.to_owned(),
+            signed_close_value_quote,
+            signed_close_value_usd,
+            mark_source_system: mark.source_system.clone().unwrap_or_default(),
+            mark_source_epoch: mark.source_epoch.clone().unwrap_or_default(),
+            mark_source_cursor: mark.source_cursor.unwrap_or_default(),
+            mark_source_record_id: mark.source_record_id.clone().unwrap_or_default(),
+            mark_updated_at_utc_ms: mark.updated_at_ms,
+            valued_at_utc_ms: observed_at_ms,
+            fx_rate_usd: fx_rate,
+            fx_updated_at_utc_ms: fx_updated_at_ms,
+            fx_source_record_id: fx_source_record_id.clone(),
+        });
+    }
+    let expected = positions
+        .iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+        .count();
+    let complete = rows.len() == expected && reasons.is_empty();
+    (rows, complete, reasons)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -870,6 +1068,22 @@ fn save_sqlite_ledger_at(
     ledger: &Ledger,
     observed_at_ms: u64,
     explicit_baseline_request: bool,
+) -> anyhow::Result<()> {
+    save_sqlite_ledger_with_market_marks_at(
+        path,
+        ledger,
+        observed_at_ms,
+        explicit_baseline_request,
+        &HashMap::new(),
+    )
+}
+
+fn save_sqlite_ledger_with_market_marks_at(
+    path: &std::path::Path,
+    ledger: &Ledger,
+    observed_at_ms: u64,
+    explicit_baseline_request: bool,
+    market_marks: &HashMap<String, MarketMark>,
 ) -> anyhow::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -1131,11 +1345,33 @@ fn save_sqlite_ledger_at(
             independent_source_cursor: topup.financial_evidence_cursor,
         });
     }
-    let (fx_rates, fx_updated_at) = current_portfolio_fx_marks(observed_at_ms);
+    let (mut fx_rates, mut fx_updated_at, mut fx_source_record_ids) =
+        current_portfolio_fx_marks(observed_at_ms);
+    // Open-position quotes need FX coverage even if their cash currency nets to
+    // zero. Retain those currencies in the bounded interval snapshot too.
+    for position in summary
+        .positions
+        .iter()
+        .filter(|position| position.quantity.abs() > EPSILON)
+    {
+        if let Some((_, quote)) = position.symbol.split_once('-') {
+            cash_balances_by_currency
+                .entry(quote.to_owned())
+                .or_insert(0.0);
+        }
+    }
     // The source rate cache contains every subscribed instrument base. Portfolio
     // evidence only values currencies that actually carry cash in this interval.
-    let (closing_fx_rates_usd_by_currency, closing_fx_rates_updated_at_by_currency) =
-        retain_cash_currency_fx_marks(&cash_balances_by_currency, fx_rates, fx_updated_at);
+    let (
+        closing_fx_rates_usd_by_currency,
+        closing_fx_rates_updated_at_by_currency,
+        closing_fx_source_record_ids_by_currency,
+    ) = retain_cash_currency_fx_marks(
+        &cash_balances_by_currency,
+        std::mem::take(&mut fx_rates),
+        std::mem::take(&mut fx_updated_at),
+        std::mem::take(&mut fx_source_record_ids),
+    );
     let closing_cash_value_usd_by_currency = value_cash_balances_usd(
         &cash_balances_by_currency,
         &closing_fx_rates_usd_by_currency,
@@ -1144,6 +1380,15 @@ fn save_sqlite_ledger_at(
         .as_ref()
         .map(|values| values.values().sum::<f64>())
         .filter(|value| value.is_finite());
+    let (position_valuations, open_position_valuation_complete, open_position_valuation_reasons) =
+        capture_open_position_valuations(
+            &summary.positions,
+            market_marks,
+            &closing_fx_rates_usd_by_currency,
+            &closing_fx_rates_updated_at_by_currency,
+            &closing_fx_source_record_ids_by_currency,
+            observed_at_ms,
+        );
     let heartbeat_gap = previous
         .as_ref()
         .is_some_and(|prior| observed_at_ms.saturating_sub(prior.heartbeat_at_utc_ms) > 60_000);
@@ -1224,12 +1469,16 @@ fn save_sqlite_ledger_at(
         && ledger.dated_carry_positions.iter().all(|position| {
             position.status.starts_with("closed") && position.closed_at_ms.is_some()
         });
-    if !all_flat {
-        completeness_reasons.push("nonflat_positions_need_point_in_time_valuation".to_owned());
+    if !open_position_valuation_complete {
+        completeness_reasons.extend(open_position_valuation_reasons.iter().cloned());
+    }
+    if explicit_baseline_request && !all_flat {
+        completeness_reasons.push("explicit_opening_baseline_requires_flat_portfolio".to_owned());
     }
     // Every covered symbol is a symbol represented by this PM-owned paper
     // ledger. This field does not certify coverage of an exchange universe.
-    let sequences_complete = allocator_cursor_complete && dated_carry_complete && all_flat;
+    let sequences_complete =
+        allocator_cursor_complete && dated_carry_complete && open_position_valuation_complete;
     if ledger.dated_carry_positions.iter().any(|position| {
         position.status == "open" && (!position.entry_fees.is_finite() || position.entry_fees < 0.0)
     }) {
@@ -1248,6 +1497,7 @@ fn save_sqlite_ledger_at(
     let source_quality = completeness_reasons.is_empty();
     let recovered_after_gap = !explicit_baseline_request
         && source_quality
+        && all_flat
         && previous.as_ref().is_some_and(|prior| {
             !prior.complete
                 && prior
@@ -1273,7 +1523,8 @@ fn save_sqlite_ledger_at(
     } else {
         None
     };
-    let is_baseline = (explicit_baseline_request && source_quality) || recovered_after_gap;
+    let is_baseline =
+        (explicit_baseline_request && source_quality && all_flat) || recovered_after_gap;
     let baseline_reason = if recovered_after_gap {
         Some("recovered_after_incomplete_interval_at_source_complete_flat_boundary".to_owned())
     } else if explicit_baseline_request && source_quality {
@@ -1315,6 +1566,13 @@ fn save_sqlite_ledger_at(
         previous
             .as_ref()
             .map(|prior| prior.closing_fx_rates_updated_at_by_currency.clone())
+    };
+    let opening_fx_source_record_ids_by_currency = if is_baseline {
+        Some(closing_fx_source_record_ids_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.closing_fx_source_record_ids_by_currency.clone())
     };
     if is_baseline {
         // A baseline anchors current balances; it is not itself a period of
@@ -1373,8 +1631,11 @@ fn save_sqlite_ledger_at(
             .push("portfolio_interval_source_incomplete".to_owned());
     }
     if !all_flat {
-        portfolio_return_completeness_reasons
-            .push("open_positions_not_valued_at_interval_end".to_owned());
+        portfolio_return_completeness_reasons.push(if open_position_valuation_complete {
+            "open_positions_valued_but_independent_mark_reconciliation_unavailable".to_owned()
+        } else {
+            "open_positions_not_valued_at_interval_end".to_owned()
+        });
     }
     if opening_cash_balances_by_currency.is_none() {
         portfolio_return_completeness_reasons
@@ -1519,6 +1780,7 @@ fn save_sqlite_ledger_at(
         opening_cash_total_usd,
         opening_fx_rates_usd_by_currency,
         opening_fx_rates_updated_at_by_currency,
+        opening_fx_source_record_ids_by_currency,
         known_symbols,
         positions: summary
             .positions
@@ -1542,6 +1804,10 @@ fn save_sqlite_ledger_at(
         closing_cash_value_usd_by_currency,
         closing_fx_rates_usd_by_currency,
         closing_fx_rates_updated_at_by_currency,
+        closing_fx_source_record_ids_by_currency,
+        position_valuations,
+        open_position_valuation_complete,
+        open_position_valuation_reasons,
         closing_cash_total_usd,
         portfolio_return_complete,
         portfolio_return_completeness_reasons,
@@ -1584,11 +1850,14 @@ fn save_sqlite_ledger_at(
         ledger_epoch_changed: epoch_changed,
         valuation_status: if all_flat {
             "flat_cash_only"
+        } else if open_position_valuation_complete {
+            "source_backed_positions_pending_independent_reconciliation"
         } else {
             "unavailable_for_open_positions"
         }
         .to_owned(),
-        market_mark_at_utc_ms: None,
+        market_mark_at_utc_ms: (!all_flat && open_position_valuation_complete)
+            .then_some(observed_at_ms),
         coverage_gap: !complete,
         truncated: false,
         complete,
@@ -1630,16 +1899,216 @@ mod ledger_snapshot_tests {
             ("BTC".to_owned(), 1_900),
             ("AAPL".to_owned(), 1_900),
         ]);
-        let (rates, timestamps) = retain_cash_currency_fx_marks(&cash, rates, timestamps);
+        let (rates, timestamps, source_ids) =
+            retain_cash_currency_fx_marks(&cash, rates, timestamps, BTreeMap::new());
         assert_eq!(rates, BTreeMap::from([("USD".to_owned(), 1.0)]));
         assert_eq!(timestamps, BTreeMap::from([("USD".to_owned(), 0)]));
+        assert!(source_ids.is_empty());
     }
 
     #[test]
     fn usd_cash_has_fixed_parity_valuation_without_an_upstream_rate_snapshot() {
-        let (rates, timestamps) = fixed_usd_parity_fx_mark();
+        let (rates, timestamps, source_ids) = fixed_usd_parity_fx_mark();
         assert_eq!(rates, BTreeMap::from([("USD".to_owned(), 1.0)]));
         assert_eq!(timestamps, BTreeMap::from([("USD".to_owned(), 0)]));
+        assert_eq!(
+            source_ids.get("USD").map(String::as_str),
+            Some("fixed-usd-parity:0")
+        );
+    }
+
+    fn market_mark_fixture(
+        updated_at_ms: u64,
+        source_system: &str,
+        source_epoch: &str,
+        source_cursor: u64,
+        source_record_id: &str,
+    ) -> MarketMark {
+        serde_json::from_value(serde_json::json!({
+            "bid": 99.0,
+            "ask": 100.0,
+            "mid": 99.5,
+            "updated_at_ms": updated_at_ms,
+            "source_system": source_system,
+            "source_epoch": source_epoch,
+            "source_cursor": source_cursor,
+            "source_record_id": source_record_id,
+        }))
+        .unwrap()
+    }
+
+    fn open_position_ledger() -> Ledger {
+        let mut trade = fill("open", "buy", 1, 2_000);
+        trade.symbol = "BTC-USD".to_owned();
+        trade.fee_currency = "USD".to_owned();
+        Ledger {
+            trades: vec![trade],
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("test-epoch".to_owned()),
+            fill_id_sequence: 1,
+            ..Ledger::default()
+        }
+    }
+
+    #[test]
+    fn open_position_mark_capture_is_exact_source_backed_and_restart_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-open-mark-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let baseline = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("test-epoch".to_owned()),
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &baseline, 1_000, true).unwrap();
+
+        let ledger = open_position_ledger();
+        let marks = HashMap::from([(
+            "BTC-USD".to_owned(),
+            market_mark_fixture(
+                2_900,
+                "paper_exchange.market_data_cache",
+                "book-epoch-7",
+                9,
+                "paper-book:v1:book-epoch-7:BTC-USD:9",
+            ),
+        )]);
+        save_sqlite_ledger_with_market_marks_at(&path, &ledger, 3_000, false, &marks).unwrap();
+        let captured = latest_portfolio_evidence(&path).unwrap();
+        assert!(captured.complete);
+        assert!(captured.open_position_valuation_complete);
+        assert_eq!(captured.market_mark_at_utc_ms, Some(3_000));
+        assert_eq!(
+            captured.valuation_status,
+            "source_backed_positions_pending_independent_reconciliation"
+        );
+        assert_eq!(captured.position_valuations.len(), 1);
+        let valuation = &captured.position_valuations[0];
+        assert_eq!(valuation.close_side, "bid");
+        assert_eq!(valuation.close_price, 99.0);
+        assert_eq!(valuation.mark_source_epoch, "book-epoch-7");
+        assert_eq!(valuation.mark_source_cursor, 9);
+        assert_eq!(
+            valuation.mark_source_record_id,
+            "paper-book:v1:book-epoch-7:BTC-USD:9"
+        );
+        assert_eq!(valuation.fx_source_record_id, "fixed-usd-parity:3000");
+        assert!(!captured.portfolio_return_complete);
+        assert!(captured.flat_cash_period_net_pnl_usd.is_none());
+
+        // A restart does not reuse this in-memory mark. The persisted interval
+        // remains auditable, while the first post-restart checkpoint needs a
+        // newly polled mark and cannot bridge the missing checkpoint.
+        let restarted = load_sqlite_ledger(&path).unwrap();
+        save_sqlite_ledger_at(&path, &restarted, 4_000, false).unwrap();
+        let missing = latest_portfolio_evidence(&path).unwrap();
+        assert!(!missing.complete);
+        assert!(!missing.open_position_valuation_complete);
+        assert_eq!(missing.market_mark_at_utc_ms, None);
+        assert!(
+            missing
+                .open_position_valuation_reasons
+                .iter()
+                .any(|reason| reason == "open_position_market_mark_missing:BTC-USD")
+        );
+
+        let fresh_after_restart = HashMap::from([(
+            "BTC-USD".to_owned(),
+            market_mark_fixture(
+                4_500,
+                "paper_exchange.market_data_cache",
+                "book-epoch-8",
+                1,
+                "paper-book:v1:book-epoch-8:BTC-USD:1",
+            ),
+        )]);
+        save_sqlite_ledger_with_market_marks_at(
+            &path,
+            &restarted,
+            5_000,
+            false,
+            &fresh_after_restart,
+        )
+        .unwrap();
+        let resumed = latest_portfolio_evidence(&path).unwrap();
+        assert!(resumed.open_position_valuation_complete);
+        assert!(!resumed.complete);
+        assert!(
+            resumed
+                .completeness_reasons
+                .iter()
+                .any(|reason| reason == "no_contiguous_complete_baseline_interval")
+        );
+
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let row_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM portfolio_evidence_intervals",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 4);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn open_position_marks_reject_stale_and_mismatched_provenance() {
+        let positions = summarize_positions(&open_position_ledger().trades).positions;
+        let fx_rates = BTreeMap::from([("USD".to_owned(), 1.0)]);
+        let fx_times = BTreeMap::from([("USD".to_owned(), 0)]);
+        let fx_sources = BTreeMap::from([("USD".to_owned(), "fixed-usd-parity:v1".to_owned())]);
+        for (mark, expected_reason) in [
+            (
+                market_mark_fixture(
+                    1_000,
+                    "paper_exchange.market_data_cache",
+                    "epoch",
+                    1,
+                    "book",
+                ),
+                "open_position_market_mark_provenance_invalid_or_stale:BTC-USD",
+            ),
+            (
+                market_mark_fixture(9_900, "other-source", "epoch", 1, "book"),
+                "open_position_market_mark_provenance_invalid_or_stale:BTC-USD",
+            ),
+            (
+                market_mark_fixture(9_900, "paper_exchange.market_data_cache", "", 1, "book"),
+                "open_position_market_mark_provenance_invalid_or_stale:BTC-USD",
+            ),
+        ] {
+            let marks = HashMap::from([("BTC-USD".to_owned(), mark)]);
+            let (_, complete, reasons) = capture_open_position_valuations(
+                &positions,
+                &marks,
+                &fx_rates,
+                &fx_times,
+                &fx_sources,
+                10_000,
+            );
+            assert!(!complete);
+            assert!(reasons.iter().any(|reason| reason == expected_reason));
+        }
+        let (rows, complete, reasons) = capture_open_position_valuations(
+            &positions,
+            &HashMap::new(),
+            &fx_rates,
+            &fx_times,
+            &fx_sources,
+            3_000,
+        );
+        assert!(rows.is_empty());
+        assert!(!complete);
+        assert_eq!(reasons, vec!["open_position_market_mark_missing:BTC-USD"]);
     }
 
     fn opening_evidence_page(amount: f64) -> serde_json::Value {
@@ -1970,7 +2439,7 @@ mod ledger_snapshot_tests {
             unvalued
                 .completeness_reasons
                 .iter()
-                .any(|reason| reason == "nonflat_positions_need_point_in_time_valuation")
+                .any(|reason| reason == "open_position_market_mark_missing:BTC-USD")
         );
 
         // Simulate process restart during the unvalued interval.

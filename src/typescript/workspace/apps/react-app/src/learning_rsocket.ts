@@ -20,11 +20,18 @@ type LearningSocket = Awaited<ReturnType<typeof connectLearningRSocket>>;
 let sharedSocket: Promise<LearningSocket> | undefined;
 let socketGeneration = 0;
 let requestLearning = performLearningRpc;
+let requestScoutWorker = performScoutWorkerRpc;
 
 export function setLearningRpcRequesterForTests(
   requester?: typeof performLearningRpc,
 ) {
   requestLearning = requester ?? performLearningRpc;
+}
+
+export function setScoutWorkerRpcRequesterForTests(
+  requester?: typeof performScoutWorkerRpc,
+) {
+  requestScoutWorker = requester ?? performScoutWorkerRpc;
 }
 
 function getSocket() {
@@ -218,8 +225,8 @@ export function scoutWorkerRpc(
   body?: unknown,
 ): Promise<Response> {
   if (method.toUpperCase() !== 'GET')
-    return performScoutWorkerRpc(method, path, body);
-  return retryRead(() => performScoutWorkerRpc(method, path, body));
+    return requestScoutWorker(method, path, body);
+  return retryRead(() => requestScoutWorker(method, path, body));
 }
 
 async function retryRead(request: () => Promise<Response>): Promise<Response> {

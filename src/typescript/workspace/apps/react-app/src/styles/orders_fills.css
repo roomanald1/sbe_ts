@@ -77,7 +77,6 @@
   font-size: 9px;
 }
 
-
 .pnl-panel {
   display: flex;
   min-width: 0;
@@ -164,7 +163,8 @@
   color: var(--coral);
 }
 
-.dashboard-widget > .feed-section[aria-label="Pair volatility ranking"] {
+.dashboard-widget-content
+  > .feed-section[aria-label='Pair volatility ranking'] {
   display: flex;
   height: auto;
   min-height: 0;
@@ -172,7 +172,7 @@
   flex-direction: column;
 }
 
-.dashboard-widget [aria-label="Pair volatility ranking"] .tick-grid-wrap {
+.dashboard-widget [aria-label='Pair volatility ranking'] .tick-grid-wrap {
   height: 0;
   min-height: 0;
   flex: 1;

@@ -5,9 +5,17 @@ struct MarketMark {
     mid: Option<f64>,
     worst_ask: Option<f64>,
     updated_at_ms: u64,
+    #[serde(default)]
+    source_system: Option<String>,
+    #[serde(default)]
+    source_epoch: Option<String>,
+    #[serde(default)]
+    source_cursor: Option<u64>,
+    #[serde(default)]
+    source_record_id: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct MatcherFill {
     quantity: f64,
     price: f64,
@@ -19,6 +27,18 @@ struct MatcherFill {
     source_cursor_kind: Option<String>,
     #[serde(default)]
     recorded_at_utc_ms: Option<u64>,
+    #[serde(default)]
+    fee: Option<f64>,
+    #[serde(default)]
+    fee_currency: Option<String>,
+    #[serde(default)]
+    fee_schedule_id: Option<String>,
+    #[serde(default)]
+    fee_schedule_version: Option<String>,
+    #[serde(default)]
+    fee_order_class: Option<String>,
+    #[serde(default)]
+    fee_schedule_evidence: Option<serde_json::Value>,
     #[serde(skip)]
     source_price: Option<f64>,
     /// Original quantity returned by Paper Exchange before PM applies a cap.
@@ -69,6 +89,12 @@ struct PaperExchangeFillEvidence {
     source_quantity: Option<f64>,
     source_price: Option<f64>,
     complete: Option<bool>,
+    fee: Option<f64>,
+    fee_currency: Option<String>,
+    fee_schedule_id: Option<String>,
+    fee_schedule_version: Option<String>,
+    fee_order_class: Option<String>,
+    fee_schedule_evidence: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
