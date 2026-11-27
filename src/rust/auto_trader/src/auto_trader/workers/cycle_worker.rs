@@ -119,10 +119,13 @@ fn record_cycle_gap_summary(
             if let Some(diagnostic) = &cycle.entry_diagnostic {
                 let reason = cycle.reason.as_deref().unwrap_or_default();
                 let mut diagnostic = diagnostic.clone();
-                diagnostic.gate_counts = gate_hits_for_reason(reason)
-                    .into_iter()
-                    .map(|gate| GateHit { gate, count: 1 })
-                    .collect();
+                let inferred_gates = gate_hits_for_reason(reason);
+                if !inferred_gates.is_empty() {
+                    diagnostic.gate_counts = inferred_gates
+                        .into_iter()
+                        .map(|gate| GateHit { gate, count: 1 })
+                        .collect();
+                }
                 summary.latest_entry_diagnostic = Some(diagnostic);
             }
         }
@@ -243,6 +246,12 @@ fn record_cycle_gap_summary(
                 candidate_decision_ids: Vec::new(),
                 gate_counts: Vec::new(),
                 candidate_gate_counts: Vec::new(),
+                candidate_coverage: CandidateDiagnosticCoverage {
+                    state: CandidateDiagnosticCoverageState::Unavailable,
+                    retained: 0,
+                    observed: None,
+                    truncated: false,
+                },
                 candidate_details: Vec::new(),
                 outcome: EntryCycleOutcome::CycleError,
                 raw_signal_count: 0,

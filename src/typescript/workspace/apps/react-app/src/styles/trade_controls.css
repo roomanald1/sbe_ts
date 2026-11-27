@@ -784,6 +784,42 @@
 .auto-trader-allocation {
   font-size: 11px;
 }
+.auto-trader-allocation > strong,
+.auto-trader-allocation > .v35-operator-subtitle {
+  display: block;
+}
+.auto-trader-allocation > strong {
+  margin-bottom: 3px;
+}
+.auto-trader-allocation-rows {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+.auto-trader-allocation-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.2fr);
+  gap: 3px 10px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-top: 1px solid var(--operator-border, #414141);
+}
+.auto-trader-allocation-row > strong {
+  overflow-wrap: anywhere;
+}
+.auto-trader-allocation-row > span:last-child {
+  grid-column: 1 / -1;
+  color: var(--operator-muted, #b8b8b8);
+  font-size: 10px;
+}
+@media (max-width: 560px) {
+  .auto-trader-allocation-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .auto-trader-allocation-row > span:last-child {
+    grid-column: auto;
+  }
+}
 .auto-trader-allocation strong {
   color: #d5dbe2;
   font-variant-numeric: tabular-nums;

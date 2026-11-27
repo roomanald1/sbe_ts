@@ -1,5 +1,93 @@
 import { BehaviorSubject, type Subscription } from 'rxjs';
 import { AutoTraderModel, type AutoTraderState } from './AutoTraderModel';
+import type { LatestEntryDiagnostic } from './AutoTraderModel';
+
+export type CandidateCoverage = {
+  state: string;
+  retained: number;
+  observed?: number | null;
+  truncated: boolean;
+};
+
+export type FunnelCandidate = NonNullable<
+  LatestEntryDiagnostic['candidateDetails']
+>[number] & {
+  selectionMode?: string | null;
+  strictEligibility?: boolean | null;
+  exploratoryEligibility?: boolean | null;
+};
+
+export type FunnelCycle = LatestEntryDiagnostic & {
+  candidateCoverage?: CandidateCoverage | null;
+  candidateDetails?: FunnelCandidate[];
+};
+
+export type CandidateFunnelRecord = {
+  cycleId: string;
+  cycleTimestampMs: number;
+  candidate: FunnelCandidate;
+};
+
+export type CandidateFunnelGroup = {
+  key: string;
+  symbol: string | null;
+  strategy: string | null;
+  records: CandidateFunnelRecord[];
+};
+
+export const MAX_FUNNEL_CYCLES = 35;
+
+export function boundedFunnelHistory(
+  history: readonly LatestEntryDiagnostic[],
+  latest: LatestEntryDiagnostic | null,
+): FunnelCycle[] {
+  const byCycle = new Map<string, FunnelCycle>();
+  for (const raw of history) byCycle.set(raw.cycleId, raw as FunnelCycle);
+  if (latest) byCycle.set(latest.cycleId, latest as FunnelCycle);
+  return Array.from(byCycle.values())
+    .sort((left, right) => left.timestampMs - right.timestampMs)
+    .slice(-MAX_FUNNEL_CYCLES);
+}
+
+export function candidateFunnelRecords(
+  cycles: readonly FunnelCycle[],
+): CandidateFunnelRecord[] {
+  return cycles.flatMap((cycle) =>
+    (cycle.candidateDetails ?? []).map((candidate) => ({
+      cycleId: cycle.cycleId,
+      cycleTimestampMs: cycle.timestampMs,
+      candidate,
+    })),
+  );
+}
+
+export function groupCandidateFunnelRecords(
+  records: readonly CandidateFunnelRecord[],
+  dimension: 'symbol' | 'strategy' | 'symbol_strategy',
+): CandidateFunnelGroup[] {
+  const groups = new Map<string, CandidateFunnelGroup>();
+  for (const record of records) {
+    const symbol = record.candidate.symbol || null;
+    const strategy = record.candidate.strategy ?? null;
+    const key =
+      dimension === 'symbol'
+        ? (symbol ?? 'Unknown symbol')
+        : dimension === 'strategy'
+          ? (strategy ?? 'Unknown strategy')
+          : `${symbol ?? 'Unknown symbol'} / ${strategy ?? 'Unknown strategy'}`;
+    const group = groups.get(key) ?? {
+      key,
+      symbol,
+      strategy,
+      records: [],
+    };
+    group.records.push(record);
+    groups.set(key, group);
+  }
+  return Array.from(groups.values()).sort((left, right) =>
+    left.key.localeCompare(right.key),
+  );
+}
 
 type SymbolGateHit = AutoTraderState['symbolGateHits'][number];
 export type GateHit = {
@@ -30,6 +118,9 @@ export type DiagnosticsRow = SymbolDiagnosticRow | GateDetailRow;
 export type AutoTraderDiagnosticsState = AutoTraderState & {
   diagnosticRows: DiagnosticsRow[];
   symbolGroupCount: number;
+  funnelHistory: FunnelCycle[];
+  availableFromApiCount: number;
+  displayedCycleCount: number;
 };
 
 export function buildAutoTraderDiagnosticRows(
@@ -143,11 +234,18 @@ export class AutoTraderDiagnosticsModel {
       state.symbolGateHits,
       this.expandedGroups,
     );
+    const funnelHistory = boundedFunnelHistory(
+      state.entryDiagnosticHistory,
+      state.latestEntryDiagnostic,
+    );
     return {
       ...state,
       diagnosticRows,
       symbolGroupCount: diagnosticRows.filter((row) => row.kind === 'symbol')
         .length,
+      funnelHistory,
+      availableFromApiCount: state.entryDiagnosticHistory.length,
+      displayedCycleCount: funnelHistory.length,
     };
   }
 }

@@ -1,11 +1,55 @@
 const TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS: u64 = 5_000;
 const TRADE_PRICE_PATH_MAX_GAP_MS: u64 = 10_000;
 
-fn price_path_excursion_evidence(
+fn entry_fill_identity_complete(position: &TraderPosition) -> bool {
+    let unique_ids = position
+        .entry_fill_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let linked_fee_currencies = position
+        .entry_fill_links
+        .iter()
+        .filter_map(|fill| fill.fee_currency.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let recorded_fee_currencies = position
+        .entry_fee_currencies
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    !position.entry_fill_ids.is_empty()
+        && unique_ids.len() == position.entry_fill_ids.len()
+        && position.entry_fill_costs_complete
+        && !position.entry_fee_currencies.is_empty()
+        && linked_fee_currencies == recorded_fee_currencies
+        && position.entry_fill_links.len() == position.entry_fill_ids.len()
+        && position
+            .entry_fill_ids
+            .iter()
+            .all(|fill_id| stable_pm_exit_fill_id(fill_id))
+        && position.entry_fill_links.iter().all(|fill| {
+            unique_ids.contains(&fill.fill_id)
+                && !fill.client_order_id.trim().is_empty()
+                && !fill.symbol.trim().is_empty()
+                && matches!(fill.side.as_str(), "buy" | "sell")
+                && fill.quantity.is_finite()
+                && fill.quantity > 0.0
+                && fill.execution_price.is_finite()
+                && fill.execution_price > 0.0
+                && fill.fee_known
+                && fill.fee_amount.is_some_and(f64::is_finite)
+                && fill
+                    .fee_currency
+                    .as_deref()
+                    .is_some_and(|currency| !currency.trim().is_empty())
+        })
+}
+
+pub(super) fn price_path_excursion_evidence(
     position: &TraderPosition,
     exit_observed_at_ms: u64,
 ) -> serde_json::Value {
-    price_path_excursion_evidence_for_samples(
+    let mut evidence = price_path_excursion_evidence_for_samples(
         &position.price_path,
         position.price_path_total_samples,
         position.price_path_truncated,
@@ -14,7 +58,80 @@ fn price_path_excursion_evidence(
         position.quantity,
         position.entry_timestamp_ms,
         exit_observed_at_ms,
-    )
+    );
+    let identity = position.lifecycle_identity.as_ref();
+    let identity_complete = identity.is_some_and(|identity| {
+        identity.schema_version == 1
+            && !identity.trade_id.trim().is_empty()
+            && !identity.episode_id.trim().is_empty()
+            && !identity.opportunity_id.trim().is_empty()
+            && position.trade_id.as_deref() == Some(identity.trade_id.as_str())
+            && entry_fill_identity_complete(position)
+    });
+    let mut missing_coverage = evidence["missing_coverage"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let active_epoch_matches = position.price_path_epoch.as_deref().is_some_and(|active| {
+        position
+            .price_path
+            .last()
+            .and_then(|sample| sample.epoch.as_deref())
+            == Some(active)
+    });
+    if !active_epoch_matches {
+        missing_coverage.push(serde_json::json!("active_path_epoch_mismatch_or_missing"));
+    }
+    let continuity_complete = evidence["complete"].as_bool() == Some(true) && active_epoch_matches;
+    if !identity_complete {
+        missing_coverage.push(serde_json::json!(
+            "position_trade_identity_or_entry_fills_missing"
+        ));
+    }
+    evidence["continuity_complete"] = serde_json::json!(continuity_complete);
+    evidence["complete"] = serde_json::json!(continuity_complete && identity_complete);
+    evidence["missing_coverage"] = serde_json::Value::Array(missing_coverage);
+    let initial_risk_complete = position
+        .initial_risk_reference
+        .as_ref()
+        .is_some_and(|risk| {
+            risk.schema_version == 1
+                && risk.status == "complete"
+                && risk
+                    .quote_amount
+                    .is_some_and(|amount| amount.is_finite() && amount > 0.0)
+                && risk
+                    .quote_currency
+                    .as_deref()
+                    .is_some_and(|currency| !currency.is_empty())
+                && !risk.fill_ids.is_empty()
+        });
+    evidence["identity_complete"] = serde_json::json!(identity_complete);
+    evidence["canonical_lifecycle_identity"] = serde_json::json!(identity);
+    evidence["trade_id"] = serde_json::json!(position.trade_id);
+    evidence["source_episode_id"] =
+        serde_json::json!(identity.map(|identity| &identity.episode_id));
+    evidence["opportunity_id"] =
+        serde_json::json!(identity.map(|identity| &identity.opportunity_id));
+    evidence["path_epoch"] = serde_json::json!(position.price_path_epoch);
+    evidence["entry_fill_ids"] = serde_json::json!(position.entry_fill_ids);
+    evidence["entry_fill_links"] = serde_json::json!(position.entry_fill_links);
+    evidence["initial_risk_reference"] = serde_json::json!(position.initial_risk_reference);
+    evidence["initial_risk_complete"] = serde_json::json!(initial_risk_complete);
+    let mut policy_evaluation_blockers = Vec::new();
+    if !continuity_complete {
+        policy_evaluation_blockers.push("executable_price_path_incomplete");
+    }
+    if !identity_complete {
+        policy_evaluation_blockers.push("position_trade_identity_or_entry_fills_missing");
+    }
+    if !initial_risk_complete {
+        policy_evaluation_blockers.push("authoritative_initial_risk_missing_or_incomplete");
+    }
+    evidence["policy_evaluation_eligible"] =
+        serde_json::json!(evidence["complete"].as_bool() == Some(true) && initial_risk_complete);
+    evidence["policy_evaluation_blockers"] = serde_json::json!(policy_evaluation_blockers);
+    evidence
 }
 
 fn price_path_excursion_evidence_for_samples(
@@ -50,6 +167,10 @@ fn price_path_excursion_evidence_for_samples(
     let mut stale_samples = 0_usize;
     let mut invalid_quote_samples = 0_usize;
     let mut non_monotonic = false;
+    let mut sequence_discontinuities = 0_usize;
+    let mut unknown_sequence_samples = 0_usize;
+    let mut missing_epoch_samples = 0_usize;
+    let mut path_epochs = std::collections::BTreeSet::new();
 
     for (index, sample) in price_path.iter().enumerate() {
         if index > 0 {
@@ -59,6 +180,19 @@ fn price_path_excursion_evidence_for_samples(
             } else {
                 maximum_gap_ms = maximum_gap_ms.max(sample.timestamp - previous.timestamp);
             }
+            if previous.sequence == 0 || sample.sequence == 0 {
+                unknown_sequence_samples += 1;
+            } else if sample.sequence != previous.sequence.saturating_add(1) {
+                sequence_discontinuities += 1;
+            }
+        }
+        if sample.sequence == 0 {
+            unknown_sequence_samples += usize::from(index == 0);
+        }
+        if let Some(epoch) = sample.epoch.as_deref().filter(|epoch| !epoch.is_empty()) {
+            path_epochs.insert(epoch.to_owned());
+        } else {
+            missing_epoch_samples += 1;
         }
         if sample.source_fresh != Some(true)
             || sample.freshness_contract_version != Some(1)
@@ -104,6 +238,18 @@ fn price_path_excursion_evidence_for_samples(
     if invalid_quote_samples > 0 {
         missing.push("invalid_executable_quotes");
     }
+    if unknown_sequence_samples > 0 {
+        missing.push("path_sequence_unknown");
+    }
+    if sequence_discontinuities > 0 {
+        missing.push("path_sequence_discontinuity");
+    }
+    if missing_epoch_samples > 0 {
+        missing.push("path_epoch_missing");
+    }
+    if path_epochs.len() > 1 {
+        missing.push("path_spans_multiple_epochs");
+    }
 
     let first_timestamp = price_path.first().map(|sample| sample.timestamp);
     let last_timestamp = price_path.last().map(|sample| sample.timestamp);
@@ -133,6 +279,10 @@ fn price_path_excursion_evidence_for_samples(
         "source_freshness_unknown_sample_count": freshness_unknown_samples,
         "invalid_quote_sample_count": invalid_quote_samples,
         "maximum_observed_gap_ms": maximum_gap_ms,
+        "sequence_discontinuity_count": sequence_discontinuities,
+        "unknown_sequence_sample_count": unknown_sequence_samples,
+        "missing_epoch_sample_count": missing_epoch_samples,
+        "path_epochs": path_epochs,
         "first_sample_at_ms": first_timestamp,
         "last_sample_at_ms": last_timestamp,
         "gross_executable_mfe_percent": mfe,
@@ -150,6 +300,94 @@ fn stable_pm_exit_fill_id(value: &str) -> bool {
         .is_some_and(|(epoch, sequence)| {
             !epoch.trim().is_empty() && sequence.parse::<u64>().is_ok()
         })
+}
+
+pub(super) fn realized_r_evidence(
+    position: &TraderPosition,
+    symbol: &str,
+    trade_closed: bool,
+    cumulative_realized_pnl: f64,
+    fee_currency: Option<&str>,
+    fee_coverage_complete: bool,
+) -> serde_json::Value {
+    let expected_quote = symbol
+        .split_once('-')
+        .map(|(_, quote)| quote)
+        .filter(|quote| !quote.trim().is_empty());
+    let reference = position.initial_risk_reference.as_ref();
+    let quote_amount = reference
+        .and_then(|reference| reference.quote_amount)
+        .filter(|amount| amount.is_finite() && *amount > 0.0);
+    let quote_currency = reference.and_then(|reference| reference.quote_currency.as_deref());
+    let identity_complete = position
+        .lifecycle_identity
+        .as_ref()
+        .is_some_and(|identity| {
+            identity.schema_version == 1
+                && !identity.episode_id.trim().is_empty()
+                && !identity.opportunity_id.trim().is_empty()
+                && position.trade_id.as_deref() == Some(identity.trade_id.as_str())
+        });
+    let eligible = trade_closed
+        && cumulative_realized_pnl.is_finite()
+        && fee_coverage_complete
+        && fee_currency == expected_quote
+        && identity_complete
+        && reference.is_some_and(|reference| {
+            reference.schema_version == 1
+                && reference.status == "complete"
+                && quote_amount.is_some()
+                && expected_quote.is_some()
+                && quote_currency == expected_quote
+                && !reference.fill_ids.is_empty()
+                && reference
+                    .fill_ids
+                    .iter()
+                    .all(|fill_id| position.entry_fill_ids.contains(fill_id))
+                && reference.fill_ids.len() == position.entry_fill_ids.len()
+                && entry_fill_identity_complete(position)
+        });
+    let mut missing_coverage = Vec::new();
+    if !trade_closed {
+        missing_coverage.push("trade_not_closed");
+    } else {
+        if !identity_complete {
+            missing_coverage.push("canonical_trade_episode_identity_missing_or_mismatched");
+        }
+        if !fee_coverage_complete || fee_currency != expected_quote {
+            missing_coverage.push("known_quote_currency_entry_exit_fees_incomplete");
+        }
+        if !reference.is_some_and(|reference| {
+            reference.schema_version == 1
+                && reference.status == "complete"
+                && quote_amount.is_some()
+                && quote_currency == expected_quote
+                && !reference.fill_ids.is_empty()
+                && reference.fill_ids.len() == position.entry_fill_ids.len()
+                && reference
+                    .fill_ids
+                    .iter()
+                    .all(|fill_id| position.entry_fill_ids.contains(fill_id))
+                && entry_fill_identity_complete(position)
+        }) {
+            missing_coverage
+                .push("authoritative_initial_risk_or_entry_fills_missing_or_mismatched");
+        }
+    }
+    serde_json::json!({
+        "schema_version": 1,
+        "status": if eligible { "complete" } else if trade_closed { "unavailable" } else { "not_closed" },
+        "net_realized_r_multiple": if eligible { Some(cumulative_realized_pnl / quote_amount.unwrap()) } else { None },
+        "cumulative_realized_pnl_quote": trade_closed.then_some(cumulative_realized_pnl),
+        "initial_risk_quote_amount": quote_amount,
+        "quote_currency": quote_currency,
+        "expected_quote_currency": expected_quote,
+        "fee_coverage_complete": fee_coverage_complete,
+        "fee_currency": fee_currency,
+        "identity_complete": identity_complete,
+        "initial_risk_fill_ids": reference.map(|reference| &reference.fill_ids),
+        "missing_coverage": missing_coverage,
+    })
 }
 
 fn exit_fill_lineage_evidence(
@@ -397,16 +635,17 @@ fn position_exit_audit_payload(
     let canonical_identity_status = match lifecycle_identity {
         None => "missing",
         Some(identity)
-            if position
-                .trade_id
-                .as_deref()
-                .is_none_or(|trade_id| trade_id == identity.trade_id) =>
+            if identity.schema_version == 1
+                && !identity.episode_id.trim().is_empty()
+                && !identity.opportunity_id.trim().is_empty()
+                && position.trade_id.as_deref() == Some(identity.trade_id.as_str()) =>
         {
             "complete"
         }
         Some(_) => "mismatched",
     };
     let lineage_status = if canonical_identity_status == "complete"
+        && entry_fill_identity_complete(position)
         && exit_fill_evidence["complete"].as_bool() == Some(true)
     {
         "complete"
@@ -449,22 +688,60 @@ fn position_exit_audit_payload(
         "exit_ask": ask,
         "effective_stop_loss_percent": stop_loss_percent,
         "effective_take_profit_percent": take_profit_percent,
+        "exit_parameter_provenance": position.exit_parameter_provenance,
+        "selected_stop_loss_percent": position
+            .exit_parameter_provenance
+            .as_ref()
+            .and_then(|provenance| provenance["stop_loss"]["selected_percent"].as_f64()),
+        "selected_take_profit_percent": position
+            .exit_parameter_provenance
+            .as_ref()
+            .and_then(|provenance| provenance["take_profit"]["selected_percent"].as_f64()),
     });
-    payload["price_path"] = serde_json::json!(position
-        .price_path
-        .iter()
-        .map(|sample| {
-            serde_json::json!({
-                "timestamp": sample.timestamp,
-                "bid": sample.bid,
-                "ask": sample.ask,
-                "source_updated_at_ms": sample.source_updated_at_ms,
-                "freshness_contract_version": sample.freshness_contract_version,
-                "freshness_max_age_ms": sample.freshness_max_age_ms,
-                "source_fresh": sample.source_fresh,
+    let trade_closed = filled + 1e-12 >= quantity;
+    let exit_fee_currencies = response["fill_evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|fill| fill["fee_currency"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let fee_currency = (position.entry_fee_currencies.len() == 1
+        && exit_fee_currencies.len() == 1
+        && position.entry_fee_currencies[0].as_str()
+            == *exit_fee_currencies.iter().next().unwrap())
+    .then(|| position.entry_fee_currencies[0].as_str());
+    payload["realized_r_evidence"] = realized_r_evidence(
+        position,
+        symbol,
+        trade_closed,
+        position.realized_pnl + realized_pnl,
+        fee_currency,
+        exit_fill_evidence["fees_complete"].as_bool() == Some(true)
+            && response["fee_complete"].as_bool() == Some(true),
+    );
+    let identity = position.lifecycle_identity.as_ref();
+    payload["price_path"] = serde_json::json!(
+        position
+            .price_path
+            .iter()
+            .map(|sample| {
+                serde_json::json!({
+                    "timestamp": sample.timestamp,
+                    "sequence": sample.sequence,
+                    "epoch": sample.epoch,
+                    "trade_id": position.trade_id,
+                    "episode_id": identity.map(|identity| &identity.episode_id),
+                    "opportunity_id": identity.map(|identity| &identity.opportunity_id),
+                    "bid": sample.bid,
+                    "ask": sample.ask,
+                    "source_updated_at_ms": sample.source_updated_at_ms,
+                    "freshness_contract_version": sample.freshness_contract_version,
+                    "freshness_max_age_ms": sample.freshness_max_age_ms,
+                    "source_fresh": sample.source_fresh,
+                })
             })
-        })
-        .collect::<Vec<_>>());
+            .collect::<Vec<_>>()
+    );
     payload["price_path_evidence"] = price_path_excursion_evidence(position, observed_at);
     payload["entry_context"] = serde_json::json!({
         "trade_id": trade_id,
@@ -479,8 +756,11 @@ fn position_exit_audit_payload(
         "duration_ms": (position.entry_timestamp_ms > 0).then_some(observed_at.saturating_sub(position.entry_timestamp_ms)),
         "quantity": position.quantity.abs(),
         "entry_fill_ids": position.entry_fill_ids,
+        "entry_fill_links": position.entry_fill_links,
         "entry_fee_currencies": position.entry_fee_currencies,
         "entry_fill_costs_complete": position.entry_fill_costs_complete,
+        "initial_risk_reference": position.initial_risk_reference,
+        "exit_parameter_provenance": position.exit_parameter_provenance,
         "lifecycle_identity": lifecycle_identity.or(position.lifecycle_identity.as_ref()),
     });
     payload["exit_decision_context"] = exit_decision_context.clone();
@@ -563,7 +843,9 @@ fn queue_post_exit_observation(settings: &mut Settings, payload: &serde_json::Va
         "pre_exit_price_path": payload["price_path"],
         "pre_exit_price_path_evidence": payload["price_path_evidence"],
         "exit_fill_evidence": payload["exit_fill_evidence"],
+        "realized_r_evidence": payload["realized_r_evidence"],
         "canonical_lifecycle_identity": payload["canonical_lifecycle_identity"],
+        "exit_parameter_provenance": payload["exit_parameter_provenance"],
         "canonical_identity_status": payload["canonical_identity_status"],
         "lineage_status": payload["lineage_status"],
         "exit_timestamp_ms": now,
@@ -676,11 +958,55 @@ mod tests {
                 source: "auto_trader_entry_reservation".into(),
             }),
             entry_timestamp_ms: 1_000,
+            price_path_epoch: Some("path-epoch-1".into()),
+            entry_fill_ids: vec!["pm-fill:v1:entry-1:1".into(), "pm-fill:v1:entry-1:2".into()],
+            entry_fill_links: vec![
+                PositionEntryFillLink {
+                    fill_id: "pm-fill:v1:entry-1:1".into(),
+                    client_order_id: "entry-order-1".into(),
+                    symbol: "BTC-USDT".into(),
+                    side: "buy".into(),
+                    quantity: 1.0,
+                    execution_price: 100.0,
+                    timestamp_ms: Some(1_000),
+                    fee_known: true,
+                    fee_amount: Some(0.05),
+                    fee_currency: Some("USDT".into()),
+                },
+                PositionEntryFillLink {
+                    fill_id: "pm-fill:v1:entry-1:2".into(),
+                    client_order_id: "entry-order-1".into(),
+                    symbol: "BTC-USDT".into(),
+                    side: "buy".into(),
+                    quantity: 1.0,
+                    execution_price: 100.0,
+                    timestamp_ms: Some(1_100),
+                    fee_known: true,
+                    fee_amount: Some(0.05),
+                    fee_currency: Some("USDT".into()),
+                },
+            ],
+            entry_fee_currencies: vec!["USDT".into()],
+            entry_fill_costs_complete: true,
+            initial_risk_reference: Some(InitialRiskReference {
+                schema_version: 1,
+                quote_currency: Some("USDT".into()),
+                stop_loss_percent: Some(0.5),
+                quote_amount: Some(10.0),
+                fill_ids: vec!["pm-fill:v1:entry-1:1".into(), "pm-fill:v1:entry-1:2".into()],
+                status: "complete".into(),
+            }),
             strategy_decision: Some(serde_json::json!({"strategy": "test"})),
             price_path: vec![TradePriceSample {
                 timestamp: 1_500,
                 bid: 101.0,
                 ask: 102.0,
+                sequence: 1,
+                epoch: Some("path-epoch-1".into()),
+                source_updated_at_ms: Some(1_490),
+                freshness_contract_version: Some(1),
+                freshness_max_age_ms: Some(5_000),
+                source_fresh: Some(true),
                 ..TradePriceSample::default()
             }],
             ..TraderPosition::default()
@@ -732,7 +1058,45 @@ mod tests {
         assert_eq!(payload["status"], "filled");
         assert_eq!(payload["net_return_percent"], 9.85);
         assert_eq!(payload["entry_context"]["duration_ms"], 1_000);
+        assert_eq!(
+            payload["entry_context"]["entry_fill_links"][0]["timestamp_ms"],
+            1_000
+        );
+        assert_eq!(
+            payload["entry_context"]["entry_fill_links"][1]["timestamp_ms"],
+            1_100
+        );
         assert_eq!(payload["price_path"][0]["timestamp"], 1_500);
+        assert_eq!(payload["price_path"][0]["sequence"], 1);
+        assert_eq!(payload["price_path"][0]["epoch"], "path-epoch-1");
+        assert_eq!(payload["price_path"][0]["episode_id"], "episode-1");
+        assert_eq!(payload["price_path_evidence"]["identity_complete"], true);
+        assert_eq!(
+            payload["price_path_evidence"]["initial_risk_complete"],
+            true
+        );
+        assert_eq!(
+            payload["price_path_evidence"]["policy_evaluation_eligible"],
+            true
+        );
+        assert_eq!(payload["realized_r_evidence"]["status"], "complete");
+        assert_eq!(
+            payload["realized_r_evidence"]["net_realized_r_multiple"],
+            1.97
+        );
+        let partial_r = realized_r_evidence(&position, "BTC-USDT", false, 10.0, Some("USDT"), true);
+        assert_eq!(partial_r["status"], "not_closed");
+        assert_eq!(
+            partial_r["net_realized_r_multiple"],
+            serde_json::Value::Null
+        );
+        let foreign_fee_r =
+            realized_r_evidence(&position, "BTC-USDT", true, 19.7, Some("BNB"), true);
+        assert_eq!(foreign_fee_r["status"], "unavailable");
+        assert_eq!(
+            foreign_fee_r["net_realized_r_multiple"],
+            serde_json::Value::Null
+        );
         assert_eq!(payload["exit_rule_trace"]["reason"], "take-profit");
         assert_eq!(payload["exit_order_type"], "PostOnlyLimit");
         assert_eq!(payload["exit_decision_context"]["signal_active"], true);
@@ -844,21 +1208,27 @@ mod tests {
         );
         assert_eq!(evidence["fills"][1]["fee_status"], "unknown");
         assert_eq!(evidence["fee_total_matches"], false);
-        assert!(evidence["missing_coverage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "exit_fill_order_identity_missing_or_mismatched"));
-        assert!(evidence["missing_coverage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "exit_fill_symbol_or_side_mismatched"));
-        assert!(evidence["missing_coverage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "per_fill_fee_total_does_not_match_response"));
+        assert!(
+            evidence["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "exit_fill_order_identity_missing_or_mismatched")
+        );
+        assert!(
+            evidence["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "exit_fill_symbol_or_side_mismatched")
+        );
+        assert!(
+            evidence["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "per_fill_fee_total_does_not_match_response")
+        );
 
         let missing = exit_fill_lineage_evidence(
             &serde_json::json!({"filled_quantity":1.0,"estimated_fee":0.0,"fee_complete":false}),
@@ -904,6 +1274,8 @@ mod tests {
             timestamp,
             bid,
             ask,
+            sequence: timestamp / 5_000,
+            epoch: Some("test-path-epoch".into()),
             source_updated_at_ms: Some(timestamp.saturating_sub(100)),
             freshness_contract_version: Some(1),
             freshness_max_age_ms: Some(5_000),
@@ -913,6 +1285,7 @@ mod tests {
             quantity: 1.0,
             average_entry_price: 100.0,
             entry_timestamp_ms: 10_000,
+            price_path_epoch: Some("test-path-epoch".into()),
             price_path: vec![
                 fresh_sample(10_000, 101.0, 102.0),
                 fresh_sample(15_000, 98.0, 99.0),
@@ -922,7 +1295,9 @@ mod tests {
             ..TraderPosition::default()
         };
         let evidence = price_path_excursion_evidence(&long, 25_000);
-        assert_eq!(evidence["complete"], true);
+        assert_eq!(evidence["continuity_complete"], true);
+        assert_eq!(evidence["complete"], false);
+        assert_eq!(evidence["identity_complete"], false);
         assert!((evidence["gross_executable_mfe_percent"].as_f64().unwrap() - 3.0).abs() < 1e-12);
         assert!((evidence["gross_executable_mae_percent"].as_f64().unwrap() + 2.0).abs() < 1e-12);
         assert_eq!(
@@ -930,10 +1305,23 @@ mod tests {
             "not_computed_without_path_level_execution_costs"
         );
 
+        let mut discontinuous = long.clone();
+        discontinuous.price_path[2].sequence = 5;
+        let discontinuity_evidence = price_path_excursion_evidence(&discontinuous, 25_000);
+        assert_eq!(discontinuity_evidence["complete"], false);
+        assert!(
+            discontinuity_evidence["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "path_sequence_discontinuity")
+        );
+
         let mut short = TraderPosition {
             quantity: -1.0,
             average_entry_price: 100.0,
             entry_timestamp_ms: 10_000,
+            price_path_epoch: Some("test-path-epoch".into()),
             price_path: vec![
                 fresh_sample(10_000, 98.0, 99.0),
                 fresh_sample(15_000, 101.0, 102.0),
@@ -943,7 +1331,8 @@ mod tests {
             ..TraderPosition::default()
         };
         let short_evidence = price_path_excursion_evidence(&short, 25_000);
-        assert_eq!(short_evidence["complete"], true);
+        assert_eq!(short_evidence["continuity_complete"], true);
+        assert_eq!(short_evidence["complete"], false);
         assert!(
             (short_evidence["gross_executable_mfe_percent"]
                 .as_f64()
@@ -965,11 +1354,13 @@ mod tests {
         let incomplete = price_path_excursion_evidence(&short, 25_000);
         assert_eq!(incomplete["complete"], false);
         assert_eq!(incomplete["source_stale_sample_count"], 1);
-        assert!(incomplete["missing_coverage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "stale_source_marks"));
+        assert!(
+            incomplete["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "stale_source_marks")
+        );
     }
 
     #[test]

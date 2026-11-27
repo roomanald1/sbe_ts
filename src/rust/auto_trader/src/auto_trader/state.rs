@@ -29,6 +29,9 @@ struct AutoTraderState {
     settings_persist_timings_ms: Arc<std::sync::Mutex<BTreeMap<String, Vec<f64>>>>,
     latest_missed_opportunity_bands: Arc<Mutex<Arc<Vec<MissedOpportunityGateBand>>>>,
     latest_execution_parameters: Arc<Mutex<Option<LatestExecutionParameters>>>,
+    /// Last bounded, candidate-specific capital split shown to status callers.
+    /// This is an in-memory diagnostic snapshot, never part of durable settings.
+    capital_allocation_snapshot: Arc<Mutex<CapitalAllocationSnapshot>>,
     cycle_lock: Arc<Mutex<()>>,
     pending_daily_signals: Arc<Mutex<PendingSignalQueue>>,
     daily_signal_notify: Arc<Notify>,
@@ -518,9 +521,15 @@ struct TraderPosition {
     #[serde(default)]
     entry_fill_ids: Vec<String>,
     #[serde(default)]
+    entry_fill_links: Vec<PositionEntryFillLink>,
+    #[serde(default)]
     entry_fee_currencies: Vec<String>,
     #[serde(default)]
     entry_fill_costs_complete: bool,
+    /// Versioned quote-currency risk at the opening protective stop, based
+    /// only on validated PM execution rows. Legacy positions have no baseline.
+    #[serde(default)]
+    initial_risk_reference: Option<InitialRiskReference>,
     #[serde(default)]
     entries: u32,
     #[serde(default)]
@@ -554,10 +563,21 @@ struct TraderPosition {
     stop_loss_percent: Option<f64>,
     #[serde(default)]
     take_profit_percent: Option<f64>,
+    /// Snapshot of the exit parameters chosen by the strategy profile at entry.
+    /// This is provenance, not a second execution policy.
+    #[serde(default)]
+    exit_parameter_provenance: Option<serde_json::Value>,
     #[serde(default)]
     take_profit_deferred_at_ms: Option<u64>,
     #[serde(default, alias = "scout_profit_peak_return_percent")]
     profit_protection_peak_return_percent: Option<f64>,
+    /// Best net executable return observed after the profile-scoped trailing
+    /// threshold was selected. Kept separate from profit-protection state.
+    #[serde(default)]
+    trailing_peak_return_percent: Option<f64>,
+    /// Monotonic activation state for the entry-captured breakeven policy.
+    #[serde(default)]
+    breakeven_protection_activated: bool,
     #[serde(default)]
     thesis_failure_confirmation_count: u32,
     #[serde(default)]
@@ -566,6 +586,10 @@ struct TraderPosition {
     protective_stops: Vec<ProtectiveStop>,
     #[serde(default)]
     price_path: Vec<TradePriceSample>,
+    /// Stable per-position path epoch; a restore starts a new epoch while
+    /// retaining prior rows as explicitly interrupted evidence.
+    #[serde(default)]
+    price_path_epoch: Option<String>,
     #[serde(default)]
     price_path_total_samples: u64,
     #[serde(default)]
@@ -578,10 +602,38 @@ struct TraderPosition {
     entry_timestamp_ms: u64,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
+struct InitialRiskReference {
+    schema_version: u16,
+    quote_currency: Option<String>,
+    stop_loss_percent: Option<f64>,
+    quote_amount: Option<f64>,
+    fill_ids: Vec<String>,
+    status: String,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct PositionEntryFillLink {
+    fill_id: String,
+    client_order_id: String,
+    symbol: String,
+    side: String,
+    quantity: f64,
+    execution_price: f64,
+    /// Authoritative Position Management fill timestamp; absent on legacy rows.
+    #[serde(default)]
+    timestamp_ms: Option<u64>,
+    fee_known: bool,
+    fee_amount: Option<f64>,
+    fee_currency: Option<String>,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct TradePriceSample {
     timestamp: u64,
     bid: f64,
     ask: f64,
+    #[serde(default)]
+    sequence: u64,
+    #[serde(default)]
+    epoch: Option<String>,
     #[serde(default)]
     source_updated_at_ms: Option<u64>,
     #[serde(default)]

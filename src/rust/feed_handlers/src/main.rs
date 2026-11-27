@@ -5,11 +5,15 @@ async fn serve_http() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(service_docs::routes(
             "Feed Handlers",
-            &[("/health", &["get"])],
+            &[
+                ("/health", &["get"]),
+                ("/internal/symbol-provenance", &["get"]),
+            ],
         ))
         .route("/health", get(|| async { "ok" }))
         .route("/internal/message-counts", get(message_counts))
         .route("/internal/queue-metrics", get(queue_metrics))
+        .route("/internal/symbol-provenance", get(symbol_provenance))
         .route("/process-cpu-seconds", get(process_cpu_seconds))
         .route("/process-memory-bytes", get(process_memory_bytes));
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", 3001)).await?;
@@ -75,4 +79,8 @@ async fn queue_metrics() -> Json<Vec<serde_json::Value>> {
         let capacity = feed_handlers::metrics::queue_capacity(&queue);
         serde_json::json!({"queue": queue, "depth": depth, "capacity": capacity, "dropped": dropped})
     }).collect())
+}
+
+async fn symbol_provenance() -> Json<serde_json::Value> {
+    Json(feed_handlers::metrics::symbol_provenance_snapshot())
 }

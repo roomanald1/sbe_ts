@@ -105,6 +105,22 @@ mod tests {
         assert_eq!(evaluate(&still_active).unwrap(), StrategyDecision::Hold);
         assert_eq!(evaluate(&disabled).unwrap(), StrategyDecision::Exit);
     }
+
+    #[test]
+    fn own_asset_sma_entry_does_not_require_btc_regime_data() {
+        let parameters = BTreeMap::from([("breakout_entry_distance_percent".to_owned(), 0.0)]);
+        let mut candidate = signal("donchian-20-sma200", true);
+        candidate.symbol = "ETH-USDT".into();
+        let decision = candidate.strategy_decision.as_mut().unwrap();
+        decision["btc_gate_required"] = serde_json::json!(false);
+        decision["btc_close"] = serde_json::Value::Null;
+        decision["btc_sma"] = serde_json::Value::Null;
+
+        assert_eq!(
+            evaluate(&StrategySignal::entry(&candidate, &parameters)).unwrap(),
+            StrategyDecision::Enter
+        );
+    }
 }
 
 pub(super) fn should_exit_when_insight_inactive(entry_insight_active: bool) -> bool {

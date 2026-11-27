@@ -189,21 +189,62 @@ pub async fn push_live_profile_set(
 }
 
 type RpcClientPool = HashMap<String, Arc<Client>>;
+type RpcConnectionLockPool = HashMap<String, Arc<tokio::sync::Mutex<()>>>;
 
 fn rpc_client_pool() -> &'static StdMutex<RpcClientPool> {
     static CLIENTS: OnceLock<StdMutex<RpcClientPool>> = OnceLock::new();
     CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+fn rpc_connection_lock_pool() -> &'static StdMutex<RpcConnectionLockPool> {
+    static CONNECTION_LOCKS: OnceLock<StdMutex<RpcConnectionLockPool>> = OnceLock::new();
+    CONNECTION_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn rpc_connection_lock(endpoint: &str) -> Arc<tokio::sync::Mutex<()>> {
+    rpc_connection_lock_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(endpoint.to_owned())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 #[cfg(test)]
 pub fn clear_rpc_client_pool_for_tests() {
+    let _pool_lock = rpc_client_pool_test_lock();
     rpc_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    rpc_connection_lock_pool()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
 }
 
+#[cfg(test)]
+fn rpc_client_pool_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 async fn pooled_client(endpoint: &str) -> anyhow::Result<Arc<Client>> {
+    if let Some(client) = rpc_client_pool()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(endpoint)
+        .cloned()
+    {
+        return Ok(client);
+    }
+    // Serialize only cold connection establishment per endpoint. Without
+    // this second check under the async lock, a burst of first requests can
+    // each open a socket before one winner is installed in the shared pool.
+    let connection_lock = rpc_connection_lock(endpoint);
+    let _connecting = connection_lock.lock().await;
     if let Some(client) = rpc_client_pool()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -220,13 +261,11 @@ async fn pooled_client(endpoint: &str) -> anyhow::Result<Arc<Client>> {
             .await
             .with_context(|| format!("could not connect to application service at {endpoint}"))?,
     );
-    let mut clients = rpc_client_pool()
+    rpc_client_pool()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(clients
-        .entry(endpoint.to_owned())
-        .or_insert(connected)
-        .clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(endpoint.to_owned(), Arc::clone(&connected));
+    Ok(connected)
 }
 
 fn invalidate_client(endpoint: &str, failed_client: &Arc<Client>) {
@@ -457,6 +496,9 @@ mod tests {
         use rsocket_rust_transport_websocket::WebsocketServerTransport;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        clear_rpc_client_pool_for_tests();
+        let _pool_test_lock = rpc_client_pool_test_lock();
+
         struct Responder;
 
         #[rsocket_rust::async_trait]
@@ -533,9 +575,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_coalesces_concurrent_cold_starts_into_one_pooled_connection() {
+        use rsocket_rust_transport_websocket::WebsocketServerTransport;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        clear_rpc_client_pool_for_tests();
+        let _pool_test_lock = rpc_client_pool_test_lock();
+
+        struct Responder;
+
+        #[rsocket_rust::async_trait]
+        impl RSocket for Responder {
+            async fn metadata_push(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+
+            async fn fire_and_forget(&self, _request: Payload) -> rsocket_rust::Result<()> {
+                anyhow::bail!("unsupported")
+            }
+
+            async fn request_response(
+                &self,
+                payload: Payload,
+            ) -> rsocket_rust::Result<Option<Payload>> {
+                let request: RpcRequest = serde_json::from_slice(payload.data().unwrap())?;
+                let response = RpcResponse {
+                    status: 202,
+                    body: serde_json::json!({ "path": request.path }),
+                    headers: std::collections::BTreeMap::new(),
+                };
+                Ok(Some(
+                    Payload::builder()
+                        .set_data(serde_json::to_vec(&response).unwrap())
+                        .build(),
+                ))
+            }
+
+            fn request_stream(&self, _request: Payload) -> Flux<rsocket_rust::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+
+            fn request_channel(
+                &self,
+                _requests: Flux<rsocket_rust::Result<Payload>>,
+            ) -> Flux<rsocket_rust::Result<Payload>> {
+                Box::pin(futures_util::stream::empty())
+            }
+        }
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&connections);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server = RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_, _| {
+                accepted.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::new(Responder))
+            }))
+            .serve();
+        let server_task = tokio::spawn(server);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let endpoint = format!("ws://{address}");
+        let requests = (0..32).map(|index| {
+            let endpoint = endpoint.clone();
+            async move {
+                request(
+                    &endpoint,
+                    &RpcRequest {
+                        method: "GET".into(),
+                        path: format!("/parallel/{index}"),
+                        body: None,
+                    },
+                )
+                .await
+            }
+        });
+        let responses = futures_util::future::join_all(requests).await;
+        for (index, response) in responses.into_iter().enumerate() {
+            let response = response.expect("concurrent pooled request should succeed");
+            assert_eq!(response.status, 202);
+            assert_eq!(response.body["path"], format!("/parallel/{index}"));
+        }
+        assert_eq!(connections.load(Ordering::Relaxed), 1);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn rsocket_timeout_discards_stalled_connection_and_reconnects() {
         use rsocket_rust_transport_websocket::WebsocketServerTransport;
         use std::sync::atomic::{AtomicUsize, Ordering};
+
+        clear_rpc_client_pool_for_tests();
+        let _pool_test_lock = rpc_client_pool_test_lock();
 
         struct Responder {
             connection: usize,

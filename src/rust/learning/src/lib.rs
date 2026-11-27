@@ -3,7 +3,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -623,6 +623,12 @@ struct EvidenceGainRecord {
     coverage_after_status: String,
     sample_count_before: Option<usize>,
     sample_count_after: Option<usize>,
+    /// Point-in-time weighted effective samples; absent on legacy rows or
+    /// when coverage did not carry this measure.
+    #[serde(default)]
+    effective_sample_size_before: Option<f64>,
+    #[serde(default)]
+    effective_sample_size_after: Option<f64>,
     last_sample_before_ms: Option<u64>,
     last_sample_after_ms: Option<u64>,
     new_coverage_observed: bool,
@@ -1167,6 +1173,7 @@ fn service_router(service: ServiceState) -> Router {
         .route("/exit-timing", post(accept_exit_timing_observation))
         .route("/strategy-replays", get(get_strategy_replays))
         .route("/evidence-requests", get(get_evidence_requests))
+        .route("/evidence-gains", get(get_evidence_gains))
         .route("/strategy-replays/{event_id}", get(get_strategy_replay))
         .route(
             "/strategy-replays/{event_id}/retry",
@@ -1553,6 +1560,40 @@ struct EvidenceRequestsResponse {
     coverage_cohorts: Vec<EvidenceCoverageCohortView>,
 }
 
+#[derive(Default, Deserialize)]
+struct EvidenceGainPageQuery {
+    limit: Option<usize>,
+    since_ms: Option<u64>,
+    before_observed_at_ms: Option<u64>,
+    before_record_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct EvidenceGainSummary {
+    observed_fresh_coverage_transitions: usize,
+    effective_sample_delta_known_records: usize,
+    observed_positive_effective_sample_gain_records: usize,
+    observed_positive_effective_sample_delta: Option<f64>,
+    independently_accepted_gain_records: usize,
+    independently_accepted_effective_sample_delta: Option<f64>,
+    blocked_or_unreconciled_records: usize,
+}
+
+#[derive(Serialize)]
+struct EvidenceGainsResponse {
+    schema_version: u16,
+    as_of_ms: u64,
+    total_count: usize,
+    returned_count: usize,
+    omitted_count: usize,
+    retention_limit: usize,
+    retention_overflowed: bool,
+    next_before_observed_at_ms: Option<u64>,
+    next_before_record_id: Option<String>,
+    summary: EvidenceGainSummary,
+    records: Vec<EvidenceGainRecord>,
+}
+
 #[derive(Serialize)]
 struct EvidenceCoverageCohortView {
     symbol: String,
@@ -1727,6 +1768,294 @@ async fn get_evidence_requests(
         omitted_coverage_cohorts: total_coverage_cohorts.saturating_sub(coverage_cohorts.len()),
         coverage_cohorts,
     })
+}
+
+fn evidence_gain_effective_delta(record: &EvidenceGainRecord) -> Option<f64> {
+    let delta = record.effective_sample_size_after? - record.effective_sample_size_before?;
+    delta.is_finite().then_some(delta)
+}
+
+fn evidence_gain_summary(records: &[EvidenceGainRecord]) -> EvidenceGainSummary {
+    let mut observed_positive_effective_sample_delta = 0.0;
+    let mut observed_positive_effective_sample_gain_records = 0;
+    let mut independently_accepted_effective_sample_delta = 0.0;
+    let mut independently_accepted_gain_records = 0;
+    let mut effective_sample_delta_known_records = 0;
+    let mut observed_fresh_coverage_transitions = 0;
+    let mut blocked_or_unreconciled_records = 0;
+    for record in records {
+        let delta = evidence_gain_effective_delta(record);
+        if delta.is_some() {
+            effective_sample_delta_known_records += 1;
+        }
+        if record.new_coverage_observed {
+            observed_fresh_coverage_transitions += 1;
+        }
+        if record.new_coverage_observed && delta.is_some_and(|value| value > 0.0) {
+            observed_positive_effective_sample_gain_records += 1;
+            observed_positive_effective_sample_delta += delta.unwrap_or_default();
+        }
+        let independently_accepted = record.new_coverage_observed
+            && record.cost_status == "complete"
+            && record.reconciliation_status == "reconciled"
+            && record.eligibility_status == "accepted"
+            && delta.is_some_and(|value| value > 0.0);
+        if independently_accepted {
+            independently_accepted_gain_records += 1;
+            independently_accepted_effective_sample_delta += delta.unwrap_or_default();
+        } else {
+            blocked_or_unreconciled_records += 1;
+        }
+    }
+    EvidenceGainSummary {
+        observed_fresh_coverage_transitions,
+        effective_sample_delta_known_records,
+        observed_positive_effective_sample_gain_records,
+        observed_positive_effective_sample_delta: (observed_positive_effective_sample_gain_records
+            > 0)
+        .then_some(observed_positive_effective_sample_delta),
+        independently_accepted_gain_records,
+        independently_accepted_effective_sample_delta: (independently_accepted_gain_records > 0)
+            .then_some(independently_accepted_effective_sample_delta),
+        blocked_or_unreconciled_records,
+    }
+}
+
+async fn get_evidence_gains(
+    State(service): State<ServiceState>,
+    Query(query): Query<EvidenceGainPageQuery>,
+) -> Result<Json<EvidenceGainsResponse>, StatusCode> {
+    const DEFAULT_LIMIT: usize = 100;
+    const MAX_LIMIT: usize = 500;
+    if query.before_observed_at_ms.is_some() != query.before_record_id.is_some() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let as_of_ms = now_ms();
+    let state = service.state.lock().await;
+    let mut matching = state
+        .evidence_gain_records
+        .values()
+        .filter(|record| {
+            query
+                .since_ms
+                .is_none_or(|since| record.observed_at_ms >= since)
+        })
+        .filter(|record| {
+            match (
+                query.before_observed_at_ms,
+                query.before_record_id.as_deref(),
+            ) {
+                (Some(before_ms), Some(before_id)) => {
+                    record.observed_at_ms < before_ms
+                        || (record.observed_at_ms == before_ms
+                            && record.record_id.as_str() < before_id)
+                }
+                _ => true,
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| {
+        right
+            .observed_at_ms
+            .cmp(&left.observed_at_ms)
+            .then_with(|| right.record_id.cmp(&left.record_id))
+    });
+    let total_count = matching.len();
+    let records = matching.into_iter().take(limit).collect::<Vec<_>>();
+    let omitted_count = total_count.saturating_sub(records.len());
+    let next = if omitted_count > 0 {
+        records.last()
+    } else {
+        None
+    };
+    let summary = evidence_gain_summary(&records);
+    Ok(Json(EvidenceGainsResponse {
+        schema_version: 1,
+        as_of_ms,
+        total_count,
+        returned_count: records.len(),
+        omitted_count,
+        retention_limit: MAX_EVIDENCE_GAIN_RECORDS,
+        retention_overflowed: state.evidence_gain_records_overflowed,
+        next_before_observed_at_ms: next.map(|record| record.observed_at_ms),
+        next_before_record_id: next.map(|record| record.record_id.clone()),
+        summary,
+        records,
+    }))
+}
+
+#[cfg(test)]
+mod evidence_gain_api_tests {
+    use super::*;
+
+    fn record(
+        record_id: &str,
+        observed_at_ms: u64,
+        before: Option<f64>,
+        after: Option<f64>,
+        new_coverage: bool,
+        cost_status: &str,
+        reconciliation_status: &str,
+        eligibility_status: &str,
+    ) -> EvidenceGainRecord {
+        EvidenceGainRecord {
+            schema_version: 2,
+            record_id: record_id.to_owned(),
+            outcome_event_id: format!("event-{record_id}"),
+            source_event_id: Some(format!("source-{record_id}")),
+            trade_id: None,
+            episode_id: Some(format!("episode-{record_id}")),
+            profile_id: Some("profile-1".to_owned()),
+            profile_hash: Some("hash-1".to_owned()),
+            profile_version: Some(1),
+            execution_mode: Some("paper".to_owned()),
+            evidence_cohort_id: Some("BTC-USDT|live-momentum|profile:profile-1".to_owned()),
+            evidence_request_id: Some("request-1".to_owned()),
+            evidence_request_attempt: Some(1),
+            observed_at_ms,
+            coverage_before_status: "stale".to_owned(),
+            coverage_after_status: "fresh".to_owned(),
+            sample_count_before: Some(4),
+            sample_count_after: Some(5),
+            effective_sample_size_before: before,
+            effective_sample_size_after: after,
+            last_sample_before_ms: Some(observed_at_ms.saturating_sub(100)),
+            last_sample_after_ms: Some(observed_at_ms),
+            new_coverage_observed: new_coverage,
+            request_closed_at_ms: None,
+            cost_status: cost_status.to_owned(),
+            reconciliation_status: reconciliation_status.to_owned(),
+            eligibility_status: eligibility_status.to_owned(),
+            blocked_reasons: if eligibility_status == "accepted" {
+                Vec::new()
+            } else {
+                vec!["reconciliation_unknown".to_owned()]
+            },
+        }
+    }
+
+    fn service(records: Vec<EvidenceGainRecord>) -> ServiceState {
+        let mut state = LearningState::default();
+        state.evidence_gain_records_overflowed = true;
+        for record in records {
+            state
+                .evidence_gain_records
+                .insert(record.record_id.clone(), record);
+        }
+        ServiceState {
+            state: Arc::new(Mutex::new(state)),
+            path: PathBuf::new(),
+            state_updates: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_api_paginates_stably_and_separates_observed_from_accepted_effective_gain() {
+        let service = service(vec![
+            record(
+                "a",
+                100,
+                Some(0.4),
+                Some(1.1),
+                true,
+                "complete",
+                "unknown",
+                "blocked",
+            ),
+            record(
+                "b",
+                100,
+                Some(0.8),
+                Some(1.2),
+                true,
+                "complete",
+                "reconciled",
+                "accepted",
+            ),
+            record("c", 90, None, None, false, "unknown", "unknown", "blocked"),
+        ]);
+        let first = get_evidence_gains(
+            State(service.clone()),
+            Query(EvidenceGainPageQuery {
+                limit: Some(2),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first.schema_version, 1);
+        assert_eq!(first.total_count, 3);
+        assert_eq!(first.returned_count, 2);
+        assert_eq!(first.omitted_count, 1);
+        assert!(first.retention_overflowed);
+        assert_eq!(first.retention_limit, MAX_EVIDENCE_GAIN_RECORDS);
+        assert_eq!(first.records[0].record_id, "b");
+        assert_eq!(first.records[1].record_id, "a");
+        assert_eq!(first.next_before_observed_at_ms, Some(100));
+        assert_eq!(first.next_before_record_id.as_deref(), Some("a"));
+        assert_eq!(first.summary.observed_fresh_coverage_transitions, 2);
+        assert_eq!(first.summary.effective_sample_delta_known_records, 2);
+        assert_eq!(
+            first
+                .summary
+                .observed_positive_effective_sample_gain_records,
+            2
+        );
+        assert!(
+            (first
+                .summary
+                .observed_positive_effective_sample_delta
+                .unwrap()
+                - 1.1)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(first.summary.independently_accepted_gain_records, 1);
+        assert!(
+            (first
+                .summary
+                .independently_accepted_effective_sample_delta
+                .unwrap()
+                - 0.4)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(first.summary.blocked_or_unreconciled_records, 1);
+
+        let second = get_evidence_gains(
+            State(service.clone()),
+            Query(EvidenceGainPageQuery {
+                before_observed_at_ms: Some(100),
+                before_record_id: Some("a".to_owned()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(second.total_count, 1);
+        assert_eq!(second.records[0].record_id, "c");
+        assert_eq!(second.summary.effective_sample_delta_known_records, 0);
+        assert_eq!(
+            second.summary.observed_positive_effective_sample_delta,
+            None
+        );
+        assert_eq!(second.summary.independently_accepted_gain_records, 0);
+        assert_eq!(second.next_before_record_id, None);
+
+        let invalid_cursor = get_evidence_gains(
+            State(service),
+            Query(EvidenceGainPageQuery {
+                before_record_id: Some("a".to_owned()),
+                ..Default::default()
+            }),
+        )
+        .await;
+        assert!(matches!(invalid_cursor, Err(StatusCode::BAD_REQUEST)));
+    }
 }
 
 async fn get_strategy_replay(

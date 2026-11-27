@@ -41,14 +41,33 @@ impl SignalEngine {
         let quote_age = self
             .best_quote
             .map(|(quote_time, _, _)| timestamp.saturating_sub(quote_time));
+        let provenance = &self.book_input_provenance;
+        let last_book_source_receive_delta_ms = provenance
+            .last_received_at_ms
+            .zip(provenance.last_source_timestamp_ms)
+            .map(|(received_at, source_timestamp)| {
+                i128::from(received_at) - i128::from(source_timestamp)
+            });
         format!(
-            "price_samples={} latest_price_timestamp={:?} trend_1m={} momentum_10s={} recent_trades_60s={} book_imbalance={:?} quote_age_ms={quote_age:?}",
+            "price_samples={} latest_price_timestamp={:?} trend_1m={} momentum_10s={} recent_trades_60s={} book_imbalance={:?} quote_age_ms={quote_age:?} book_events_received={} book_quotes_accepted={} book_older_rejected={} book_equal_rejected={} book_invalid_rejected={} book_last_source_timestamp_ms={:?} book_last_received_at_ms={:?} book_last_source_receive_delta_ms={:?} book_last_accepted_source_timestamp_ms={:?} book_last_accepted_at_ms={:?}",
             self.prices.len(),
             latest.map(|sample| sample.0),
-            self.price_return(timestamp.saturating_sub(60_000)).is_some(),
-            self.price_return(timestamp.saturating_sub(10_000)).is_some(),
+            self.price_return(timestamp.saturating_sub(60_000))
+                .is_some(),
+            self.price_return(timestamp.saturating_sub(10_000))
+                .is_some(),
             recent_trades,
             self.book_imbalance,
+            provenance.received,
+            provenance.accepted,
+            provenance.older_timestamp_rejected,
+            provenance.equal_timestamp_rejected,
+            provenance.invalid_book_rejected,
+            provenance.last_source_timestamp_ms,
+            provenance.last_received_at_ms,
+            last_book_source_receive_delta_ms,
+            provenance.last_accepted_source_timestamp_ms,
+            provenance.last_accepted_at_ms,
         )
     }
 

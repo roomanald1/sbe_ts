@@ -161,6 +161,7 @@ async fn submit_barrier_order(
         parent_order_id: request.client_order_id.clone(),
         client_order_id: request.client_order_id.clone(),
         lifecycle: request.lifecycle.clone(),
+        trigger_adjustments: Vec::new(),
     };
     ledger.barrier_orders.push(barrier_order.clone());
     if request.client_order_id.is_some() {

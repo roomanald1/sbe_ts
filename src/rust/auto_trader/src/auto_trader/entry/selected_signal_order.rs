@@ -328,8 +328,10 @@ async fn submit_selected_signal(
     };
     let execution_plan_ms = execution_plan_started.elapsed().as_secs_f64() * 1_000.0;
     let SignalExecutionPlan {
+        exploratory: effective_exploratory,
         effective_stop_loss_percent,
         effective_take_profit_percent,
+        exit_parameter_provenance,
         horizon_take_profit_percent,
         mut notional,
         minimum_book_order,
@@ -345,6 +347,7 @@ async fn submit_selected_signal(
         imported_execution_learning,
         exploration_risk_adjustment,
     } = plan;
+    let exploratory = effective_exploratory;
     if exploratory || imported_execution_learning {
         let mut settings = state.settings.lock().await;
         if exploratory {
@@ -663,39 +666,34 @@ async fn submit_selected_signal(
             }
         }
         let allocated = allocated_notional(&settings);
-        let category = strategy_category(signal.strategy.as_deref());
-        let category_allocated = allocated_notional_for_category(&settings, Some(category));
         // Cap gross open and pending exposure for this symbol across all strategies.
         let symbol_remaining_budget =
             settings.max_order_notional - allocated_notional_for_symbol(&settings, &signal.symbol);
         let strategy_remaining_budget = Strategy::from_name(strategy_key)
-            .map(|kind| match strategy_category(Some(kind.as_str())) {
-                StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                    signal_weighted_strategy_budget(
+            .map(|kind| {
+                if kind.is_dated_carry() {
+                    f64::INFINITY
+                } else {
+                    signal_candidate_budget(
+                        request.state,
                         &settings,
                         dashboard,
                         kind,
-                        StrategyCategory::Daily,
+                        signal,
+                        request.exploratory,
                         now_ms,
-                    ) - allocated_notional_for_strategy(&settings, strategy_key)
-                }
-                StrategyCategory::Intraday if kind.is_live_insight() => {
-                    signal_weighted_strategy_budget(
+                    ) - allocated_notional_for_candidate(
                         &settings,
-                        dashboard,
-                        kind,
-                        StrategyCategory::Intraday,
-                        now_ms,
-                    ) - allocated_notional_for_strategy(&settings, strategy_key)
+                        strategy_key,
+                        &signal.symbol,
+                    )
                 }
-                _ => f64::INFINITY,
             })
             .unwrap_or(f64::INFINITY);
         let remaining_budget = if reducing_rebalance {
             f64::INFINITY
         } else {
             (settings.daily_notional_limit - allocated)
-                .min(category_notional_limit(&settings, category) - category_allocated)
                 .min(strategy_remaining_budget)
                 .min(symbol_remaining_budget)
                 .max(0.0)
@@ -831,6 +829,7 @@ async fn submit_selected_signal(
             "counterfactual_take_profit_percent": counterfactual_take_profit_percent,
             "effective_stop_loss_percent": effective_stop_loss_percent,
             "effective_take_profit_percent": effective_take_profit_percent,
+            "exit_parameter_provenance": exit_parameter_provenance,
             "side": side,
             "quantity": quantity,
             "notional": notional,
@@ -1044,6 +1043,7 @@ async fn submit_selected_signal(
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
         effective_take_profit_percent,
+        exit_parameter_provenance,
         side: side.to_owned(),
         quantity,
         notional,

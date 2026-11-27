@@ -40,29 +40,17 @@ function response(body: unknown, ok = true, status = 200) {
 }
 
 describe('AutoTraderModel', () => {
-  it('creates appropriate budget defaults as strategies are selected', () => {
+  it('selects strategies without creating legacy zero budget gates', () => {
     const model = new AutoTraderModel();
-    model.setDailyStrategyBudget('donchian-55-btc200', '150');
-    model.setIntradayStrategyBudget('live-momentum', '75');
     model.setStrategies([
       'donchian-55-btc200',
       'live-momentum',
       'trend-50-200',
       'dated-futures-carry',
     ]);
-    assert.equal(
-      model.state$.value.dailyStrategyBudgets['donchian-55-btc200'],
-      '150',
-    );
-    assert.equal(model.state$.value.dailyStrategyBudgets['trend-50-200'], '0');
-    assert.equal(
-      model.state$.value.dailyStrategyBudgets['dated-futures-carry'],
-      undefined,
-    );
-    assert.equal(
-      model.state$.value.intradayStrategyBudgets['live-momentum'],
-      '75',
-    );
+    assert.equal(model.state$.value.strategies.length, 4);
+    assert.equal('dailyStrategyBudgets' in model.state$.value, false);
+    assert.equal('intradayStrategyBudgets' in model.state$.value, false);
     model.setStrategyParameter('BTC-USDT:live-momentum:lookback', 12);
     assert.equal(
       model.state$.value.strategyParameterOverrides[
@@ -290,16 +278,46 @@ describe('AutoTraderModel refresh', () => {
       enabled: true,
       strategies: ['trend-50-200'],
       max_order_notional: 250,
-      daily_notional_limit: 1000,
+      daily_notional_limit: 500,
+      daily_strategy_notional_limit: 500,
+      daily_strategy_budgets: [
+        {
+          strategy: 'trend-50-200',
+          base_budget: 3000,
+          effective_budget: 3000,
+          used_notional: 0,
+          learning_multiplier: 1,
+          learning_samples: 0,
+          realized_pnl: 0,
+        },
+      ],
       daily_realized_loss_limit: 50,
       exploration_percent: 15,
       max_open_positions: 8,
       max_intraday_open_positions: 4,
       max_daily_open_positions: 6,
-      intraday_notional_limit: 500,
-      daily_strategy_notional_limit: 700,
-      intraday_used_notional: 20,
-      daily_strategy_used_notional: 30,
+      capitalAllocation: {
+        version: 'v1',
+        model: 'shared_pool',
+        poolLimit: 500,
+        used: 0,
+        reserved: 0,
+        available: 500,
+        rows: [
+          {
+            strategy: 'trend-50-200',
+            symbol: 'BTC-USDT',
+            horizon: 'daily',
+            effectiveAllocation: 0,
+            reserved: 0,
+            used: 0,
+            utilization: 0,
+            evidenceEligible: null,
+            state: 'cold_start',
+            reason: 'No eligible evidence yet',
+          },
+        ],
+      },
       max_entries_per_auto_position: 2,
       stop_loss_percent: 1,
       take_profit_percent: 2,
@@ -309,7 +327,7 @@ describe('AutoTraderModel refresh', () => {
       trigger_offset_bps: 4,
       trailing_distance_percent: 0.2,
       used_notional_today: 40,
-      available_notional: 960,
+      available_notional: 460,
     };
     const activity = {
       orders: [{ symbol: 'BTC-USDT', realized_pnl: 2 }],
@@ -336,6 +354,18 @@ describe('AutoTraderModel refresh', () => {
         assert.equal(model.state$.value.loading, false);
         assert.equal(model.state$.value.enabled, true);
         assert.deepEqual(model.state$.value.strategies, ['trend-50-200']);
+        assert.equal(model.state$.value.dailyNotionalLimit, '500');
+        assert.equal('dailyStrategyBudgets' in model.state$.value, false);
+        assert.equal(
+          model.state$.value.capitalAllocation?.rows[0].effectiveAllocation,
+          0,
+        );
+        assert.equal(
+          model.state$.value.capitalAllocation?.rows[0].evidenceEligible,
+          null,
+        );
+        assert.equal(model.state$.value.maxDailyOpenPositions, '6');
+        assert.equal(model.state$.value.availableNotional, 460);
         assert.deepEqual(model.state$.value.ledgerOpenPositionSymbols, [
           'BTC-USDT',
         ]);
@@ -415,7 +445,8 @@ describe('OrderManagerModel submission', () => {
         assert.equal(
           requests.some(
             (request) =>
-              request.path === '/positions/orders' && !request.init?.method,
+              request.path.startsWith('/positions/orders/history?') &&
+              !request.init?.method,
           ),
           true,
         );

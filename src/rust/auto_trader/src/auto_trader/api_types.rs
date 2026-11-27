@@ -21,12 +21,8 @@ struct StatusResponse {
     max_open_positions: usize,
     max_intraday_open_positions: usize,
     max_daily_open_positions: usize,
-    intraday_notional_limit: f64,
-    daily_strategy_notional_limit: f64,
-    daily_strategy_budgets: Vec<StrategyBudgetStatus>,
-    intraday_strategy_budgets: Vec<StrategyBudgetStatus>,
-    intraday_used_notional: f64,
-    daily_strategy_used_notional: f64,
+    #[serde(rename = "capitalAllocation")]
+    capital_allocation: CapitalAllocationStatus,
     max_entries_per_auto_position: u32,
     stop_loss_percent: f64,
     take_profit_percent: f64,
@@ -76,17 +72,46 @@ struct SymbolEntryResult {
     reason: String,
     timestamp_ms: Option<u64>,
 }
-#[derive(Serialize)]
-struct StrategyBudgetStatus {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapitalAllocationStatus {
+    version: String,
+    model: String,
+    pool_limit: f64,
+    available: f64,
+    reserved: f64,
+    used: f64,
+    rows: Vec<CapitalAllocationRow>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapitalAllocationRow {
     strategy: String,
-    base_budget: f64,
-    effective_budget: f64,
-    used_notional: f64,
-    learning_multiplier: f64,
-    learning_feedback_multiplier: f64,
-    learning_samples: usize,
-    positive_rate: Option<f64>,
-    realized_pnl: f64,
+    symbol: String,
+    horizon: String,
+    effective_allocation: f64,
+    reserved: f64,
+    used: f64,
+    utilization: Option<f64>,
+    evidence_eligible: Option<bool>,
+    state: String,
+    reason: String,
+}
+
+#[derive(Clone)]
+struct CapitalAllocationCandidateSnapshot {
+    effective_allocation: f64,
+    evidence_eligible: Option<bool>,
+    state: String,
+    reason: String,
+}
+
+#[derive(Clone, Default)]
+struct CapitalAllocationSnapshot {
+    as_of_ms: u64,
+    pool_limit: f64,
+    candidates: BTreeMap<(String, String, String), CapitalAllocationCandidateSnapshot>,
 }
 #[derive(Serialize)]
 struct GapReason {
@@ -131,6 +156,7 @@ struct LatestEntryDiagnostic {
     candidate_decision_ids: Vec<String>,
     gate_counts: Vec<GateHit>,
     candidate_gate_counts: Vec<EntryGateCandidateCount>,
+    candidate_coverage: CandidateDiagnosticCoverage,
     candidate_details: Vec<EntryCandidateDiagnostic>,
     outcome: EntryCycleOutcome,
     raw_signal_count: usize,
@@ -142,6 +168,9 @@ struct LatestEntryDiagnostic {
     position_blocked_candidate_count: usize,
     strategy_rejected_candidate_count: usize,
     evidence_present_candidate_count: usize,
+    /// Fresh directional candidates before production selection. This is not
+    /// strict/exploratory eligibility; those classifications are per-row and
+    /// nullable below because only the actual selection path establishes them.
     eligible_candidate_count: usize,
     rejected_candidate_count: usize,
     selected_candidate_count: usize,
@@ -154,6 +183,25 @@ struct LatestEntryDiagnostic {
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CandidateDiagnosticCoverage {
+    state: CandidateDiagnosticCoverageState,
+    retained: usize,
+    /// Count of the authoritative fresh prepared-candidate population before
+    /// the diagnostic detail cap. None means the source population was not
+    /// measured for this cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed: Option<usize>,
+    truncated: bool,
+}
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CandidateDiagnosticCoverageState {
+    Complete,
+    Bounded,
+    Unavailable,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EntryCandidateDiagnostic {
     decision_id: String,
     worker_event_id: Option<String>,
@@ -161,6 +209,11 @@ struct EntryCandidateDiagnostic {
     symbol: String,
     strategy: Option<String>,
     stage: String,
+    /// Present only when the production decision path classified selection.
+    selection_mode: Option<String>,
+    /// Eligibility is independent of whether walk-forward evidence is present.
+    strict_eligibility: Option<bool>,
+    exploratory_eligibility: Option<bool>,
     observed: serde_json::Value,
     required: serde_json::Value,
     checks: serde_json::Value,
@@ -215,14 +268,6 @@ struct SettingsRequest {
     max_intraday_open_positions: Option<usize>,
     #[serde(default)]
     max_daily_open_positions: Option<usize>,
-    #[serde(default)]
-    intraday_notional_limit: Option<f64>,
-    #[serde(default)]
-    daily_strategy_notional_limit: Option<f64>,
-    #[serde(default)]
-    daily_strategy_budgets: Option<BTreeMap<String, f64>>,
-    #[serde(default)]
-    intraday_strategy_budgets: Option<BTreeMap<String, f64>>,
     #[serde(default)]
     max_entries_per_auto_position: Option<u32>,
     #[serde(default)]

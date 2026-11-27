@@ -12,6 +12,12 @@ pub struct StrategyDiagnostic {
     pub btc_gate_required: bool,
     pub btc_gate_passed: Option<bool>,
     pub btc_window_days: Option<usize>,
+    /// Close timestamp of the BTC daily bar used to calculate the displayed regime.
+    #[serde(default)]
+    pub btc_source_close_time_ms: Option<u64>,
+    /// `daily` or `monthly_rebalance_anchor_daily`.
+    #[serde(default)]
+    pub btc_source_timeframe: Option<String>,
     pub symbols: Vec<StrategySymbolDiagnostic>,
 }
 
@@ -232,6 +238,50 @@ mod risk_adjusted_monthly_momentum_tests {
             "ETH-USDT",
             Some(&serde_json::json!({"monthly_anchor_close_time_ms": 1_000})),
         ));
+    }
+}
+
+#[cfg(test)]
+mod strategy_diagnostic_source_tests {
+    use super::StrategyDiagnostic;
+
+    #[test]
+    fn source_anchor_fields_round_trip_and_legacy_diagnostics_remain_readable() {
+        let diagnostic: StrategyDiagnostic = serde_json::from_value(serde_json::json!({
+            "strategy": "risk-adjusted-monthly-momentum",
+            "as_of_ms": 2_000,
+            "btc_close": 101.0,
+            "btc_sma": 100.0,
+            "btc_distance_percent": 1.0,
+            "btc_gate_required": true,
+            "btc_gate_passed": true,
+            "btc_window_days": 200,
+            "btc_source_close_time_ms": 1_000,
+            "btc_source_timeframe": "monthly_rebalance_anchor_daily",
+            "symbols": []
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(serialized["btc_source_close_time_ms"], 1_000);
+        assert_eq!(
+            serialized["btc_source_timeframe"],
+            "monthly_rebalance_anchor_daily"
+        );
+
+        let legacy: StrategyDiagnostic = serde_json::from_value(serde_json::json!({
+            "strategy": "donchian-55-btc200",
+            "as_of_ms": 2_000,
+            "btc_close": 101.0,
+            "btc_sma": 100.0,
+            "btc_distance_percent": 1.0,
+            "btc_gate_required": true,
+            "btc_gate_passed": true,
+            "btc_window_days": 200,
+            "symbols": []
+        }))
+        .unwrap();
+        assert_eq!(legacy.btc_source_close_time_ms, None);
+        assert_eq!(legacy.btc_source_timeframe, None);
     }
 }
 

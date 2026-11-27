@@ -24,6 +24,10 @@ struct Settings {
     daily_notional_limit: f64,
     #[serde(default)]
     used_notional_today: f64,
+    /// USD gross notional held by open spot/future dated-carry legs. Rebuilt
+    /// from the durable carry ledger at startup before entries are accepted.
+    #[serde(default)]
+    dated_carry_reserved_usd: f64,
     #[serde(default = "default_usd_rates")]
     usd_rates: BTreeMap<String, f64>,
     #[serde(default)]
@@ -140,6 +144,11 @@ struct Settings {
     learned_profiles: BTreeMap<String, strategy::StrategyProfile>,
     #[serde(default)]
     learned_exit_protection_policies: BTreeMap<String, strategy::LearnedExitProtectionPolicy>,
+    /// Read-only exit candidate assessments are retained separately from
+    /// validated policies and never drive an entry or position update.
+    #[serde(default)]
+    learned_exit_policy_assessments:
+        BTreeMap<String, strategy::LearnedExitPolicyAssessment>,
     #[serde(default)]
     learned_walk_forward_evidence: BTreeMap<String, strategy::StrategyWalkForwardEvidence>,
     #[serde(default)]
@@ -382,6 +391,7 @@ impl Default for Settings {
             max_order_notional: default_order_limit(),
             daily_notional_limit: default_daily_limit(),
             used_notional_today: 0.0,
+            dated_carry_reserved_usd: 0.0,
             usd_rates: default_usd_rates(),
             realized_pnl: 0.0,
             daily_realized_loss_limit: default_daily_loss_limit(),
@@ -435,6 +445,7 @@ impl Default for Settings {
             registered_profile_ids: BTreeSet::new(),
             learned_profiles: BTreeMap::new(),
             learned_exit_protection_policies: BTreeMap::new(),
+            learned_exit_policy_assessments: BTreeMap::new(),
             learned_walk_forward_evidence: BTreeMap::new(),
             learned_context_thresholds: BTreeMap::new(),
             active_live_strategy_profiles: BTreeMap::new(),

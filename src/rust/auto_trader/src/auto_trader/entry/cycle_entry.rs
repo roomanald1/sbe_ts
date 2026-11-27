@@ -1,4 +1,19 @@
 static NEXT_ENTRY_CYCLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const MAX_CANDIDATE_DETAILS_PER_CYCLE: usize = 128;
+
+fn candidate_diagnostic_coverage(observed: usize, retained: usize) -> CandidateDiagnosticCoverage {
+    let truncated = observed > retained;
+    CandidateDiagnosticCoverage {
+        state: if truncated {
+            CandidateDiagnosticCoverageState::Bounded
+        } else {
+            CandidateDiagnosticCoverageState::Complete
+        },
+        retained,
+        observed: Some(observed),
+        truncated,
+    }
+}
 
 fn strategy_entry_rejection_reason(
     signal: &Signal,
@@ -864,7 +879,7 @@ fn rebalance_trend_portfolio_candidate(
             0.0
         };
     let target_value =
-        daily_strategy_effective_budget(settings, "risk-adjusted-trend-portfolio") * weight;
+        daily_shared_pool_ceiling(settings, "risk-adjusted-trend-portfolio") * weight;
     let delta = target_value - current_value;
     let rebalance_band = (target_value * 0.05).max(MIN_DEEP_BOOK_ORDER_NOTIONAL * usd_rate);
     if !delta.is_finite() || delta.abs() < rebalance_band {
@@ -968,6 +983,158 @@ fn candidate_cycle_blocker(
     }
 }
 
+/// A live strategy rejection is a completed entry evaluation, even though it
+/// does not enter `run_cycle_inner`. Preserve the worker's actual event and
+/// signal evidence so the operator funnel does not silently omit it.
+fn strategy_rejection_entry_diagnostic(
+    report: &strategy::LiveStrategyDecisionReport,
+    reason: &str,
+) -> LatestEntryDiagnostic {
+    let signal = &report.signal;
+    let decision_id = format!(
+        "{}|{}|{}|{}",
+        report.event_id,
+        report.symbol,
+        report.strategy.as_str(),
+        report.profile_id
+    );
+    let directional = matches!(signal.direction.as_str(), "bullish" | "bearish");
+    let strategy_candidate = signal.strategy_candidate || signal.strategy.is_some();
+    let details = signal.strategy_decision.as_ref();
+    let is_btc_trend_gate = reason.contains("BTC trend gate not passed");
+    let gate_id = if is_btc_trend_gate {
+        "btc_trend_gate"
+    } else {
+        "strategy_entry_gate"
+    };
+    let btc_close = details
+        .and_then(|decision| decision.get("btc_close"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite());
+    let btc_sma = details
+        .and_then(|decision| decision.get("btc_sma"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite());
+    let btc_window = details
+        .and_then(|decision| decision.get("btc_window_days"))
+        .and_then(serde_json::Value::as_u64);
+    let measurements = if is_btc_trend_gate {
+        match (btc_close, btc_sma) {
+            (Some(observed), Some(required)) => vec![EntryGateMeasurement {
+                gate_id: gate_id.to_owned(),
+                observed: Some(observed),
+                operator: Some(">".to_owned()),
+                required: Some(required),
+                unit: Some("USD".to_owned()),
+                status: "failed".to_owned(),
+                detail: format!(
+                    "BTC close {observed:.2} did not exceed SMA{} {required:.2}",
+                    btc_window.map_or_else(|| "trend".to_owned(), |days| days.to_string())
+                ),
+            }],
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let mut observed = serde_json::json!({
+        "score": signal.score,
+        "strength": signal.strength,
+        "direction": signal.direction,
+    });
+    let mut required = serde_json::json!({});
+    let mut checks = serde_json::json!({
+        "strategy_decision": "reject",
+        "directional": directional,
+    });
+    if let Some(details) = details {
+        for key in ["btc_close", "primary_metric_value"] {
+            if let Some(value) = details.get(key) {
+                observed[key] = value.clone();
+            }
+        }
+        for key in ["btc_sma", "btc_window_days", "primary_rule", "primary_level"] {
+            if let Some(value) = details.get(key) {
+                required[key] = value.clone();
+            }
+        }
+        for key in ["btc_gate_required", "btc_gate_passed", "primary_passed"] {
+            if let Some(value) = details.get(key) {
+                checks[key] = value.clone();
+            }
+        }
+    }
+    LatestEntryDiagnostic {
+        cycle_id: format!("strategy-worker-{}", report.event_id),
+        timestamp_ms: report.event_time_ms,
+        worker_event_ids: vec![report.event_id.clone()],
+        candidate_decision_ids: vec![decision_id.clone()],
+        gate_counts: vec![GateHit {
+            gate: gate_id.to_owned(),
+            count: 1,
+        }],
+        candidate_gate_counts: vec![EntryGateCandidateCount {
+            gate_id: gate_id.to_owned(),
+            symbol: signal.symbol.clone(),
+            strategy: Some(report.strategy.as_str().to_owned()),
+            count: 1,
+        }],
+        candidate_coverage: CandidateDiagnosticCoverage {
+            // This is one actual worker report, not an AutoTrader-prepared
+            // candidate population. Do not present it as complete cycle
+            // coverage or derive eligibility denominators from it.
+            state: CandidateDiagnosticCoverageState::Unavailable,
+            retained: 1,
+            observed: None,
+            truncated: false,
+        },
+        candidate_details: vec![EntryCandidateDiagnostic {
+            decision_id,
+            worker_event_id: Some(report.event_id.clone()),
+            profile_id: Some(report.profile_id.clone()),
+            symbol: report.symbol.clone(),
+            strategy: Some(report.strategy.as_str().to_owned()),
+            stage: "strategy_rejected".to_owned(),
+            selection_mode: None,
+            strict_eligibility: None,
+            exploratory_eligibility: None,
+            observed,
+            required,
+            checks,
+            evidence_contract: report
+                .walk_forward_evidence
+                .as_ref()
+                .map(|evidence| serde_json::to_value(evidence).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
+            measurements,
+            reasons: vec![reason.to_owned()],
+        }],
+        outcome: EntryCycleOutcome::CandidatesRejected,
+        raw_signal_count: 1,
+        allowed_signal_count: 1,
+        strategy_candidate_count: usize::from(strategy_candidate),
+        fresh_directional_candidate_count: usize::from(directional),
+        stale_candidate_count: 0,
+        non_directional_candidate_count: usize::from(!directional),
+        position_blocked_candidate_count: 0,
+        strategy_rejected_candidate_count: 1,
+        evidence_present_candidate_count: usize::from(
+            details.is_some_and(|decision| decision.get("strategy_walk_forward").is_some()),
+        ),
+        eligible_candidate_count: 0,
+        rejected_candidate_count: 1,
+        selected_candidate_count: 0,
+        order_attempt_count: 0,
+        submitted_order_count: 0,
+        fill_confirmed: false,
+        primary_gate_id: Some(gate_id.to_owned()),
+        primary_blocker: Some(reason.to_owned()),
+        detail: format!(
+            "Single live-strategy worker rejection; AutoTrader candidate selection did not run. {reason}"
+        ),
+    }
+}
+
 fn update_entry_candidate_diagnostic(
     diagnostic: &mut LatestEntryDiagnostic,
     signal: &Signal,
@@ -980,6 +1147,19 @@ fn update_entry_candidate_diagnostic(
         .iter()
         .position(|candidate| candidate.decision_id == decision_id)
         .unwrap_or_else(|| {
+            if diagnostic.candidate_details.len() >= MAX_CANDIDATE_DETAILS_PER_CYCLE {
+                diagnostic.candidate_coverage.truncated = true;
+                diagnostic.candidate_coverage.state =
+                    CandidateDiagnosticCoverageState::Bounded;
+                if diagnostic
+                    .candidate_coverage
+                    .observed
+                    .is_none_or(|observed| observed <= diagnostic.candidate_details.len())
+                {
+                    diagnostic.candidate_coverage.observed = None;
+                }
+                return usize::MAX;
+            }
             diagnostic.candidate_details.push(EntryCandidateDiagnostic {
                 decision_id: decision_id.clone(),
                 worker_event_id: signal
@@ -1001,6 +1181,9 @@ fn update_entry_candidate_diagnostic(
                 symbol: signal.symbol.clone(),
                 strategy: signal.strategy.clone(),
                 stage: stage.to_owned(),
+                selection_mode: None,
+                strict_eligibility: None,
+                exploratory_eligibility: None,
                 observed: serde_json::json!({
                     "score": signal.score,
                     "strength": signal.strength,
@@ -1012,8 +1195,12 @@ fn update_entry_candidate_diagnostic(
                 measurements: Vec::new(),
                 reasons: Vec::new(),
             });
+            diagnostic.candidate_coverage.retained = diagnostic.candidate_details.len();
             diagnostic.candidate_details.len() - 1
         });
+    if candidate_index == usize::MAX {
+        return;
+    }
     let candidate = &mut diagnostic.candidate_details[candidate_index];
     candidate.stage = stage.to_owned();
     if let Some(reason) = reason.filter(|reason| !reason.trim().is_empty()) {
@@ -1025,6 +1212,24 @@ fn update_entry_candidate_diagnostic(
             .extend(parse_reported_gate_measurements(stage, reason));
     }
     recompute_entry_candidate_gate_counts(diagnostic);
+}
+
+fn set_candidate_selection_classification(
+    diagnostic: &mut LatestEntryDiagnostic,
+    signal: &Signal,
+    selection_mode: &str,
+    strict_eligibility: bool,
+    exploratory_eligibility: bool,
+) {
+    if let Some(candidate) = diagnostic
+        .candidate_details
+        .iter_mut()
+        .find(|candidate| candidate.decision_id == signal_decision_id(signal))
+    {
+        candidate.selection_mode = Some(selection_mode.to_owned());
+        candidate.strict_eligibility = Some(strict_eligibility);
+        candidate.exploratory_eligibility = Some(exploratory_eligibility);
+    }
 }
 
 fn parse_reported_gate_measurements(gate_id: &str, detail: &str) -> Vec<EntryGateMeasurement> {
@@ -1223,6 +1428,12 @@ async fn run_cycle_inner(
         candidate_decision_ids: Vec::new(),
         gate_counts: Vec::new(),
         candidate_gate_counts: Vec::new(),
+        candidate_coverage: CandidateDiagnosticCoverage {
+            state: CandidateDiagnosticCoverageState::Unavailable,
+            retained: 0,
+            observed: None,
+            truncated: false,
+        },
         candidate_details: Vec::new(),
         outcome: if raw_signal_count == 0 {
             EntryCycleOutcome::NoSignals
@@ -1676,8 +1887,10 @@ async fn run_cycle_inner(
         .collect::<Vec<_>>();
     let threshold_refresh_started = Instant::now();
     let learning_thresholds = request_learning_context_thresholds(state, &learning_signals).await;
+    let observed_candidate_detail_count = learning_signals.len();
     entry_diagnostic.candidate_details = learning_signals
         .iter()
+        .take(MAX_CANDIDATE_DETAILS_PER_CYCLE)
         .map(|signal| {
             let audit = candidate_entry_audit_value(
                 signal,
@@ -1708,6 +1921,9 @@ async fn run_cycle_inner(
                 symbol: signal.symbol.clone(),
                 strategy: signal.strategy.clone(),
                 stage: "prepared_candidate".into(),
+                selection_mode: None,
+                strict_eligibility: None,
+                exploratory_eligibility: None,
                 observed: audit["observed"].clone(),
                 required: audit["thresholds"].clone(),
                 checks: audit["checks"].clone(),
@@ -1723,6 +1939,11 @@ async fn run_cycle_inner(
             }
         })
         .collect();
+    let retained_candidate_detail_count = entry_diagnostic.candidate_details.len();
+    entry_diagnostic.candidate_coverage = candidate_diagnostic_coverage(
+        observed_candidate_detail_count,
+        retained_candidate_detail_count,
+    );
     recompute_entry_candidate_gate_counts(&mut entry_diagnostic);
     let context_threshold_refresh_ms = threshold_refresh_started.elapsed().as_secs_f64() * 1_000.0;
     let (open_positions, strategy_positions, max_entries_per_auto_position) = {
@@ -1870,14 +2091,22 @@ async fn run_cycle_inner(
                     daily_walk_forward_present,
                 ) = daily_cold_start_exploration_checks(signal);
                 let exploratory = daily_parameter_probe || daily_cold_start;
+                let daily_selection_mode = if daily_parameter_probe {
+                    "daily_strategy_parameter_exploration"
+                } else if daily_cold_start {
+                    "daily_strategy_cold_start_exploration"
+                } else {
+                    "daily_strategy"
+                };
+                set_candidate_selection_classification(
+                    &mut entry_diagnostic,
+                    signal,
+                    daily_selection_mode,
+                    !exploratory,
+                    exploratory,
+                );
                 sized_signal.entry_gate = Some(serde_json::json!({
-                    "selection_mode": if daily_parameter_probe {
-                        "daily_strategy_parameter_exploration"
-                    } else if daily_cold_start {
-                        "daily_strategy_cold_start_exploration"
-                    } else {
-                        "daily_strategy"
-                    },
+                    "selection_mode": daily_selection_mode,
                     "exploratory": exploratory,
                     "checks": {
                         "daily_rule_evidence_available": daily_rule_evidence_available,
@@ -2231,6 +2460,13 @@ async fn run_cycle_inner(
     };
     let signal_selection_ms = selection_started.elapsed().as_secs_f64() * 1000.0;
     update_entry_candidate_diagnostic(&mut entry_diagnostic, &signal, "selected", None);
+    set_candidate_selection_classification(
+        &mut entry_diagnostic,
+        &signal,
+        if exploratory { "exploratory" } else { "strict" },
+        !exploratory,
+        exploratory,
+    );
     let mut audited_signal = signal.clone();
     audited_signal.entry_gate = Some(candidate_entry_audit_value(
         &signal,
@@ -2346,6 +2582,13 @@ async fn run_cycle_inner(
         exploratory = next_exploratory;
         attempted_ids.insert(signal_decision_id(&signal));
         update_entry_candidate_diagnostic(&mut entry_diagnostic, &signal, "selected", None);
+        set_candidate_selection_classification(
+            &mut entry_diagnostic,
+            &signal,
+            if exploratory { "exploratory" } else { "strict" },
+            !exploratory,
+            exploratory,
+        );
         audited_signal = signal.clone();
         audited_signal.entry_gate = Some(candidate_entry_audit_value(
             &signal,
@@ -2500,6 +2743,52 @@ async fn run_cycle_inner(
 mod parallel_daily_cycle_tests {
     use super::*;
 
+    fn test_signal(timestamp: u64) -> Signal {
+        serde_json::from_value(serde_json::json!({
+            "symbol": "BTC-USDT",
+            "direction": "bullish",
+            "strength": 0.8,
+            "score": 0.7,
+            "timestamp": timestamp,
+            "stale": false,
+            "strategy_candidate": true,
+            "strategy": "live-momentum"
+        }))
+        .unwrap()
+    }
+
+    fn test_diagnostic(observed: usize) -> LatestEntryDiagnostic {
+        LatestEntryDiagnostic {
+            cycle_id: "diagnostic-test".into(),
+            timestamp_ms: 1,
+            worker_event_ids: Vec::new(),
+            candidate_decision_ids: Vec::new(),
+            gate_counts: Vec::new(),
+            candidate_gate_counts: Vec::new(),
+            candidate_coverage: candidate_diagnostic_coverage(observed, 0),
+            candidate_details: Vec::new(),
+            outcome: EntryCycleOutcome::NoEligibleCandidates,
+            raw_signal_count: observed,
+            allowed_signal_count: observed,
+            strategy_candidate_count: observed,
+            fresh_directional_candidate_count: observed,
+            stale_candidate_count: 0,
+            non_directional_candidate_count: 0,
+            position_blocked_candidate_count: 0,
+            strategy_rejected_candidate_count: 0,
+            evidence_present_candidate_count: 0,
+            eligible_candidate_count: observed,
+            rejected_candidate_count: 0,
+            selected_candidate_count: 0,
+            order_attempt_count: 0,
+            submitted_order_count: 0,
+            fill_confirmed: false,
+            primary_gate_id: None,
+            primary_blocker: None,
+            detail: String::new(),
+        }
+    }
+
     #[test]
     fn entry_diagnostic_distinguishes_missing_candidates_from_gate_rejections() {
         assert!(matches!(
@@ -2543,6 +2832,61 @@ mod parallel_daily_cycle_tests {
         assert_eq!(measurements[1].observed, Some(-0.12));
         assert_eq!(measurements[1].required, Some(0.0));
         assert_eq!(measurements[1].unit.as_deref(), Some("%"));
+    }
+
+    #[test]
+    fn strategy_rejection_report_emits_bounded_source_derived_funnel_diagnostic() {
+        let mut signal = test_signal(1_000);
+        signal.strategy_decision = Some(serde_json::json!({
+            "live_worker_event_id": "worker-event-1",
+            "learning_profile_id": "profile-1",
+            "btc_gate_required": true,
+            "btc_gate_passed": false,
+            "btc_close": 60_458.01,
+            "btc_sma": 72_088.27,
+            "btc_window_days": 200,
+            "strategy_walk_forward": {"sample_count": 16}
+        }));
+        let report = strategy::LiveStrategyDecisionReport {
+            contract_version: strategy::LIVE_EVALUATION_CONTRACT_VERSION,
+            event_id: "worker-event-1".into(),
+            event_identity_version: 1,
+            episode_id: "episode-1".into(),
+            strategy: Strategy::LiveMomentum,
+            symbol: signal.symbol.clone(),
+            profile_id: "profile-1".into(),
+            profile_version: 2,
+            parameter_hash: "profile-1".into(),
+            event_time_ms: 1_000,
+            decision: strategy::LiveStrategyDecision::Reject,
+            reason: None,
+            walk_forward_evidence: None,
+            signal,
+            dated_carry_scan: None,
+            dated_carry_candidate: None,
+            dated_carry_settlement: None,
+        };
+
+        let reason = "BTC trend gate not passed: close 60458.01 vs SMA200 72088.27";
+        let diagnostic = strategy_rejection_entry_diagnostic(&report, reason);
+        let payload = serde_json::to_value(diagnostic).unwrap();
+
+        assert_eq!(payload["cycleId"], "strategy-worker-worker-event-1");
+        assert_eq!(payload["outcome"], "candidates_rejected");
+        assert_eq!(payload["primaryGateId"], "btc_trend_gate");
+        assert_eq!(payload["rawSignalCount"], 1);
+        assert_eq!(payload["allowedSignalCount"], 1);
+        assert_eq!(payload["strategyRejectedCandidateCount"], 1);
+        assert_eq!(payload["eligibleCandidateCount"], 0);
+        assert_eq!(payload["candidateCoverage"]["state"], "unavailable");
+        assert_eq!(payload["candidateCoverage"]["observed"], serde_json::Value::Null);
+        assert_eq!(payload["candidateDetails"][0]["workerEventId"], "worker-event-1");
+        assert_eq!(payload["candidateDetails"][0]["profileId"], "profile-1");
+        assert_eq!(payload["candidateDetails"][0]["strictEligibility"], serde_json::Value::Null);
+        assert_eq!(payload["candidateDetails"][0]["exploratoryEligibility"], serde_json::Value::Null);
+        assert_eq!(payload["candidateDetails"][0]["observed"]["btc_close"], 60_458.01);
+        assert_eq!(payload["candidateDetails"][0]["required"]["btc_sma"], 72_088.27);
+        assert_eq!(payload["candidateDetails"][0]["measurements"][0]["status"], "failed");
     }
 
     fn signal(strategy: &str) -> Signal {
@@ -2752,5 +3096,107 @@ mod parallel_daily_cycle_tests {
             .map(|item| item.strategy.as_deref().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["donchian-55-btc200"]);
+    }
+
+    #[test]
+    fn rejected_and_unannotated_candidates_keep_selection_eligibility_unavailable() {
+        let signal = test_signal(10);
+        let mut diagnostic = test_diagnostic(1);
+        update_entry_candidate_diagnostic(
+            &mut diagnostic,
+            &signal,
+            "selection_rejected",
+            Some("walk-forward evidence was insufficient"),
+        );
+        let candidate = serde_json::to_value(&diagnostic).unwrap()["candidateDetails"][0].clone();
+        assert_eq!(candidate["selectionMode"], serde_json::Value::Null);
+        assert_eq!(candidate["strictEligibility"], serde_json::Value::Null);
+        assert_eq!(candidate["exploratoryEligibility"], serde_json::Value::Null);
+        assert_eq!(diagnostic.eligible_candidate_count, 1);
+        assert_eq!(candidate["stage"], "selection_rejected");
+    }
+
+    #[test]
+    fn production_selection_classifies_strict_and_explicit_exploration() {
+        let strict_signal = test_signal(20);
+        let mut strict = test_diagnostic(1);
+        update_entry_candidate_diagnostic(&mut strict, &strict_signal, "selected", None);
+        set_candidate_selection_classification(
+            &mut strict,
+            &strict_signal,
+            "strict",
+            true,
+            false,
+        );
+        let strict_candidate = serde_json::to_value(&strict).unwrap()["candidateDetails"][0].clone();
+        assert_eq!(strict_candidate["selectionMode"], "strict");
+        assert_eq!(strict_candidate["strictEligibility"], true);
+        assert_eq!(strict_candidate["exploratoryEligibility"], false);
+
+        // The signal has no walk-forward annotation. Its explicit production
+        // selection result still classifies mode without implying evidence.
+        let exploratory_signal = test_signal(21);
+        let mut exploratory = test_diagnostic(1);
+        update_entry_candidate_diagnostic(
+            &mut exploratory,
+            &exploratory_signal,
+            "selected",
+            None,
+        );
+        set_candidate_selection_classification(
+            &mut exploratory,
+            &exploratory_signal,
+            "exploratory",
+            false,
+            true,
+        );
+        let exploratory_candidate =
+            serde_json::to_value(&exploratory).unwrap()["candidateDetails"][0].clone();
+        assert_eq!(exploratory_candidate["selectionMode"], "exploratory");
+        assert_eq!(exploratory_candidate["strictEligibility"], false);
+        assert_eq!(exploratory_candidate["exploratoryEligibility"], true);
+        assert_eq!(exploratory_candidate["evidenceContract"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn candidate_coverage_distinguishes_complete_bounded_and_unavailable() {
+        let complete = candidate_diagnostic_coverage(0, 0);
+        assert!(matches!(complete.state, CandidateDiagnosticCoverageState::Complete));
+        assert_eq!(complete.observed, Some(0));
+        assert!(!complete.truncated);
+
+        let bounded = candidate_diagnostic_coverage(129, 128);
+        assert!(matches!(bounded.state, CandidateDiagnosticCoverageState::Bounded));
+        assert_eq!(bounded.retained, 128);
+        assert_eq!(bounded.observed, Some(129));
+        assert!(bounded.truncated);
+
+        let unavailable = CandidateDiagnosticCoverage {
+            state: CandidateDiagnosticCoverageState::Unavailable,
+            retained: 0,
+            observed: None,
+            truncated: false,
+        };
+        let serialized = serde_json::to_value(unavailable).unwrap();
+        assert_eq!(serialized["state"], "unavailable");
+        assert!(serialized.get("observed").is_none());
+    }
+
+    #[test]
+    fn candidate_details_retain_at_most_the_bounded_cycle_limit() {
+        let mut diagnostic = test_diagnostic(MAX_CANDIDATE_DETAILS_PER_CYCLE + 1);
+        for timestamp in 0..=MAX_CANDIDATE_DETAILS_PER_CYCLE as u64 {
+            update_entry_candidate_diagnostic(
+                &mut diagnostic,
+                &test_signal(timestamp),
+                "prepared_candidate",
+                None,
+            );
+        }
+        assert_eq!(diagnostic.candidate_details.len(), MAX_CANDIDATE_DETAILS_PER_CYCLE);
+        assert_eq!(diagnostic.candidate_coverage.retained, MAX_CANDIDATE_DETAILS_PER_CYCLE);
+        assert_eq!(diagnostic.candidate_coverage.observed, Some(MAX_CANDIDATE_DETAILS_PER_CYCLE + 1));
+        assert!(diagnostic.candidate_coverage.truncated);
+        assert!(matches!(diagnostic.candidate_coverage.state, CandidateDiagnosticCoverageState::Bounded));
     }
 }

@@ -6,6 +6,7 @@ struct SelectedOrderExecution {
     counterfactual_take_profit_percent: f64,
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
+    exit_parameter_provenance: serde_json::Value,
     side: String,
     quantity: f64,
     notional: f64,

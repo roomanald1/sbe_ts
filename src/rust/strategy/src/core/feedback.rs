@@ -41,16 +41,79 @@ pub struct LearnedProfileSnapshot {
     /// current profile/defaults.
     #[serde(default)]
     pub exit_protection_policies: Vec<LearnedExitProtectionPolicy>,
+    /// Read-only candidate evaluations, including explicit blockers. Only
+    /// candidates listed in `exit_protection_policies` are eligible for use.
+    #[serde(default)]
+    pub exit_policy_assessments: Vec<LearnedExitPolicyAssessment>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct LearnedExitPolicyAssessment {
+    pub symbol: String,
+    pub strategy: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub profile_version: Option<u64>,
+    /// Candidate parameters are absent when input evidence was insufficient
+    /// to generate a candidate; they are never filled from a global default.
+    #[serde(default)]
+    pub stop_loss_percent: Option<f64>,
+    #[serde(default)]
+    pub take_profit_percent: Option<f64>,
+    #[serde(default)]
+    pub activation_percent: Option<f64>,
+    #[serde(default)]
+    pub giveback_percent: Option<f64>,
+    #[serde(default)]
+    pub minimum_lock_percent: Option<f64>,
+    /// Profile-scoped candidate values evaluated from executable paths.
+    /// Missing values mean that evidence could not support a candidate.
+    #[serde(default)]
+    pub trailing_activation_percent: Option<f64>,
+    #[serde(default)]
+    pub trailing_distance_percent: Option<f64>,
+    #[serde(default)]
+    pub breakeven_activation_percent: Option<f64>,
+    /// Evaluated candidate only. This is not active unless an approved
+    /// profile-promotion path applies it to maximum_hold_days.
+    #[serde(default)]
+    pub maximum_holding_duration_ms: Option<u64>,
+    pub sample_count: usize,
+    pub training_count: usize,
+    pub validation_count: usize,
+    pub as_of_ms: u64,
+    pub status: String,
+    pub metrics: ExitPolicyMetricReport,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LearnedExitProtectionPolicy {
     pub symbol: String,
     pub strategy: String,
+    /// The exact profile version whose replay evidence produced this policy.
+    /// Consumers must match both fields before applying it.
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub profile_version: Option<u64>,
     #[serde(default)]
     pub stop_loss_percent: Option<f64>,
     #[serde(default)]
     pub take_profit_percent: Option<f64>,
+    /// Maximum duration to propagate into new entry profile parameters. Open
+    /// positions retain the duration captured in their entry decision.
+    #[serde(default)]
+    pub maximum_holding_duration_ms: Option<u64>,
+    /// Net-return threshold that activates the sampled trailing stop.
+    #[serde(default)]
+    pub trailing_activation_percent: Option<f64>,
+    /// Peak-to-current net-return giveback that triggers the trailing stop.
+    #[serde(default)]
+    pub trailing_distance_percent: Option<f64>,
+    /// Net-return peak required before a return-to-flat protection activates.
+    #[serde(default)]
+    pub breakeven_activation_percent: Option<f64>,
     pub activation_percent: f64,
     pub giveback_percent: f64,
     pub minimum_lock_percent: f64,
@@ -65,6 +128,39 @@ pub struct LearnedExitProtectionPolicy {
     pub validation_tenth_percentile_difference_percent: f64,
     pub validation_worst_difference_percent: f64,
     pub as_of_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct ExitPolicyMetricReport {
+    /// Computed values with units encoded in each key. Missing values are
+    /// never represented as zero.
+    #[serde(default)]
+    pub values: BTreeMap<String, f64>,
+    /// Coverage and provenance for computed and unavailable metrics.
+    #[serde(default)]
+    pub coverage: BTreeMap<String, ExitPolicyMetricCoverage>,
+    #[serde(default)]
+    pub promotion_eligible: bool,
+    #[serde(default)]
+    pub promotion_blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitPolicyMetricCoverageStatus {
+    Complete,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ExitPolicyMetricCoverage {
+    pub status: ExitPolicyMetricCoverageStatus,
+    pub sample_count: usize,
+    #[serde(default)]
+    pub source_fields: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

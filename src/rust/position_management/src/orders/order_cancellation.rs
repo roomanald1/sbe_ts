@@ -5,7 +5,16 @@ async fn cancel_order(
     let mut ledger = store.ledger.lock().await;
     let original_orders = ledger.orders.len();
     let original_barriers = ledger.barrier_orders.len();
-    ledger.orders.retain(|order| order.id != id);
+    if let Some(index) = ledger.orders.iter().position(|order| order.id == id) {
+        let order = ledger.orders.remove(index);
+        let cancelled_at = now_ms().map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Unable to timestamp order cancellation: {error}"),
+            )
+        })?;
+        terminalize_resting_order(&mut ledger, order, "cancelled", cancelled_at);
+    }
     if ledger.orders.len() == original_orders {
         if let Some(order) = ledger.barrier_orders.iter().find(|order| order.id == id) {
             if order.status != "armed" {

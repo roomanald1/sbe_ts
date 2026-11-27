@@ -47,8 +47,24 @@ async fn apply_learning_snapshot(
     state: &AutoTraderState,
     mut snapshot: strategy::LearnedProfileSnapshot,
 ) {
+    const MAX_EXIT_POLICY_ASSESSMENTS: usize = 512;
     let exit_protection_policies =
         apply_exit_protection_policies(snapshot.exit_protection_policies, current_time_ms());
+    snapshot.exit_policy_assessments.retain(|assessment| {
+        strategy::is_autotrader_symbol_allowed(&assessment.symbol)
+            && Strategy::from_name(&assessment.strategy).is_some()
+    });
+    let exit_policy_assessments = snapshot
+        .exit_policy_assessments
+        .into_iter()
+        .take(MAX_EXIT_POLICY_ASSESSMENTS)
+        .map(|assessment| {
+            (
+                format!("{}:{}", assessment.symbol, assessment.strategy),
+                assessment,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     snapshot
         .profiles
         .retain(|profile| strategy::is_autotrader_symbol_allowed(&profile.symbol));
@@ -108,6 +124,10 @@ async fn apply_learning_snapshot(
     }
     if settings.learned_exit_protection_policies != exit_protection_policies {
         settings.learned_exit_protection_policies = exit_protection_policies;
+        changed = true;
+    }
+    if settings.learned_exit_policy_assessments != exit_policy_assessments {
+        settings.learned_exit_policy_assessments = exit_policy_assessments;
         changed = true;
     }
     for profile in snapshot.profiles {
@@ -1040,6 +1060,12 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
             book
         }
     };
+    reconcile_dated_carry_capital(&mut settings, &carry_book).unwrap_or_else(|error| {
+        panic!("Could not reconcile dated-carry capital before startup: {error}")
+    });
+    persist_settings(&state_file_path, &settings).unwrap_or_else(|(_, error)| {
+        panic!("Could not persist dated-carry capital reconciliation: {error}")
+    });
     let (state_updates, _) = tokio::sync::broadcast::channel(64);
     let (live_profile_updates, _) = tokio::sync::broadcast::channel(16);
     let state = AutoTraderState {
@@ -1067,6 +1093,7 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
+        capital_allocation_snapshot: Arc::new(Mutex::new(CapitalAllocationSnapshot::default())),
         cycle_lock: Arc::new(Mutex::new(())),
         pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
         daily_signal_notify: Arc::new(Notify::new()),
@@ -2170,7 +2197,9 @@ async fn receive_strategy_decision(
                     blockers.insert(blocker.strategy.clone(), blocker);
                 }
             }
-            record_cycle_gap_summary(&state, &Ok(skipped(&reason)));
+            let diagnostic = strategy_rejection_entry_diagnostic(&report, &reason);
+            let result = with_entry_diagnostic(skipped(&reason), diagnostic);
+            record_cycle_gap_summary(&state, &Ok(result));
             let mut settings = state.settings.lock().await;
             if now_ms >= settings.last_decision_at {
                 settings.last_decision = reason;

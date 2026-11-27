@@ -95,13 +95,27 @@ fn limit_match_quantity(result: &mut MatcherResponse, quantity: f64) {
 fn source_match_identity_is_linked(
     result: &MatcherResponse,
     requested_order_id: Option<&str>,
+    requested_quantity: f64,
 ) -> bool {
     let Some(order_id) = requested_order_id.filter(|value| !value.trim().is_empty()) else {
         return false;
     };
+    // Protective barrier matching uses a deterministic per-attempt order ID
+    // so a partial fill can be retried with its reduced quantity without
+    // conflicting with the prior Paper Exchange request. The source response
+    // keeps that attempt ID in `order_id` and the stable barrier ID in
+    // `parent_order_id`; require the exact derivation and both identities.
+    let barrier_attempt_id = order_id
+        .starts_with("barrier-")
+        .then(|| format!("{order_id}:barrier:{:016x}", requested_quantity.to_bits()));
+    let order_identity_matches = result.order_id.as_deref() == Some(order_id)
+        || barrier_attempt_id.as_deref().is_some_and(|attempt_id| {
+            result.order_id.as_deref() == Some(attempt_id)
+                && result.parent_order_id.as_deref() == Some(order_id)
+        });
     result.schema_version.as_deref() == Some("paper_exchange_match:v1")
         && result.capture_complete == Some(true)
-        && result.order_id.as_deref() == Some(order_id)
+        && order_identity_matches
         && result
             .request_fingerprint
             .as_deref()
@@ -122,7 +136,7 @@ fn source_match_is_complete(
     requested_order_id: Option<&str>,
     requested_quantity: f64,
 ) -> bool {
-    if !source_match_identity_is_linked(result, requested_order_id)
+    if !source_match_identity_is_linked(result, requested_order_id, requested_quantity)
         || result.source_reported_filled_quantity.is_none()
     {
         return false;
@@ -199,7 +213,8 @@ fn paper_exchange_fill_evidence(
     requested_order_id: Option<&str>,
     requested_quantity: f64,
 ) -> Vec<PaperExchangeFillEvidence> {
-    let identity_linked = source_match_identity_is_linked(result, requested_order_id);
+    let identity_linked =
+        source_match_identity_is_linked(result, requested_order_id, requested_quantity);
     let complete = source_match_is_complete(result, requested_order_id, requested_quantity);
     let mut execution_id_counts = std::collections::HashMap::new();
     let mut fill_cursor_counts = std::collections::HashMap::new();

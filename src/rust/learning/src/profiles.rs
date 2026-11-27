@@ -237,6 +237,7 @@ pub(crate) fn walk_forward_priority_snapshot(
 pub(super) struct EvidenceGainCoverageSnapshot {
     pub(super) status: String,
     pub(super) sample_count: Option<usize>,
+    pub(super) effective_sample_size: Option<f64>,
     pub(super) last_sample_timestamp_ms: Option<u64>,
 }
 
@@ -257,6 +258,10 @@ pub(super) fn evidence_gain_coverage_snapshot(
             .as_ref()
             .and_then(|value| value["sampleCount"].as_u64())
             .map(|value| value as usize),
+        effective_sample_size: coverage
+            .as_ref()
+            .and_then(|value| value["effectiveSampleSize"].as_f64())
+            .filter(|value| value.is_finite() && *value >= 0.0),
         last_sample_timestamp_ms: coverage
             .as_ref()
             .and_then(|value| value["lastSampleTimestampMs"].as_u64())
@@ -559,38 +564,89 @@ pub(super) async fn get_decision_snapshot(
         returns.truncate(32);
     }
     let contextual_stop_loss_percents = contextual_stop_loss_percents(&state, cutoff);
-    let exit_protection_policies = profiles
-        .iter()
-        .filter_map(|profile| {
-            let evidence = crate::exit_policy::select_exit_policy(
-                state.exit_timing_observations.values(),
-                &profile.symbol,
-                &profile.strategy,
-                snapshot_now_ms,
-            )?;
-            Some(strategy::LearnedExitProtectionPolicy {
-                symbol: profile.symbol.clone(),
-                strategy: profile.strategy.clone(),
-                stop_loss_percent: Some(evidence.stop_loss_percent),
-                take_profit_percent: Some(evidence.take_profit_percent),
-                activation_percent: evidence.parameters.activation_percent,
-                giveback_percent: evidence.parameters.giveback_percent,
-                minimum_lock_percent: evidence.parameters.minimum_lock_percent,
-                sample_count: evidence.sample_count,
-                training_count: evidence.training_count,
-                validation_count: evidence.validation_count,
-                baseline_validation_mean_percent: evidence.baseline_validation_mean_percent,
-                selected_validation_mean_percent: evidence.selected_validation_mean_percent,
-                validation_gain_percent: evidence.validation_gain_percent,
-                validation_positive_rate: evidence.validation_positive_rate,
-                validation_negative_difference_rate: evidence.validation_negative_difference_rate,
-                validation_tenth_percentile_difference_percent: evidence
-                    .validation_tenth_percentile_difference_percent,
-                validation_worst_difference_percent: evidence.validation_worst_difference_percent,
-                as_of_ms: evidence.as_of_ms,
-            })
-        })
-        .collect();
+    let mut exit_protection_policies = Vec::new();
+    let mut exit_policy_assessments = Vec::new();
+    for profile in &profiles {
+        let Some(evidence) = crate::exit_policy::select_exit_policy_for_profile(
+            state.exit_timing_observations.values(),
+            &profile.symbol,
+            &profile.strategy,
+            &profile.profile_id,
+            profile.version,
+            snapshot_now_ms,
+        ) else {
+            exit_policy_assessments.push(
+                crate::exit_policy::unavailable_exit_policy_assessment_for_profile(
+                    state.exit_timing_observations.values(),
+                    &profile.symbol,
+                    &profile.strategy,
+                    &profile.profile_id,
+                    profile.version,
+                    snapshot_now_ms,
+                ),
+            );
+            continue;
+        };
+        exit_policy_assessments.push(strategy::LearnedExitPolicyAssessment {
+            symbol: profile.symbol.clone(),
+            strategy: profile.strategy.clone(),
+            profile_id: Some(profile.profile_id.clone()),
+            profile_version: Some(profile.version),
+            stop_loss_percent: Some(evidence.stop_loss_percent),
+            take_profit_percent: Some(evidence.take_profit_percent),
+            activation_percent: Some(evidence.parameters.activation_percent),
+            giveback_percent: Some(evidence.parameters.giveback_percent),
+            minimum_lock_percent: Some(evidence.parameters.minimum_lock_percent),
+            trailing_activation_percent: evidence.parameters.trailing_activation_percent,
+            trailing_distance_percent: evidence.parameters.trailing_distance_percent,
+            breakeven_activation_percent: evidence.parameters.breakeven_activation_percent,
+            maximum_holding_duration_ms: evidence.maximum_holding_duration_ms,
+            sample_count: evidence.sample_count,
+            training_count: evidence.training_count,
+            validation_count: evidence.validation_count,
+            as_of_ms: evidence.as_of_ms,
+            status: if evidence.metrics.promotion_eligible {
+                "promotion_eligible".to_owned()
+            } else if evidence.metrics.promotion_blockers.iter().any(|blocker| {
+                blocker.starts_with("training_") || blocker.starts_with("validation_")
+            }) {
+                "candidate_rejected".to_owned()
+            } else {
+                "metrics_blocked".to_owned()
+            },
+            metrics: evidence.metrics.clone(),
+        });
+        if !evidence.metrics.promotion_eligible {
+            continue;
+        }
+        exit_protection_policies.push(strategy::LearnedExitProtectionPolicy {
+            symbol: profile.symbol.clone(),
+            strategy: profile.strategy.clone(),
+            profile_id: Some(profile.profile_id.clone()),
+            profile_version: Some(profile.version),
+            stop_loss_percent: Some(evidence.stop_loss_percent),
+            take_profit_percent: Some(evidence.take_profit_percent),
+            maximum_holding_duration_ms: evidence.maximum_holding_duration_ms,
+            trailing_activation_percent: evidence.parameters.trailing_activation_percent,
+            trailing_distance_percent: evidence.parameters.trailing_distance_percent,
+            breakeven_activation_percent: evidence.parameters.breakeven_activation_percent,
+            activation_percent: evidence.parameters.activation_percent,
+            giveback_percent: evidence.parameters.giveback_percent,
+            minimum_lock_percent: evidence.parameters.minimum_lock_percent,
+            sample_count: evidence.sample_count,
+            training_count: evidence.training_count,
+            validation_count: evidence.validation_count,
+            baseline_validation_mean_percent: evidence.baseline_validation_mean_percent,
+            selected_validation_mean_percent: evidence.selected_validation_mean_percent,
+            validation_gain_percent: evidence.validation_gain_percent,
+            validation_positive_rate: evidence.validation_positive_rate,
+            validation_negative_difference_rate: evidence.validation_negative_difference_rate,
+            validation_tenth_percentile_difference_percent: evidence
+                .validation_tenth_percentile_difference_percent,
+            validation_worst_difference_percent: evidence.validation_worst_difference_percent,
+            as_of_ms: evidence.as_of_ms,
+        });
+    }
     let strategy_size_multipliers = totals
         .into_iter()
         .map(|(strategy, returns)| {
@@ -617,6 +673,7 @@ pub(super) async fn get_decision_snapshot(
         walk_forward_evidence,
         scout_parameter_variants: scout_parameter_variant_snapshots(&state),
         exit_protection_policies,
+        exit_policy_assessments,
     };
     Json(LearningDecisionSnapshotResponse {
         snapshot,
@@ -2048,7 +2105,7 @@ mod tests {
         state.evidence_gain_records.insert(
             "gain-transition-1".into(),
             EvidenceGainRecord {
-                schema_version: 1,
+                schema_version: 2,
                 record_id: "gain-transition-1".into(),
                 outcome_event_id: "scout-event-3".into(),
                 source_event_id: Some("scout-event-3".into()),
@@ -2066,6 +2123,8 @@ mod tests {
                 coverage_after_status: "fresh".into(),
                 sample_count_before: Some(1),
                 sample_count_after: Some(2),
+                effective_sample_size_before: Some(0.8),
+                effective_sample_size_after: Some(1.4),
                 last_sample_before_ms: Some(now - 100_000),
                 last_sample_after_ms: Some(now - 1),
                 new_coverage_observed: true,

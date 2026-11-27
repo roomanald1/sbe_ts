@@ -1,28 +1,35 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AutoTraderPageModel } from '../models/AutoTraderPageModel';
+import { AutoTraderExitPolicyModel } from '../models/AutoTraderExitPolicyModel';
+import { AutoTraderOutcomesModel } from '../models/AutoTraderOutcomesModel';
 import { useBehaviorSnapshot } from '@workspace/ui-platform';
 import { FeedToolbar } from './FeedToolbar';
-import { money } from './AutoTraderOrderGrid';
 import {
   AutoTraderParametersDialog,
   AutoTraderSettingsDialog,
 } from './AutoTraderDialogs';
-
-const finiteFixed = (value: unknown, digits: number) =>
-  typeof value === 'number' && Number.isFinite(value)
-    ? value.toFixed(digits)
-    : 'n/a';
+import { CapitalAllocationView } from './AutoTraderAllocationView';
+import { AutoTraderExitPoliciesView } from './AutoTraderExitPoliciesView';
+import { AutoTraderGlobalControlsSummary } from './AutoTraderGlobalControlsSummary';
 
 const STALE_AUTO_TRADER_DECISION_MS = 6 * 60_000;
 const pnlMoney = new Intl.NumberFormat(undefined, {
   minimumFractionDigits: 5,
   maximumFractionDigits: 5,
 });
-
 export function AutoTrader() {
   const pageModel = useMemo(() => new AutoTraderPageModel(), []);
+  const exitPolicyModel = useMemo(
+    () =>
+      new AutoTraderExitPolicyModel(
+        pageModel.trader,
+        new AutoTraderOutcomesModel(),
+      ),
+    [pageModel],
+  );
   const mountedAt = useMemo(() => Date.now(), []);
   const [clockNow, setClockNow] = useState(() => Date.now());
+  const [exitPoliciesOpen, setExitPoliciesOpen] = useState(false);
   useEffect(() => {
     pageModel.start();
     return () => pageModel.stop();
@@ -79,11 +86,7 @@ export function AutoTrader() {
           </div>
         </div>
         <div className="auto-trader-settings-anchor">
-          <p>
-            Paper · {state.serverExplorationPercent}% explore · SL{' '}
-            {finiteFixed(state.stopLossPercent, 2)}% / TP{' '}
-            {finiteFixed(state.takeProfitPercent, 2)}%
-          </p>
+          <p>Paper mode · global risk and capital limits</p>
           <div className="auto-trader-settings-actions">
             <button
               className="auto-trader-parameters-button"
@@ -94,6 +97,17 @@ export function AutoTrader() {
               onClick={() => pageModel.toggleParameters()}
             >
               View parameters
+            </button>
+            <button
+              className="auto-trader-parameters-button"
+              type="button"
+              aria-expanded={exitPoliciesOpen}
+              aria-controls="autotrader-exit-policies"
+              onClick={() => setExitPoliciesOpen((open) => !open)}
+            >
+              {exitPoliciesOpen
+                ? 'Hide exit policies'
+                : 'Learned exit policies'}
             </button>
             <button
               className="auto-trader-settings-button"
@@ -119,6 +133,34 @@ export function AutoTrader() {
               onClose={() => pageModel.closeSettings()}
             />
           )}
+        </div>
+        <AutoTraderGlobalControlsSummary state={state} />
+        <div id="autotrader-exit-policies" hidden={!exitPoliciesOpen}>
+          {exitPoliciesOpen && (
+            <AutoTraderExitPoliciesView model={exitPolicyModel} />
+          )}
+        </div>
+        <div
+          className="v35-operator-status-row"
+          aria-label="Current AutoTrader safety status"
+        >
+          <span
+            className={`v35-operator-status ${state.auditHealthy ? 'is-good' : 'is-bad'}`}
+          >
+            {state.auditHealthy ? 'Audit OK' : 'Audit degraded'}
+          </span>
+          <span
+            className={`v35-operator-status ${state.auditFailureLatched ? 'is-bad' : 'is-good'}`}
+          >
+            {state.auditFailureLatched ? 'Safety latch set' : 'Latch clear'}
+          </span>
+          <span
+            className={`v35-operator-status ${state.capitalAllocation ? 'is-good' : 'is-unavailable'}`}
+          >
+            {state.capitalAllocation
+              ? 'Shared allocation v1'
+              : 'Allocation details unavailable'}
+          </span>
         </div>
         {!state.auditHealthy && (
           <div className="auto-trader-audit-alert" role="alert">
@@ -154,18 +196,10 @@ export function AutoTrader() {
             decisions.
           </p>
         )}
-        <p className="auto-trader-allocation">
-          Reserved <strong>USD {money.format(state.usedNotionalToday)}</strong>{' '}
-          / {money.format(state.serverDailyNotionalLimit)} total · Intraday{' '}
-          {money.format(state.intradayUsedNotional)}/
-          {money.format(Number(state.intradayNotionalLimit))} · Daily{' '}
-          {money.format(state.dailyStrategyUsedNotional)}/
-          {money.format(Number(state.dailyStrategyNotionalLimit))} · Available{' '}
-          <strong>USD {money.format(state.availableNotional)}</strong>
-          {state.usedNotionalToday > state.serverDailyNotionalLimit && (
-            <span> · Overall cap exceeded; new exposure blocked.</span>
-          )}
-        </p>
+        <CapitalAllocationView
+          allocation={state.capitalAllocation}
+          availableNotional={state.availableNotional}
+        />
         <div
           className="auto-trader-pnl-summary"
           aria-label="Auto Trader profit and loss"

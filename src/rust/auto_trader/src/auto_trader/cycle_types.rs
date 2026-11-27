@@ -13,6 +13,8 @@ struct PositionExitPolicy {
     symbol: String,
     stop_loss_percent: f64,
     take_profit_percent: f64,
+    source: String,
+    is_global_fallback: bool,
 }
 #[derive(Serialize)]
 struct OpenPositionAttribution {
@@ -25,6 +27,8 @@ struct OpenStrategyPosition {
     symbol: String,
     strategy: String,
     decision_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<serde_json::Value>,
     quantity: f64,
     average_entry_price: f64,
     entry_fees: f64,
@@ -33,9 +37,28 @@ struct OpenStrategyPosition {
     entry_order_types: Vec<String>,
     stop_loss_percent: Option<f64>,
     take_profit_percent: Option<f64>,
+    effective_stop_loss_percent: Option<f64>,
+    effective_take_profit_percent: Option<f64>,
+    selected_stop_loss_percent: Option<f64>,
+    selected_take_profit_percent: Option<f64>,
+    stop_loss_source: String,
+    take_profit_source: String,
+    fallback_stop_loss_percent: Option<f64>,
+    fallback_take_profit_percent: Option<f64>,
+    exit_profile_id: Option<String>,
+    exit_profile_version: Option<u64>,
+    exit_policy_as_of_ms: Option<u64>,
+    exit_parameter_provenance: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    protective_barrier: Option<serde_json::Value>,
+    #[serde(skip)]
+    protective_barrier_ids: Vec<String>,
+    initial_risk_reference: Option<InitialRiskReference>,
+    initial_risk_evidence_status: String,
     horizon_take_profit_percent: Option<f64>,
     stop_loss_active: bool,
     take_profit_active: bool,
+    exit_control_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     carry_details: Option<DatedCarryPosition>,
 }

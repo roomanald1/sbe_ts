@@ -85,6 +85,50 @@ fn position_strategy_parameters(position: &TraderPosition) -> BTreeMap<String, f
         .unwrap_or_default()
 }
 
+fn position_take_profit_candidate(
+    position: &TraderPosition,
+    global_fallback_percent: f64,
+) -> (f64, &'static str) {
+    let provenance_source = position
+        .exit_parameter_provenance
+        .as_ref()
+        .and_then(|provenance| provenance["take_profit"]["source"].as_str());
+    if let Some(target) = position
+        .take_profit_percent
+        .filter(|target| target.is_finite())
+    {
+        (
+            target,
+            match provenance_source {
+                Some("validated_exit_policy") => "validated_exit_policy",
+                Some("learned_strategy_profile") => "learned_strategy_profile",
+                Some("strategy_default_profile") => "strategy_default_profile",
+                Some("configured_profile_override") => "configured_profile_override",
+                Some("contextual_stop_overlay") => "contextual_profile_overlay",
+                Some(_) => "persisted_position_parameter",
+                None => "unknown_position_parameter",
+            },
+        )
+    } else if let Some(target) = position
+        .horizon_take_profit_percent
+        .filter(|target| target.is_finite())
+    {
+        (
+            target,
+            match provenance_source {
+                Some("validated_exit_policy") => "validated_exit_policy",
+                Some("learned_strategy_profile") => "learned_strategy_profile",
+                Some("strategy_default_profile") => "strategy_default_profile",
+                Some("configured_profile_override") => "configured_profile_override",
+                Some(_) => "persisted_horizon_parameter",
+                None => "unknown_horizon_parameter",
+            },
+        )
+    } else {
+        (global_fallback_percent, "global_fallback")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MaximumHoldStatus {
     status: &'static str,
@@ -193,6 +237,8 @@ fn position_exit_reason(
     immediate_exit_return_fraction: f64,
     stop_loss_percent: f64,
     profit_protection_exit: bool,
+    trailing_stop_exit: bool,
+    breakeven_exit: bool,
     maximum_hold_expired: bool,
     profit_exit_return_fraction: f64,
     take_profit_percent: f64,
@@ -205,6 +251,10 @@ fn position_exit_reason(
         Some("research-regime-exit")
     } else if strategy_rebalance {
         Some("strategy-monthly-rebalance")
+    } else if trailing_stop_exit {
+        Some("trailing-stop")
+    } else if breakeven_exit {
+        Some("breakeven-protection")
     } else if signal_managed_strategy {
         maximum_hold_expired.then_some("maximum-hold")
     } else if immediate_exit_return_fraction <= -stop_loss_percent / 100.0 {
@@ -217,6 +267,97 @@ fn position_exit_reason(
         Some("take-profit")
     } else {
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ProfileExitProtectionState {
+    trailing_peak_return_percent: Option<f64>,
+    breakeven_activated: bool,
+    trailing_stop_exit: bool,
+    breakeven_exit: bool,
+}
+
+fn profile_exit_parameter(position: &TraderPosition, key: &str) -> Option<f64> {
+    let strategy = position.strategy.as_deref().and_then(Strategy::from_name)?;
+    let spec = strategy
+        .parameter_specs()
+        .into_iter()
+        .find(|spec| spec.key.as_str() == key)?;
+    let value = position
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("strategy_parameters"))
+        .and_then(|parameters| parameters.get(key))
+        .and_then(serde_json::Value::as_f64)?;
+    (value.is_finite() && value >= spec.min && value <= spec.max).then_some(value)
+}
+
+fn profile_exit_protection_state(
+    position: &TraderPosition,
+    current_net_return_percent: f64,
+) -> ProfileExitProtectionState {
+    let trailing_activation = profile_exit_parameter(position, "trailing_activation_percent")
+        .filter(|activation| *activation > 0.0);
+    let trailing_distance = profile_exit_parameter(position, "trailing_distance_percent")
+        .filter(|distance| *distance > 0.0);
+    let breakeven_activation = profile_exit_parameter(position, "breakeven_activation_percent")
+        .filter(|activation| *activation > 0.0);
+    let trailing_enabled = trailing_activation.is_some() && trailing_distance.is_some();
+    if !trailing_enabled && breakeven_activation.is_none() {
+        return ProfileExitProtectionState {
+            trailing_peak_return_percent: position.trailing_peak_return_percent,
+            breakeven_activated: position.breakeven_protection_activated,
+            ..ProfileExitProtectionState::default()
+        };
+    }
+
+    let taker_fee_rate = configured_taker_fee_rate();
+    let executable_path_peak = position
+        .price_path
+        .iter()
+        .filter_map(|sample| {
+            let executable_price = if position.quantity > 0.0 {
+                sample.bid
+            } else {
+                sample.ask
+            };
+            (executable_price.is_finite() && executable_price > 0.0)
+                .then(|| {
+                    net_exit_return_fraction(position, executable_price, taker_fee_rate) * 100.0
+                })
+                .filter(|value| value.is_finite())
+        })
+        .max_by(f64::total_cmp);
+    let peak = [
+        position.trailing_peak_return_percent,
+        executable_path_peak,
+        Some(current_net_return_percent).filter(|value| value.is_finite()),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(f64::total_cmp);
+
+    let breakeven_activated = position.breakeven_protection_activated
+        || breakeven_activation
+            .is_some_and(|activation| peak.is_some_and(|peak| peak >= activation));
+    let trailing_stop_exit = trailing_enabled
+        && trailing_activation
+            .zip(trailing_distance)
+            .is_some_and(|(activation, distance)| {
+                peak.is_some_and(|peak| {
+                    peak >= activation && current_net_return_percent <= peak - distance
+                })
+            });
+    ProfileExitProtectionState {
+        trailing_peak_return_percent: if trailing_enabled {
+            peak
+        } else {
+            position.trailing_peak_return_percent
+        },
+        breakeven_activated,
+        trailing_stop_exit,
+        breakeven_exit: breakeven_activated && current_net_return_percent <= 0.0,
     }
 }
 
@@ -437,27 +578,46 @@ async fn evaluate_position_exit(
                 .last()
                 .is_none_or(|sample| observed_at.saturating_sub(sample.timestamp) >= 5_000);
             if should_sample {
+                if current.price_path_epoch.is_none() {
+                    current.price_path_epoch = current.trade_id.as_ref().map(|trade_id| {
+                        format!(
+                            "auto-trader-position-path:v1:{}:{trade_id}",
+                            current.entry_timestamp_ms
+                        )
+                    });
+                }
+                let sequence = current
+                    .price_path_total_samples
+                    .max(current.price_path.len() as u64)
+                    .saturating_add(1);
                 current.price_path.push(TradePriceSample {
                     timestamp: observed_at,
                     bid,
                     ask,
+                    sequence,
+                    epoch: current.price_path_epoch.clone(),
                     source_updated_at_ms,
                     freshness_contract_version,
                     freshness_max_age_ms,
                     source_fresh,
                 });
-                current.price_path_total_samples = current
-                    .price_path_total_samples
-                    .max(current.price_path.len() as u64)
-                    .saturating_add(1);
+                current.price_path_total_samples = sequence;
                 if current.price_path.len() > 4096 {
                     current.price_path.drain(..current.price_path.len() - 4096);
                     current.price_path_truncated = true;
                 }
                 position.price_path = current.price_path.clone();
+                position.price_path_total_samples = current.price_path_total_samples;
+                position.price_path_truncated = current.price_path_truncated;
+                position.price_path_restart_interrupted = current.price_path_restart_interrupted;
+                position.price_path_epoch = current.price_path_epoch.clone();
                 request_price_path_persist_if_due(state)?;
             } else {
                 position.price_path = current.price_path.clone();
+                position.price_path_total_samples = current.price_path_total_samples;
+                position.price_path_truncated = current.price_path_truncated;
+                position.price_path_restart_interrupted = current.price_path_restart_interrupted;
+                position.price_path_epoch = current.price_path_epoch.clone();
             }
         }
     }
@@ -478,14 +638,8 @@ async fn evaluate_position_exit(
         )
     };
     let stop_loss_percent = position.stop_loss_percent.unwrap_or(stop_loss_percent);
-    let take_profit_percent = position
-        .take_profit_percent
-        .or_else(|| {
-            position
-                .horizon_take_profit_percent
-                .map(|target| target.max(configured_take_profit_percent))
-        })
-        .unwrap_or(configured_take_profit_percent);
+    let (take_profit_percent, take_profit_source) =
+        position_take_profit_candidate(&position, configured_take_profit_percent);
     let learned_exit_policy = position_uses_learned_exit_policy(&position);
     let take_profit_percent = if learned_exit_policy {
         take_profit_percent
@@ -515,7 +669,14 @@ async fn evaluate_position_exit(
         profit_exit_net_return_percent,
         protection_parameters,
     );
-    if protection_peak != previous_protection_peak {
+    let previous_trailing_peak = position.trailing_peak_return_percent;
+    let previous_breakeven_activated = position.breakeven_protection_activated;
+    let profile_exit_protection =
+        profile_exit_protection_state(&position, immediate_net_return_percent);
+    if protection_peak != previous_protection_peak
+        || profile_exit_protection.trailing_peak_return_percent != previous_trailing_peak
+        || profile_exit_protection.breakeven_activated != previous_breakeven_activated
+    {
         let mut settings = state.settings.lock().await;
         if let Some(current) = settings
             .strategy_positions
@@ -527,6 +688,14 @@ async fn evaluate_position_exit(
             {
                 current.profit_protection_peak_return_percent = protection_peak;
                 position.profit_protection_peak_return_percent = protection_peak;
+                current.trailing_peak_return_percent =
+                    profile_exit_protection.trailing_peak_return_percent;
+                position.trailing_peak_return_percent =
+                    profile_exit_protection.trailing_peak_return_percent;
+                current.breakeven_protection_activated =
+                    profile_exit_protection.breakeven_activated;
+                position.breakeven_protection_activated =
+                    profile_exit_protection.breakeven_activated;
                 request_settings_persist(state)?;
             }
         }
@@ -725,6 +894,12 @@ async fn evaluate_position_exit(
     );
     let exit_decision_context = serde_json::json!({
         "strategy_decision": format!("{strategy_decision:?}"),
+        "exit_parameter_provenance": position.exit_parameter_provenance.as_ref(),
+        "selected_take_profit_percent": position.exit_parameter_provenance
+            .as_ref()
+            .and_then(|provenance| provenance["take_profit"]["selected_percent"].as_f64()),
+        "take_profit_candidate_percent": take_profit_percent,
+        "take_profit_candidate_source": take_profit_source,
         "minimum_hold_active": minimum_hold_active,
         "maximum_hold": {
             "status": maximum_hold.status,
@@ -764,6 +939,17 @@ async fn evaluate_position_exit(
         "thesis_failure_confirmed": thesis_failure_confirmed,
         "immediate_exit_net_return_percent": immediate_net_return_percent,
         "profit_exit_net_return_percent": profit_exit_net_return_percent,
+        "profile_exit_protection": {
+            "trailing_activation_percent": profile_exit_parameter(&position, "trailing_activation_percent"),
+            "trailing_distance_percent": profile_exit_parameter(&position, "trailing_distance_percent"),
+            "trailing_peak_return_percent": profile_exit_protection.trailing_peak_return_percent,
+            "trailing_stop_exit": profile_exit_protection.trailing_stop_exit,
+            "breakeven_activation_percent": profile_exit_parameter(&position, "breakeven_activation_percent"),
+            "breakeven_activated": profile_exit_protection.breakeven_activated,
+            "breakeven_exit": profile_exit_protection.breakeven_exit,
+            "threshold_basis": "net_executable_return_after_entry_and_taker_exit_fees",
+            "entry_profile_parameters_are_immutable": true,
+        },
         "immediate_exit_fee_rate": immediate_exit_fee_rate,
         "profit_exit_fee_rate": profit_exit_fee_rate,
         "symbol_diagnostic": latest_worker_report
@@ -784,6 +970,8 @@ async fn evaluate_position_exit(
         immediate_exit_return_fraction,
         stop_loss_percent,
         profit_protection_exit,
+        profile_exit_protection.trailing_stop_exit,
+        profile_exit_protection.breakeven_exit,
         maximum_hold.expired,
         profit_exit_return_fraction,
         take_profit_percent,
@@ -954,6 +1142,135 @@ mod position_exit_profit_protection_tests {
     use super::*;
 
     #[test]
+    fn profile_promotion_does_not_rewrite_an_open_positions_entry_policy() {
+        let original_profile = serde_json::json!({
+            "learning_profile_id": "profile-rsi-v1",
+            "learning_profile_version": 1,
+            "strategy_parameters": {
+                "stop_loss_percent": 0.4,
+                "take_profit_percent": 0.6
+            }
+        });
+        let promoted_profile = serde_json::json!({
+            "learning_profile_id": "profile-rsi-v2",
+            "learning_profile_version": 2,
+            "strategy_parameters": {
+                "stop_loss_percent": 0.8,
+                "take_profit_percent": 1.2
+            }
+        });
+        let mut open = position(1.0, original_profile, None);
+        open.strategy = Some("rsi2-oversold-rebound".into());
+        open.stop_loss_percent = Some(0.4);
+        open.take_profit_percent = Some(0.6);
+        open.exit_parameter_provenance = Some(serde_json::json!({
+            "profile_id": "profile-rsi-v1",
+            "profile_version": 1,
+            "stop_loss": {"source":"learned_strategy_profile", "selected_percent":0.4},
+            "take_profit": {"source":"learned_strategy_profile", "selected_percent":0.6}
+        }));
+        let initial_risk = Some(InitialRiskReference {
+            schema_version: 1,
+            quote_currency: Some("USDT".into()),
+            stop_loss_percent: Some(0.4),
+            quote_amount: Some(0.40),
+            fill_ids: vec!["entry-fill-v1".into()],
+            status: "complete".into(),
+        });
+        open.initial_risk_reference = initial_risk.clone();
+
+        // Promotion updates the new-entry profile snapshot. Existing position
+        // protection continues to use its entry snapshot and risk denominator.
+        assert_eq!(promoted_profile["learning_profile_version"], 2);
+        assert_eq!(
+            open.strategy_decision.as_ref().unwrap()["learning_profile_version"],
+            1
+        );
+        let (take_profit, source) = position_take_profit_candidate(&open, 0.75);
+        assert_eq!(take_profit, 0.6);
+        assert_eq!(source, "learned_strategy_profile");
+        assert_eq!(open.stop_loss_percent, Some(0.4));
+        assert_eq!(
+            open.exit_parameter_provenance.as_ref().unwrap()["profile_version"],
+            1
+        );
+        assert_eq!(
+            open.initial_risk_reference.as_ref().unwrap().quote_amount,
+            initial_risk.unwrap().quote_amount
+        );
+        assert_eq!(
+            position_exit_reason(
+                false,
+                false,
+                false,
+                false,
+                false,
+                0.0,
+                0.4,
+                false,
+                false,
+                false,
+                false,
+                0.007,
+                take_profit
+            ),
+            Some("take-profit")
+        );
+    }
+
+    #[test]
+    fn selected_horizon_target_below_global_fallback_controls_the_take_profit_exit() {
+        let mut selected = position(
+            1.0,
+            serde_json::json!({
+                "learning_profile_id":"profile-rsi-v1",
+                "strategy_parameters":{"take_profit_percent":0.5}
+            }),
+            None,
+        );
+        selected.strategy = Some("rsi2-oversold-rebound".into());
+        selected.horizon_take_profit_percent = Some(0.5);
+        selected.exit_parameter_provenance = Some(serde_json::json!({
+            "profile_id":"profile-rsi-v1",
+            "take_profit":{
+                "source":"learned_strategy_profile",
+                "selected_percent":0.5,
+                "global_fallback_percent":0.75
+            }
+        }));
+
+        let (selected_target, source) = position_take_profit_candidate(&selected, 0.75);
+        assert_eq!(selected_target, 0.5);
+        assert_eq!(source, "learned_strategy_profile");
+        assert_eq!(
+            position_exit_reason(
+                false,
+                false,
+                false,
+                false,
+                false,
+                0.0,
+                0.5,
+                false,
+                false,
+                false,
+                false,
+                0.006,
+                selected_target,
+            ),
+            Some("take-profit")
+        );
+        assert_eq!(
+            position_exit_reason(
+                false, false, false, false, false, 0.0, 0.5, false, false, false, false, 0.006,
+                0.75,
+            ),
+            None,
+            "the larger global fallback would have incorrectly delayed the selected horizon exit"
+        );
+    }
+
+    #[test]
     fn maximum_hold_uses_the_entry_profile_and_expires_at_the_exact_boundary() {
         let mut position = position(
             1.0,
@@ -1040,6 +1357,8 @@ mod position_exit_profit_protection_tests {
                 immediate_exit_return_fraction,
                 0.5,
                 profit_protection_exit,
+                false,
+                false,
                 maximum_hold_expired,
                 0.0,
                 0.8,
@@ -1055,6 +1374,84 @@ mod position_exit_profit_protection_tests {
         assert_eq!(
             reason(true, 0.0, false, true, true),
             Some("research-regime-exit")
+        );
+        assert_eq!(
+            position_exit_reason(
+                false, false, false, false, true, 0.0, 0.5, false, true, false, false, 0.0, 0.8,
+            ),
+            Some("trailing-stop"),
+            "profile protection remains active for a signal-managed strategy"
+        );
+    }
+
+    #[test]
+    fn profile_trailing_policy_uses_net_executable_peak_and_is_restart_durable() {
+        let mut position = position(
+            1.0,
+            serde_json::json!({
+                "learning_profile_id":"profile-v1",
+                "learning_profile_version":1,
+                "strategy_parameters": {
+                    "trailing_activation_percent":0.30,
+                    "trailing_distance_percent":0.15,
+                    "breakeven_activation_percent":0.25
+                }
+            }),
+            None,
+        );
+        position.strategy = Some("live-momentum".into());
+        let activated = profile_exit_protection_state(&position, 0.40);
+        assert_eq!(activated.trailing_peak_return_percent, Some(0.40));
+        assert!(activated.breakeven_activated);
+        assert!(!activated.trailing_stop_exit);
+        assert!(!activated.breakeven_exit);
+
+        position.trailing_peak_return_percent = activated.trailing_peak_return_percent;
+        position.breakeven_protection_activated = activated.breakeven_activated;
+        let restored: TraderPosition =
+            serde_json::from_value(serde_json::to_value(position).unwrap()).unwrap();
+        assert_eq!(restored.trailing_peak_return_percent, Some(0.40));
+        assert!(restored.breakeven_protection_activated);
+
+        let trail_exit = profile_exit_protection_state(&restored, 0.25);
+        assert!(trail_exit.trailing_stop_exit);
+        assert!(!trail_exit.breakeven_exit);
+        assert_eq!(
+            position_exit_reason(
+                false, false, false, false, false, 0.0, 0.5, false, true, false, false, 0.0, 0.8
+            ),
+            Some("trailing-stop")
+        );
+    }
+
+    #[test]
+    fn breakeven_policy_is_disabled_at_zero_and_exits_at_net_flat_after_activation() {
+        let mut disabled = position(
+            1.0,
+            serde_json::json!({
+                "strategy_parameters": {
+                    "trailing_activation_percent":0.0,
+                    "trailing_distance_percent":0.0,
+                    "breakeven_activation_percent":0.0
+                }
+            }),
+            None,
+        );
+        disabled.strategy = Some("live-momentum".into());
+        let off = profile_exit_protection_state(&disabled, -0.01);
+        assert!(!off.breakeven_activated);
+        assert!(!off.breakeven_exit);
+
+        disabled.strategy_decision.as_mut().unwrap()["strategy_parameters"]["breakeven_activation_percent"] =
+            serde_json::json!(0.25);
+        disabled.breakeven_protection_activated = true;
+        let at_flat = profile_exit_protection_state(&disabled, 0.0);
+        assert!(at_flat.breakeven_exit);
+        assert_eq!(
+            position_exit_reason(
+                false, false, false, false, false, 0.0, 0.5, false, false, true, false, 0.0, 0.8
+            ),
+            Some("breakeven-protection")
         );
     }
 

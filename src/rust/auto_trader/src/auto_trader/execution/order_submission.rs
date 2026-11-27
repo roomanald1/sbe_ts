@@ -9,6 +9,7 @@ async fn submit_and_record_selected_order(
         counterfactual_take_profit_percent,
         effective_stop_loss_percent,
         effective_take_profit_percent,
+        exit_parameter_provenance,
         side,
         quantity,
         notional,
@@ -205,6 +206,10 @@ async fn submit_and_record_selected_order(
             .get(&signal.symbol)
             .and_then(|lots| lots.get(strategy_key))
             .cloned();
+        let is_new_strategy_position_direction =
+            prior_strategy_position.as_ref().is_none_or(|position| {
+                position.quantity.abs() <= 1e-12 || incoming_sign != position.quantity.signum()
+            });
         let result = average_price
             .map(|price| {
                 apply_auto_fill(
@@ -247,11 +252,26 @@ async fn submit_and_record_selected_order(
                 Some(effective_stop_loss_percent),
                 Some(effective_take_profit_percent),
             );
+            position_trade_id = strategy_positions
+                .get(&signal.symbol)
+                .and_then(|lots| lots.get(strategy_key))
+                .and_then(|position| position.trade_id.clone())
+                .unwrap_or_else(|| decision_id.to_owned());
             if let Some(position) = positions.get_mut(&signal.symbol).filter(|position| {
                 position.quantity.abs() > 1e-12 && position.quantity.signum() == incoming_sign
             }) {
-                append_entry_fill_evidence(position, &response);
-                position.lifecycle_identity = lifecycle_identity_for_position.clone();
+                update_initial_risk_reference(
+                    position,
+                    &response,
+                    &persisted_request.body,
+                    effective_stop_loss_percent,
+                );
+                append_entry_fill_evidence(position, &response, &persisted_request.body);
+                if is_new_position_direction {
+                    position.entry_decision_id = Some(decision_id.to_owned());
+                    position.trade_id = Some(position_trade_id.clone());
+                    position.lifecycle_identity = lifecycle_identity_for_position.clone();
+                }
             }
             if let Some(position) = strategy_positions
                 .get_mut(&signal.symbol)
@@ -260,8 +280,19 @@ async fn submit_and_record_selected_order(
                     position.quantity.abs() > 1e-12 && position.quantity.signum() == incoming_sign
                 })
             {
-                append_entry_fill_evidence(position, &response);
-                position.lifecycle_identity = lifecycle_identity_for_position;
+                update_initial_risk_reference(
+                    position,
+                    &response,
+                    &persisted_request.body,
+                    effective_stop_loss_percent,
+                );
+                append_entry_fill_evidence(position, &response, &persisted_request.body);
+                if is_new_strategy_position_direction {
+                    position.entry_decision_id = Some(decision_id.to_owned());
+                    position.trade_id = Some(position_trade_id.clone());
+                    position.lifecycle_identity = lifecycle_identity_for_position;
+                    position.exit_parameter_provenance = Some(exit_parameter_provenance.clone());
+                }
             }
             if exploratory {
                 if let Some(position) =
@@ -275,11 +306,6 @@ async fn submit_and_record_selected_order(
                     position.exploratory = true;
                 }
             }
-            position_trade_id = strategy_positions
-                .get(&signal.symbol)
-                .and_then(|lots| lots.get(strategy_key))
-                .and_then(|position| position.trade_id.clone())
-                .unwrap_or_else(|| decision_id.to_owned());
         }
         if let Some(prior) = prior_strategy_position.filter(|position| {
             position.quantity.abs() > 1e-12

@@ -2507,6 +2507,7 @@ fn benchmark_snapshot_state(settings: Settings) -> AutoTraderState {
         settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
         latest_execution_parameters: Arc::new(Mutex::new(None)),
+        capital_allocation_snapshot: Arc::new(Mutex::new(CapitalAllocationSnapshot::default())),
         cycle_lock: Arc::new(Mutex::new(())),
         pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
         daily_signal_notify: Arc::new(Notify::new()),

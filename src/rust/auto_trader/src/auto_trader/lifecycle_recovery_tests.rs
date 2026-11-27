@@ -16,6 +16,7 @@ struct LifecycleResponder {
     learning_routes: Arc<StdMutex<Vec<strategy::ScoutCoordinatorRouteCommand>>>,
     learning_router: Arc<StdMutex<axum::Router>>,
     idempotent_orders: Arc<StdMutex<BTreeMap<String, serde_json::Value>>>,
+    barriers: Arc<StdMutex<BTreeMap<String, serde_json::Value>>>,
     accepted_order_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -124,6 +125,37 @@ impl RSocket for LifecycleResponder {
             ("POST", "/positions/orders") => {
                 let body = request.body.unwrap_or_default();
                 if body["order_type"] == "stop-market" {
+                    let parent_order_id = body["client_order_id"]
+                        .as_str()
+                        .unwrap_or("fixture-stop")
+                        .to_owned();
+                    let barrier_id = format!("fixture-barrier-{parent_order_id}");
+                    let created_at = current_time_ms();
+                    let barrier_order = serde_json::json!({
+                        "id":barrier_id,
+                        "created_at":created_at,
+                        "symbol":body["symbol"],
+                        "side":body["side"],
+                        "order_kind":"stop-market",
+                        "execution_type":"market",
+                        "quantity":body["quantity"],
+                        "remaining_quantity":body["quantity"],
+                        "filled_quantity":0.0,
+                        "average_execution_price":null,
+                        "fee_paid":0.0,
+                        "trigger_price":body["trigger_price"],
+                        "trigger_direction":body["trigger_direction"],
+                        "source":"auto",
+                        "status":"armed",
+                        "parent_order_id":parent_order_id,
+                        "client_order_id":body["client_order_id"],
+                        "lifecycle":body["lifecycle"],
+                        "trigger_adjustments":[]
+                    });
+                    self.barriers
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(barrier_id.clone(), barrier_order.clone());
                     (
                         200,
                         serde_json::json!({
@@ -131,7 +163,7 @@ impl RSocket for LifecycleResponder {
                             "filled_quantity": 0.0,
                             "average_execution_price": null,
                             "estimated_fee": 0.0,
-                            "barrier_order": {"id": "fixture-barrier", "created_at": 1}
+                            "barrier_order": barrier_order
                         }),
                     )
                 } else {
@@ -147,8 +179,10 @@ impl RSocket for LifecycleResponder {
                     let response = idempotent
                         .entry(client_order_id.clone())
                         .or_insert_with(|| {
-                            self.accepted_order_count
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let fill_sequence = self
+                                .accepted_order_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
                             let execution_price = if body["side"] == "buy" { 100.0 } else { 101.0 };
                             serde_json::json!({
                                 "status": "filled",
@@ -159,7 +193,7 @@ impl RSocket for LifecycleResponder {
                                 "unknown_fee_fills": 0,
                                 "fill_evidence": [{
                                     "id": format!("fixture-fill-{client_order_id}"),
-                                    "fill_id": format!("pm-fill:v1:fixture:{client_order_id}"),
+                                    "fill_id": format!("pm-fill:v1:fixture:{fill_sequence}"),
                                     "symbol": body["symbol"],
                                     "side": body["side"],
                                     "quantity": body["quantity"],
@@ -182,7 +216,65 @@ impl RSocket for LifecycleResponder {
                     (200, response.clone())
                 }
             }
-            ("GET", "/positions/barriers") => (200, serde_json::json!([])),
+            ("GET", "/positions/barriers") => (
+                200,
+                serde_json::json!(
+                    self.barriers
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                ),
+            ),
+            ("POST", path)
+                if path.starts_with("/positions/orders/") && path.ends_with("/trigger") =>
+            {
+                let barrier_id = path
+                    .strip_prefix("/positions/orders/")
+                    .and_then(|path| path.strip_suffix("/trigger"))
+                    .unwrap_or_default();
+                let body = request.body.unwrap_or_default();
+                let mut barriers = self
+                    .barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(barrier) = barriers.get_mut(barrier_id) {
+                    barrier["trigger_price"] = body["new_trigger_price"].clone();
+                    let adjusted_at_ms = current_time_ms();
+                    barrier["trigger_adjustments"].as_array_mut().unwrap().push(
+                        serde_json::json!({
+                            "request_id":body["request_id"],
+                            "barrier_id":barrier_id,
+                            "symbol":body["symbol"],
+                            "side":body["side"],
+                            "quantity":body["quantity"],
+                            "parent_order_id":body["expected_parent_order_id"],
+                            "lifecycle_trade_id":body["expected_lifecycle_trade_id"],
+                            "profile_id":body["profile_id"],
+                            "profile_version":body["profile_version"],
+                            "policy_source":body["policy_source"],
+                            "reason":body["reason"],
+                            "target_net_return_percent":body["target_net_return_percent"],
+                            "expected_trigger_price":body["expected_trigger_price"],
+                            "new_trigger_price":body["new_trigger_price"],
+                            "adjusted_at_ms":adjusted_at_ms
+                        }),
+                    );
+                    (
+                        200,
+                        serde_json::json!({
+                            "barrier_id":barrier_id,
+                            "request_id":body["request_id"],
+                            "trigger_price":body["new_trigger_price"],
+                            "adjusted_at_ms":adjusted_at_ms,
+                            "idempotent_replay":false
+                        }),
+                    )
+                } else {
+                    (404, serde_json::json!({"error":"barrier missing"}))
+                }
+            }
             ("DELETE", _) => (200, serde_json::json!({})),
             _ => (
                 404,
@@ -332,6 +424,62 @@ fn versioned_lifecycle_dashboard(fixture_index: usize, source_key: &str) -> Dash
     dashboard
 }
 
+fn exit_profile_policy(
+    symbol: &str,
+    strategy: &str,
+    stop_loss_percent: f64,
+    take_profit_percent: f64,
+    as_of_ms: u64,
+) -> strategy::LearnedExitProtectionPolicy {
+    strategy::LearnedExitProtectionPolicy {
+        symbol: symbol.to_owned(),
+        strategy: strategy.to_owned(),
+        profile_id: None,
+        profile_version: None,
+        stop_loss_percent: Some(stop_loss_percent),
+        take_profit_percent: Some(take_profit_percent),
+        activation_percent: 0.20,
+        giveback_percent: 0.15,
+        minimum_lock_percent: 0.10,
+        maximum_holding_duration_ms: None,
+        trailing_activation_percent: None,
+        trailing_distance_percent: None,
+        breakeven_activation_percent: None,
+        sample_count: 40,
+        training_count: 30,
+        validation_count: 10,
+        baseline_validation_mean_percent: 0.10,
+        selected_validation_mean_percent: 0.15,
+        validation_gain_percent: 0.05,
+        validation_positive_rate: 0.70,
+        validation_negative_difference_rate: 0.20,
+        validation_tenth_percentile_difference_percent: -0.10,
+        validation_worst_difference_percent: -0.25,
+        as_of_ms,
+    }
+}
+
+fn profile_exit_signal(symbol: &str, strategy: &str, timestamp: u64) -> Signal {
+    Signal {
+        range_location: None,
+        symbol: symbol.to_owned(),
+        direction: "bullish".into(),
+        strength: 1.0,
+        timestamp,
+        stale: false,
+        score: 1.0,
+        ranging_probability: None,
+        components: SignalComponents::default(),
+        strategy_candidate: true,
+        strategy: Some(strategy.to_owned()),
+        strategy_decision: Some(serde_json::json!({})),
+        market_regime: None,
+        market_state: None,
+        news_attribution: None,
+        entry_gate: Some(serde_json::json!({"selection_mode":"exploratory"})),
+    }
+}
+
 fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
     // SAFETY: this fixture serializes its own environment mutations and restores
     // each variable before returning. The test harness is single-process.
@@ -375,6 +523,31 @@ fn assert_json_close(expected: &serde_json::Value, actual: &serde_json::Value, p
     }
 }
 
+async fn learning_json_request(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    payload: Option<serde_json::Value>,
+) -> (u16, serde_json::Value) {
+    let mut request = axum::http::Request::builder().method(method).uri(path);
+    let body = match payload {
+        Some(payload) => {
+            request = request.header("content-type", "application/json");
+            axum::body::Body::from(serde_json::to_vec(&payload).unwrap())
+        }
+        None => axum::body::Body::empty(),
+    };
+    let response = router
+        .clone()
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
 struct EndpointEnvironmentRestore {
     position: Option<std::ffi::OsString>,
     learning: Option<std::ffi::OsString>,
@@ -388,6 +561,805 @@ impl Drop for EndpointEnvironmentRestore {
         restore_env("PAPER_EXCHANGE_RSOCKET_URL", self.paper_exchange.take());
         crate::service_rpc::clear_rpc_client_pool_for_tests();
     }
+}
+
+#[tokio::test]
+async fn selected_exit_profiles_survive_global_fallback_updates_and_reach_barriers() {
+    let _environment = super::service_endpoint_environment_lock();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let endpoint = format!("ws://{address}");
+    let responder = LifecycleResponder::default();
+    let service = responder.clone();
+    let server = tokio::spawn(async move {
+        RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_, _| Ok(Box::new(service.clone()))))
+            .serve()
+            .await
+            .expect("exit profile fixture RSocket must run");
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let _restore_endpoints = EndpointEnvironmentRestore {
+        position: std::env::var_os("POSITION_MANAGEMENT_RSOCKET_URL"),
+        learning: std::env::var_os("LEARNING_RSOCKET_URL"),
+        paper_exchange: std::env::var_os("PAPER_EXCHANGE_RSOCKET_URL"),
+    };
+    unsafe {
+        std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &endpoint);
+    }
+
+    let now_ms = current_time_ms();
+    let mut initial_settings = Settings::default();
+    initial_settings.stop_loss_percent = 0.20;
+    initial_settings.take_profit_percent = 0.75;
+    initial_settings.risk_appetite = 0.0;
+    initial_settings.closed_trade_returns_percent = vec![1.0; EXTENDED_HOLD_MIN_SAMPLES];
+    adapt_exit_policy(&mut initial_settings);
+    let low_appetite_fallback = initial_settings.take_profit_percent;
+    let mut high_appetite_settings = Settings::default();
+    high_appetite_settings.stop_loss_percent = 0.20;
+    high_appetite_settings.take_profit_percent = 0.75;
+    high_appetite_settings.risk_appetite = 100.0;
+    high_appetite_settings.closed_trade_returns_percent = vec![1.0; EXTENDED_HOLD_MIN_SAMPLES];
+    adapt_exit_policy(&mut high_appetite_settings);
+    let high_appetite_fallback = high_appetite_settings.take_profit_percent;
+    assert_ne!(low_appetite_fallback, high_appetite_fallback);
+
+    let mut base = Settings::default();
+    base.stop_loss_percent = 0.20;
+    base.take_profit_percent = 0.75;
+    base.max_order_notional = 100.0;
+    base.daily_notional_limit = 1_000.0;
+    for strategy in [Strategy::LiveMomentum, Strategy::LiveOrderBook] {
+        if !base.strategies.contains(&strategy) {
+            base.strategies.push(strategy);
+        }
+    }
+    base.closed_trade_returns_percent = vec![1.0; EXTENDED_HOLD_MIN_SAMPLES];
+    base.paper_learning_exploration_until_ms = now_ms.saturating_add(60_000);
+    let state = strategy_cleanup_integration_tests::test_state(base.clone());
+    let market = serde_json::json!({
+        "symbol_freshness":{"contract_version":1,"state":"fresh","max_age_ms":5000},
+        "updated_at_ms":now_ms,
+        "bids":[{"price":100.0,"size":100.0}],
+        "asks":[{"price":100.1,"size":100.0}]
+    });
+    let mut actual_profiles = Vec::new();
+    let mut first_momentum_plan = None;
+    let mut same_profile_risk_budgets = Vec::new();
+    let mut client_sequence = 1_u64;
+
+    // Repeat BTC/live-momentum at both risk-appetite extremes to prove the
+    // global fallback changes while the selected validated policy does not.
+    let cases = [
+        ("BTC-USDT", "live-momentum", 0.60, 0.90, 0.0, true),
+        // Same symbol, strategy, confidence and global safety fallback with a
+        // wider validated stop. The selected notional must fall accordingly.
+        ("BTC-USDT", "live-momentum", 1.20, 1.80, 0.0, false),
+        ("BTC-USDT", "live-momentum", 0.60, 0.90, 100.0, false),
+        ("BTC-USDT", "live-order-book", 0.80, 1.20, 100.0, true),
+        ("ETH-USDT", "live-momentum", 0.90, 1.50, 100.0, true),
+        // At risk_appetite 0 these selected policy values equal the global
+        // fallback; source must still come from the explicit selector.
+        ("SOL-USDT", "live-momentum", 0.20, 0.75, 0.0, false),
+    ];
+    for (symbol, strategy_name, stop, target, risk_appetite, create_position) in cases {
+        let mut settings = state.settings.lock().await.clone();
+        settings.risk_appetite = risk_appetite;
+        settings.stop_loss_percent = 0.20;
+        settings.take_profit_percent = 0.75;
+        adapt_exit_policy(&mut settings);
+        let (stop, target) = if symbol == "SOL-USDT" {
+            (settings.stop_loss_percent, settings.take_profit_percent)
+        } else {
+            (stop, target)
+        };
+        settings.paper_learning_exploration_until_ms = now_ms.saturating_add(60_000);
+        let strategy_kind =
+            Strategy::from_name(strategy_name).expect("fixture strategy is registered");
+        let profile_parameters = strategy_kind
+            .parameter_specs()
+            .iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let profile_id = strategy::profile_id(symbol, strategy_name, &profile_parameters);
+        let profile_version = 1;
+        settings.learned_profiles.insert(
+            format!("{symbol}:{strategy_name}"),
+            strategy::StrategyProfile {
+                profile_id: profile_id.clone(),
+                version: profile_version,
+                symbol: symbol.to_owned(),
+                strategy: strategy_name.to_owned(),
+                parameters: profile_parameters,
+                learning_samples: 40,
+                positive_samples: 24,
+                realized_pnl: 2.0,
+            },
+        );
+        let mut policy = exit_profile_policy(symbol, strategy_name, stop, target, now_ms);
+        policy.profile_id = Some(profile_id.clone());
+        policy.profile_version = Some(profile_version);
+        policy.trailing_activation_percent = Some(if strategy_name == "live-momentum" {
+            0.30
+        } else {
+            0.60
+        });
+        policy.trailing_distance_percent = Some(if strategy_name == "live-momentum" {
+            0.10
+        } else {
+            0.20
+        });
+        policy.breakeven_activation_percent = Some(if strategy_name == "live-momentum" {
+            0.25
+        } else {
+            0.50
+        });
+        assert!(valid_exit_protection_policy(&policy, now_ms));
+        settings.learned_exit_protection_policies.insert(
+            exit_protection_policy_key(symbol, strategy_name, &profile_id, profile_version),
+            policy,
+        );
+        let mut signal = profile_exit_signal(symbol, strategy_name, now_ms);
+        inject_learned_parameters(&settings, &mut signal);
+        let dashboard = Dashboard {
+            best: vec![signal.clone()],
+            missed_opportunity_bands: Arc::new(Vec::new()),
+            markets: Arc::new(BTreeMap::new()),
+            queued_at: None,
+            queue_wait_ms: None,
+        };
+        let plan = prepare_signal_execution_plan(
+            &state,
+            settings.clone(),
+            &signal,
+            &dashboard,
+            &market,
+            now_ms,
+            1.0,
+            true,
+            false,
+            settings.stop_loss_percent,
+            settings.take_profit_percent,
+        )
+        .await
+        .expect("eligible profile with bounded paper exploration gets an execution plan");
+        assert!((plan.effective_stop_loss_percent - stop).abs() < 1e-12);
+        assert!((plan.effective_take_profit_percent - target).abs() < 1e-12);
+        assert_eq!(
+            plan.exit_parameter_provenance["stop_loss"]["source"],
+            "validated_exit_policy"
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["take_profit"]["source"],
+            "validated_exit_policy"
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["trailing_protection"]["source"],
+            "validated_exit_policy"
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["trailing_protection"]["activation_percent"],
+            if strategy_name == "live-momentum" {
+                0.30
+            } else {
+                0.60
+            }
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["trailing_protection"]["distance_percent"],
+            if strategy_name == "live-momentum" {
+                0.10
+            } else {
+                0.20
+            }
+        );
+        for parameter in [
+            "activation_percent",
+            "giveback_percent",
+            "minimum_lock_percent",
+        ] {
+            assert!(
+                plan.exit_parameter_provenance["profit_protection"][parameter]
+                    .as_f64()
+                    .is_some_and(|value| value.is_finite() && value >= 0.0)
+            );
+        }
+        assert_eq!(
+            plan.exit_parameter_provenance["profit_protection"]["source"],
+            "validated_exit_policy"
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["risk_appetite_at_selection"],
+            risk_appetite
+        );
+        assert_eq!(
+            plan.exit_parameter_provenance["volatility_stop_adjustment"]["source"],
+            if plan.exit_parameter_provenance["volatility_stop_adjustment"]["applied"] == true {
+                "volatility_adjusted_strategy_profile"
+            } else {
+                "strategy_profile_unmodified"
+            }
+        );
+        if symbol == "BTC-USDT" && strategy_name == "live-momentum" && risk_appetite == 0.0 {
+            let round_trip_cost_bps = 2.0 * configured_taker_fee_rate() * 10_000.0
+                + signal
+                    .components
+                    .aggressor_cost_bps
+                    .filter(|cost| cost.is_finite() && *cost > 0.0)
+                    .unwrap_or(0.0);
+            same_profile_risk_budgets.push(
+                plan.notional * (plan.effective_stop_loss_percent + round_trip_cost_bps / 100.0)
+                    / 100.0,
+            );
+        }
+        if symbol == "SOL-USDT" {
+            assert_eq!(stop, settings.stop_loss_percent);
+            assert_eq!(target, settings.take_profit_percent);
+            assert_eq!(
+                plan.exit_parameter_provenance["stop_loss"]["source"],
+                "validated_exit_policy"
+            );
+            assert_eq!(
+                plan.exit_parameter_provenance["take_profit"]["source"],
+                "validated_exit_policy"
+            );
+        }
+        if strategy_name == "live-momentum" && symbol == "BTC-USDT" {
+            if (stop - 0.60).abs() < 1e-12 && risk_appetite == 0.0 {
+                first_momentum_plan = Some((
+                    plan.effective_stop_loss_percent,
+                    plan.effective_take_profit_percent,
+                    plan.exit_parameter_provenance.clone(),
+                ));
+            } else if (stop - 0.60).abs() < 1e-12 {
+                let (first_stop, first_target, _) = first_momentum_plan
+                    .as_ref()
+                    .expect("the baseline profile parameters are exercised first");
+                assert_eq!(plan.effective_stop_loss_percent, *first_stop);
+                assert_eq!(plan.effective_take_profit_percent, *first_target);
+            } else if (stop - 1.20).abs() < 1e-12 {
+                let (first_stop, first_target, _) = first_momentum_plan
+                    .as_ref()
+                    .expect("baseline policy is captured before the wider-stop profile");
+                assert_ne!(plan.effective_stop_loss_percent, *first_stop);
+                assert_ne!(plan.effective_take_profit_percent, *first_target);
+            }
+        }
+
+        if !create_position {
+            continue;
+        }
+
+        let decision_id = format!("exit-profile-decision-{client_sequence}");
+        let opportunity_id = format!("exit-profile-opportunity-{client_sequence}");
+        let profile_id = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("learning_profile_id"))
+            .and_then(serde_json::Value::as_str)
+            .expect("selected signal carries its profile ID")
+            .to_owned();
+        let profile_version = signal
+            .strategy_decision
+            .as_ref()
+            .and_then(|decision| decision.get("learning_profile_version"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let identity = CanonicalLifecycleIdentity {
+            schema_version: 1,
+            opportunity_id: opportunity_id.clone(),
+            episode_id: format!("exit-profile-episode-{client_sequence}"),
+            trade_id: decision_id.clone(),
+            profile_id: Some(profile_id),
+            profile_hash: None,
+            profile_version: Some(profile_version),
+            execution_mode: "paper".into(),
+            entry_policy: "exploratory".into(),
+            source: "auto_trader_entry_reservation".into(),
+        };
+        let side = "buy";
+        apply_strategy_position_fill(
+            &mut settings.strategy_positions,
+            &mut settings.positions,
+            symbol,
+            strategy_name,
+            side,
+            1.0,
+            100.0,
+            0.01,
+            "Limit",
+            "profile-exit-fixture",
+            true,
+            None,
+            Some(&decision_id),
+            signal.strategy_decision.as_ref(),
+            Some(plan.effective_stop_loss_percent),
+            Some(plan.effective_take_profit_percent),
+        );
+        settings
+            .canonical_lifecycle_links
+            .insert(decision_id.clone(), identity.clone());
+        let position = settings
+            .strategy_positions
+            .get_mut(symbol)
+            .and_then(|lots| lots.get_mut(strategy_name))
+            .expect("profile plan creates one strategy position");
+        position.entry_decision_id = Some(decision_id.clone());
+        position.trade_id = Some(decision_id.clone());
+        position.lifecycle_identity = Some(identity);
+        position.exit_parameter_provenance = Some(plan.exit_parameter_provenance.clone());
+        let request_body = serde_json::json!({
+            "client_order_id": opportunity_id,
+            "symbol": symbol,
+            "side": side
+        });
+        let fill_response = serde_json::json!({
+            "filled_quantity": 1.0,
+            "estimated_fee": 0.01,
+            "fee_complete": true,
+            "fill_evidence":[{
+                "id":format!("profile-fill-row-{client_sequence}"),
+                "fill_id":format!("pm-fill:v1:exit-profile:{client_sequence}"),
+                "parent_order_id":request_body["client_order_id"],
+                "client_order_id":request_body["client_order_id"],
+                "symbol":symbol,
+                "side":side,
+                "quantity":1.0,
+                "execution_price":100.0,
+                "fee":0.01,
+                "fee_known":true,
+                "fee_currency":"USDT"
+            }]
+        });
+        update_initial_risk_reference(
+            position,
+            &fill_response,
+            &request_body,
+            plan.effective_stop_loss_percent,
+        );
+        append_entry_fill_evidence(position, &fill_response, &request_body);
+        assert_eq!(
+            position.initial_risk_reference.as_ref().unwrap().status,
+            "complete"
+        );
+        assert_eq!(
+            position.strategy_decision.as_ref().unwrap()["strategy_parameters"]["trailing_activation_percent"],
+            if strategy_name == "live-momentum" {
+                0.30
+            } else {
+                0.60
+            }
+        );
+        assert_eq!(
+            position.strategy_decision.as_ref().unwrap()["strategy_parameters"]["trailing_distance_percent"],
+            if strategy_name == "live-momentum" {
+                0.10
+            } else {
+                0.20
+            }
+        );
+        assert_eq!(
+            position.strategy_decision.as_ref().unwrap()["strategy_parameters"]["breakeven_activation_percent"],
+            if strategy_name == "live-momentum" {
+                0.25
+            } else {
+                0.50
+            }
+        );
+        let selected_stop = position.stop_loss_percent.unwrap();
+        let selected_target = position.take_profit_percent.unwrap();
+        settings = settings.clone();
+        *state.settings.lock().await = settings.clone();
+        arm_protective_stop(
+            &state,
+            symbol,
+            strategy_name,
+            "buy",
+            1.0,
+            100.0,
+            0.01,
+            Some(selected_stop),
+            None,
+        )
+        .await
+        .expect("the actual paper protective barrier accepts selected profile stop");
+        actual_profiles.push((symbol, strategy_name, selected_stop, selected_target));
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        client_sequence = client_sequence.saturating_add(1);
+    }
+
+    assert_eq!(same_profile_risk_budgets.len(), 2);
+    assert!(
+        (same_profile_risk_budgets[0] - same_profile_risk_budgets[1]).abs() < 1e-9,
+        "widening the selected stop must preserve the capped monetary risk including execution costs: {same_profile_risk_budgets:?}"
+    );
+
+    assert!(
+        (high_appetite_fallback - low_appetite_fallback).abs() > 1e-6,
+        "global fallback actually varies with risk appetite"
+    );
+    assert_eq!(actual_profiles.len(), 3);
+    assert!(actual_profiles.contains(&("BTC-USDT", "live-momentum", 0.60, 0.90)));
+    assert!(actual_profiles.contains(&("BTC-USDT", "live-order-book", 0.80, 1.20)));
+    assert!(actual_profiles.contains(&("ETH-USDT", "live-momentum", 0.90, 1.50)));
+
+    let barrier_requests = responder
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == "POST" && request.path == "/positions/orders")
+        .filter_map(|request| request.body.clone())
+        .filter(|body| body["order_type"] == "stop-market")
+        .collect::<Vec<_>>();
+    assert_eq!(barrier_requests.len(), 3);
+    let persisted_positions = state.settings.lock().await.clone();
+    for (symbol, strategy_name, stop, _) in &actual_profiles {
+        let profile_id = persisted_positions
+            .strategy_positions
+            .get(*symbol)
+            .unwrap()
+            .get(*strategy_name)
+            .unwrap()
+            .lifecycle_identity
+            .as_ref()
+            .and_then(|identity| identity.profile_id.as_deref())
+            .expect("position retains selected profile identity");
+        let request = barrier_requests
+            .iter()
+            .find(|request| {
+                request["symbol"] == *symbol && request["lifecycle"]["profile_id"] == profile_id
+            })
+            .expect("protective barrier retains the selected profile identity");
+        let fee_rate = configured_taker_fee_rate();
+        let expected_trigger = (100.0 * (1.0 - stop / 100.0) + 0.01) / (1.0 - fee_rate);
+        assert!((request["trigger_price"].as_f64().unwrap() - expected_trigger).abs() < 1e-10);
+        assert_eq!(request["trigger_direction"], "below");
+    }
+
+    let btc_momentum = &actual_profiles[0];
+    assert_eq!(
+        position_exit_reason(
+            false,
+            false,
+            false,
+            false,
+            false,
+            0.0,
+            btc_momentum.2,
+            false,
+            false,
+            false,
+            false,
+            0.01,
+            btc_momentum.3
+        ),
+        Some("take-profit")
+    );
+    let btc_order_book = &actual_profiles[1];
+    assert_eq!(
+        position_exit_reason(
+            false,
+            false,
+            false,
+            false,
+            false,
+            0.0,
+            btc_order_book.2,
+            false,
+            false,
+            false,
+            false,
+            0.01,
+            btc_order_book.3
+        ),
+        None
+    );
+    assert_eq!(
+        position_exit_reason(
+            false,
+            false,
+            false,
+            false,
+            false,
+            -0.007,
+            btc_momentum.2,
+            false,
+            false,
+            false,
+            false,
+            0.0,
+            btc_momentum.3
+        ),
+        Some("stop-loss")
+    );
+    assert_eq!(
+        position_exit_reason(
+            false,
+            false,
+            false,
+            false,
+            false,
+            -0.007,
+            btc_order_book.2,
+            false,
+            false,
+            false,
+            false,
+            0.0,
+            btc_order_book.3
+        ),
+        None
+    );
+
+    let settings = state.settings.lock().await.clone();
+    let durable_path = unique_path("exit-profile-restart").with_extension("sqlite");
+    persist_durable_settings_snapshot(&durable_path, &settings).unwrap();
+    let restored = read_settings_database(&durable_path).unwrap().unwrap();
+    for (symbol, strategy_name, selected_stop, selected_target) in &actual_profiles {
+        let restored_position = restored
+            .strategy_positions
+            .get(*symbol)
+            .unwrap()
+            .get(*strategy_name)
+            .unwrap();
+        assert_eq!(restored_position.stop_loss_percent, Some(*selected_stop));
+        assert_eq!(
+            restored_position.take_profit_percent,
+            Some(*selected_target)
+        );
+        let provenance = restored_position
+            .exit_parameter_provenance
+            .as_ref()
+            .unwrap();
+        assert_eq!(provenance["stop_loss"]["selected_percent"], *selected_stop);
+        assert_eq!(
+            provenance["take_profit"]["selected_percent"],
+            *selected_target
+        );
+        assert_eq!(
+            provenance["risk_appetite_at_selection"].as_f64().is_some(),
+            true
+        );
+        let risk = restored_position.initial_risk_reference.as_ref().unwrap();
+        assert_eq!(risk.status, "complete");
+        assert!((risk.quote_amount.unwrap() - selected_stop).abs() < 1e-12);
+    }
+
+    let _ = std::fs::remove_file(&state.settings_path);
+    let _ = std::fs::remove_file(&durable_path);
+    let _ = std::fs::remove_file(durable_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(durable_path.with_extension("sqlite-shm"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn profile_trailing_barrier_update_survives_lost_ack_and_keeps_initial_risk() {
+    let _environment = super::service_endpoint_environment_lock();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let endpoint = format!("ws://{address}");
+    let responder = LifecycleResponder::default();
+    let trade_id = "profile-trailing-trade-v1";
+    let profile_id = "profile-trailing-live-momentum-v1";
+    let barrier_id = "profile-trailing-barrier-v1";
+    responder.barriers.lock().unwrap().insert(
+        barrier_id.into(),
+        serde_json::json!({
+            "id":barrier_id,
+            "created_at":100u64,
+            "symbol":"BTC-USDT",
+            "side":"sell",
+            "order_kind":"stop-market",
+            "execution_type":"market",
+            "quantity":1.0,
+            "remaining_quantity":1.0,
+            "filled_quantity":0.0,
+            "average_execution_price":null,
+            "fee_paid":0.0,
+            "trigger_price":99.60960960960962,
+            "trigger_direction":"below",
+            "source":"auto",
+            "status":"armed",
+            "parent_order_id":"auto-stop-BTC-USDT-100",
+            "client_order_id":"auto-stop-BTC-USDT-100",
+            "lifecycle": {
+                "schema_version":1,
+                "opportunity_id":"profile-trailing-opportunity-v1",
+                "episode_id":"profile-trailing-episode-v1",
+                "trade_id":trade_id,
+                "profile_id":profile_id,
+                "profile_hash":"profile-hash-v1",
+                "profile_version":1,
+                "execution_mode":"paper",
+                "entry_policy":"strict",
+                "source":"auto_trader_entry_reservation"
+            },
+            "trigger_adjustments":[]
+        }),
+    );
+    let service = responder.clone();
+    let server = tokio::spawn(async move {
+        RSocketFactory::receive()
+            .transport(WebsocketServerTransport::from(address.to_string()))
+            .acceptor(Box::new(move |_, _| Ok(Box::new(service.clone()))))
+            .serve()
+            .await
+            .expect("profile barrier fixture RSocket must run");
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let _restore_endpoints = EndpointEnvironmentRestore {
+        position: std::env::var_os("POSITION_MANAGEMENT_RSOCKET_URL"),
+        learning: std::env::var_os("LEARNING_RSOCKET_URL"),
+        paper_exchange: std::env::var_os("PAPER_EXCHANGE_RSOCKET_URL"),
+    };
+    unsafe {
+        std::env::set_var("POSITION_MANAGEMENT_RSOCKET_URL", &endpoint);
+    }
+
+    let lifecycle = CanonicalLifecycleIdentity {
+        schema_version: 1,
+        opportunity_id: "profile-trailing-opportunity-v1".into(),
+        episode_id: "profile-trailing-episode-v1".into(),
+        trade_id: trade_id.into(),
+        profile_id: Some(profile_id.into()),
+        profile_hash: Some("profile-hash-v1".into()),
+        profile_version: Some(1),
+        execution_mode: "paper".into(),
+        entry_policy: "strict".into(),
+        source: "auto_trader_entry_reservation".into(),
+    };
+    let mut position = TraderPosition {
+        quantity: 1.0,
+        average_entry_price: 100.0,
+        entry_fees: 0.01,
+        initial_entry_notional: 100.0,
+        entries: 1,
+        entry_order_type: "Limit".into(),
+        entry_decision_id: Some("profile-trailing-decision-v1".into()),
+        trade_id: Some(trade_id.into()),
+        lifecycle_identity: Some(lifecycle.clone()),
+        strategy: Some("live-momentum".into()),
+        strategy_decision: Some(serde_json::json!({
+            "learning_profile_id":profile_id,
+            "learning_profile_version":1,
+            "strategy_parameters": {
+                "stop_loss_percent":0.5,
+                "take_profit_percent":0.8,
+                "trailing_activation_percent":0.30,
+                "trailing_distance_percent":0.10,
+                "breakeven_activation_percent":0.25
+            }
+        })),
+        stop_loss_percent: Some(0.5),
+        take_profit_percent: Some(0.8),
+        exit_parameter_provenance: Some(serde_json::json!({
+            "profile_id":profile_id,
+            "profile_version":1,
+            "exit_policy_profile_id":profile_id,
+            "exit_policy_profile_version":1,
+            "trailing_protection": {"source":"validated_exit_policy", "activation_percent":0.30, "distance_percent":0.10},
+            "breakeven_protection": {"source":"validated_exit_policy", "activation_percent":0.25}
+        })),
+        initial_risk_reference: Some(InitialRiskReference {
+            schema_version: 1,
+            quote_currency: Some("USDT".into()),
+            stop_loss_percent: Some(0.5),
+            quote_amount: Some(0.5),
+            fill_ids: vec!["pm-fill:v1:entry:1".into()],
+            status: "complete".into(),
+        }),
+        trailing_peak_return_percent: Some(0.40),
+        entry_timestamp_ms: 100,
+        ..TraderPosition::default()
+    };
+    position.protective_stops.push(ProtectiveStop {
+        barrier_id: barrier_id.into(),
+        strategy: "live-momentum".into(),
+        order_timestamp: 100,
+        quantity: 1.0,
+        processed_quantity: 0.0,
+        processed_notional: 0.0,
+        processed_fee: 0.0,
+    });
+    let mut settings = Settings::default();
+    settings.strategies.push(Strategy::LiveMomentum);
+    settings
+        .positions
+        .insert("BTC-USDT".into(), position.clone());
+    settings.strategy_positions.insert(
+        "BTC-USDT".into(),
+        BTreeMap::from([("live-momentum".into(), position)]),
+    );
+    settings
+        .canonical_lifecycle_links
+        .insert("profile-trailing-decision-v1".into(), lifecycle);
+    settings.orders.push(new_protective_stop_order(
+        100,
+        "BTC-USDT",
+        "sell",
+        "live-momentum".into(),
+        Some("profile-trailing-decision-v1".into()),
+        1.0,
+        99.60960960960962,
+        barrier_id.into(),
+    ));
+    let state = strategy_cleanup_integration_tests::test_state(settings);
+
+    ensure_protective_stops(&state)
+        .await
+        .expect("entry-captured trailing policy tightens the protected barrier");
+    let first_update = responder
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.method == "POST" && request.path.ends_with("/trigger"))
+        .and_then(|request| request.body.clone())
+        .expect("profile threshold reaches the Position Management trigger route");
+    assert_eq!(first_update["profile_id"], profile_id);
+    assert_eq!(first_update["profile_version"], 1);
+    assert_eq!(first_update["policy_source"], "validated_exit_policy");
+    assert_eq!(first_update["reason"], "trailing-stop");
+    assert!((first_update["target_net_return_percent"].as_f64().unwrap() - 0.30).abs() < 1e-12);
+    assert!(first_update["new_trigger_price"].as_f64().unwrap() > 99.60960960960962);
+
+    {
+        let mut settings = state.settings.lock().await;
+        settings
+            .strategy_positions
+            .get_mut("BTC-USDT")
+            .unwrap()
+            .get_mut("live-momentum")
+            .unwrap()
+            .exit_parameter_provenance
+            .as_mut()
+            .unwrap()["protection_adjustments"] = serde_json::json!([]);
+    }
+    persist_settings_snapshot_durable(&state)
+        .await
+        .expect("lost acknowledgment fixture state is durable before recovery");
+    ensure_protective_stops(&state)
+        .await
+        .expect("durable PM adjustment history recovers the local audit record");
+    let request_count = responder
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == "POST" && request.path.ends_with("/trigger"))
+        .count();
+    assert_eq!(
+        request_count, 1,
+        "recovery must not repeat the barrier update"
+    );
+    let recovered = state.settings.lock().await;
+    let position = &recovered.strategy_positions["BTC-USDT"]["live-momentum"];
+    let adjustments =
+        position.exit_parameter_provenance.as_ref().unwrap()["protection_adjustments"]
+            .as_array()
+            .unwrap();
+    assert_eq!(adjustments.len(), 1);
+    assert_eq!(adjustments[0]["request_id"], first_update["request_id"]);
+    assert_eq!(adjustments[0]["recovered_from_durable_pm_barrier"], true);
+    assert_eq!(
+        position
+            .initial_risk_reference
+            .as_ref()
+            .unwrap()
+            .quote_amount,
+        Some(0.5)
+    );
+    drop(recovered);
+    server.abort();
+    crate::service_rpc::clear_rpc_client_pool_for_tests();
 }
 
 #[tokio::test]
@@ -467,21 +1439,6 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
     // persist_settings_snapshot writes SQLite directly at settings_path; the
     // .sqlite sibling is only used by the settings JSON-path resolver.
     let sqlite_path = state.settings_path.clone();
-    let strategy = Strategy::from_name("live-momentum").unwrap();
-    let budget = {
-        let settings = state.settings.lock().await;
-        signal_weighted_strategy_budget(
-            &settings,
-            &dashboard,
-            strategy,
-            StrategyCategory::Intraday,
-            current_time_ms(),
-        )
-    };
-    assert!(
-        budget > 0.0,
-        "fresh active candidate must retain its opportunity floor"
-    );
     let result = run_cycle_inner(&state, dashboard).await.unwrap();
     assert_eq!(
         result.status, "order_submitting",
@@ -542,6 +1499,18 @@ async fn selected_entry_exit_outbox_and_sqlite_restart_keep_one_lifecycle() {
         Some(decision_id.as_str()),
         "position retains the reservation lookup key used to recover canonical trade identity"
     );
+    assert_eq!(position.lifecycle_identity.as_ref(), Some(&identity));
+    assert_eq!(position.entry_fill_links.len(), 1);
+    assert_eq!(position.entry_fill_links[0].symbol, entry_order.symbol);
+    assert_eq!(
+        position.entry_fill_links[0].client_order_id,
+        identity.opportunity_id
+    );
+    assert_eq!(
+        position.initial_risk_reference.as_ref().unwrap().status,
+        "complete"
+    );
+    assert!(position.price_path_epoch.is_some());
 
     // Replaying a fresh production cycle for the same stable worker event must
     // stop at the durable exploratory reservation check, before the existing
@@ -1706,6 +2675,11 @@ async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restar
         recovered_order.decision_id.as_deref(),
         "AutoTrader position retains the durable reservation lookup key"
     );
+    assert_eq!(position.entry_fill_links.len(), 1);
+    assert_eq!(
+        position.initial_risk_reference.as_ref().unwrap().status,
+        "complete"
+    );
     let recovered_pm_history =
         crate::service_rpc::position_request_at(&pm_endpoint, "GET", "/positions/trades", None)
             .await
@@ -1797,6 +2771,422 @@ async fn lost_pm_ack_replays_durable_entry_once_after_autotrader_settings_restar
     let _ = std::fs::remove_file(&pm_db_path);
     let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(pm_db_path.with_extension("sqlite-shm"));
+    let _ = std::fs::remove_file(&learning_db_path);
+    let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-shm"));
+}
+
+#[tokio::test]
+async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evidence() {
+    // All prices and fills below are deterministic isolated fixtures. They
+    // exercise producer and consumer contracts; they are not historical or
+    // empirical trading evidence.
+    let learning_db_path = unique_path("executable-path-learning").with_extension("sqlite");
+    let learning_router = learning::router(learning_db_path.clone()).unwrap();
+    let symbol = "BTC-USDT";
+    let strategy_name = "live-momentum";
+    let mut specs = Strategy::LiveMomentum
+        .parameter_specs()
+        .into_iter()
+        .map(|spec| strategy::ParameterSpec {
+            key: spec.key.as_str().to_owned(),
+            label: spec.label.to_owned(),
+            default: spec.default,
+            min: spec.min,
+            max: spec.max,
+            step: spec.step,
+            unit: spec.unit.to_owned(),
+            learning_direction: spec.learning_direction,
+        })
+        .collect::<Vec<_>>();
+    let mut parameters = specs
+        .iter()
+        .map(|spec| (spec.key.clone(), spec.default))
+        .collect::<BTreeMap<_, _>>();
+    for (key, value) in [
+        ("stop_loss_percent", 0.50),
+        ("take_profit_percent", 0.80),
+        ("profit_protection_activation_percent", 0.30),
+        ("profit_protection_giveback_percent", 0.15),
+        ("profit_protection_minimum_lock_percent", 0.05),
+        ("trailing_activation_percent", 0.30),
+        ("trailing_distance_percent", 0.10),
+        ("breakeven_activation_percent", 0.25),
+    ] {
+        if let Some(spec) = specs.iter().find(|spec| spec.key == key) {
+            assert!(
+                (spec.min..=spec.max).contains(&value),
+                "fixture {key} is in bounds"
+            );
+            parameters.insert(key.to_owned(), value);
+        }
+    }
+    let profile_id = strategy::profile_id(symbol, strategy_name, &parameters);
+    let profile_registration = strategy::StrategyProfileRegistration {
+        profile: strategy::StrategyProfile {
+            profile_id: profile_id.clone(),
+            version: 1,
+            symbol: symbol.to_owned(),
+            strategy: strategy_name.to_owned(),
+            parameters: parameters.clone(),
+            learning_samples: 0,
+            positive_samples: 0,
+            realized_pnl: 0.0,
+        },
+        specs: std::mem::take(&mut specs),
+    };
+    let (status, _) = learning_json_request(
+        &learning_router,
+        "POST",
+        "/profiles",
+        Some(serde_json::to_value(profile_registration).unwrap()),
+    )
+    .await;
+    assert_eq!(status, 202, "Learning accepts the exact fixture profile");
+
+    let observed_at_ms = current_time_ms();
+    let horizon_ms = 30 * 60 * 1_000;
+    let exit_timestamp_ms = observed_at_ms.saturating_sub(horizon_ms);
+    let entry_timestamp_ms = exit_timestamp_ms.saturating_sub(20_000);
+    let path_epoch = "auto-trader-position-path:v1:fixture:trade-1";
+    let entry_fill_id = "pm-fill:v1:fixture-entry:1";
+    let exit_fill_id = "pm-fill:v1:fixture-exit:1";
+    let identity = CanonicalLifecycleIdentity {
+        schema_version: 1,
+        opportunity_id: "fixture-opportunity-1".into(),
+        episode_id: "fixture-episode-1".into(),
+        trade_id: "fixture-trade-1".into(),
+        profile_id: Some(profile_id.clone()),
+        profile_hash: Some("fixture-profile-hash-v1".into()),
+        profile_version: Some(1),
+        execution_mode: "paper".into(),
+        entry_policy: "exploratory".into(),
+        source: "auto_trader_entry_reservation".into(),
+    };
+    let strategy_decision = serde_json::json!({
+        "learning_profile_id": profile_id.clone(),
+        "learning_profile_version": 1,
+        "strategy_parameters": parameters,
+    });
+    let price_path = [100.10, 99.50, 100.60, 100.20]
+        .into_iter()
+        .enumerate()
+        .map(|(index, bid)| {
+            let timestamp = entry_timestamp_ms + (index as u64 + 1) * 5_000;
+            TradePriceSample {
+                timestamp,
+                bid,
+                ask: bid + 0.02,
+                sequence: index as u64 + 1,
+                epoch: Some(path_epoch.to_owned()),
+                source_updated_at_ms: Some(timestamp.saturating_sub(10)),
+                freshness_contract_version: Some(1),
+                freshness_max_age_ms: Some(5_000),
+                source_fresh: Some(true),
+            }
+        })
+        .collect::<Vec<_>>();
+    let initial_risk = InitialRiskReference {
+        schema_version: 1,
+        quote_currency: Some("USDT".into()),
+        stop_loss_percent: Some(0.50),
+        quote_amount: Some(0.50),
+        fill_ids: vec![entry_fill_id.into()],
+        status: "complete".into(),
+    };
+    let mut position = TraderPosition {
+        quantity: 1.0,
+        average_entry_price: 100.0,
+        entry_fees: 0.01,
+        initial_entry_notional: 100.0,
+        total_fees_paid: 0.01,
+        total_entry_fees_paid: 0.01,
+        entry_fill_ids: vec![entry_fill_id.into()],
+        entry_fill_links: vec![PositionEntryFillLink {
+            fill_id: entry_fill_id.into(),
+            client_order_id: "fixture-entry-order-1".into(),
+            symbol: symbol.into(),
+            side: "buy".into(),
+            quantity: 1.0,
+            execution_price: 100.0,
+            timestamp_ms: Some(entry_timestamp_ms),
+            fee_known: true,
+            fee_amount: Some(0.01),
+            fee_currency: Some("USDT".into()),
+        }],
+        entry_fee_currencies: vec!["USDT".into()],
+        entry_fill_costs_complete: true,
+        initial_risk_reference: Some(initial_risk),
+        entry_context: "BTC:live-momentum:long".into(),
+        entry_decision_id: Some("fixture-entry-decision-1".into()),
+        trade_id: Some(identity.trade_id.clone()),
+        lifecycle_identity: Some(identity.clone()),
+        strategy: Some(strategy_name.into()),
+        strategy_decision: Some(strategy_decision),
+        stop_loss_percent: Some(0.50),
+        take_profit_percent: Some(0.80),
+        exit_parameter_provenance: Some(serde_json::json!({
+            "profile_id":profile_id.clone(),
+            "profile_version":1,
+            "source":"validated_exit_policy",
+            "stop_loss":{"selected_percent":0.50},
+            "take_profit":{"selected_percent":0.80}
+        })),
+        price_path: price_path.clone(),
+        price_path_epoch: Some(path_epoch.into()),
+        price_path_total_samples: price_path.len() as u64,
+        entry_timestamp_ms,
+        ..TraderPosition::default()
+    };
+    let mut settings = Settings::default();
+    settings
+        .strategy_positions
+        .entry(symbol.into())
+        .or_default()
+        .insert(strategy_name.into(), position.clone());
+    let snapshot_path = unique_path("executable-path-restart");
+    persist_durable_settings_snapshot(&snapshot_path, &settings).unwrap();
+    let restored = read_settings_database(&snapshot_path)
+        .unwrap()
+        .expect("durable open position snapshot restores");
+    let restored_position = restored.strategy_positions[symbol][strategy_name].clone();
+    assert_eq!(restored_position.price_path.len(), price_path.len());
+    assert_eq!(
+        restored_position.price_path_total_samples,
+        price_path.len() as u64
+    );
+    assert!(restored_position.price_path_restart_interrupted);
+    assert_ne!(
+        restored_position.price_path_epoch.as_deref(),
+        Some(path_epoch)
+    );
+
+    let exit_response = serde_json::json!({
+        "filled_quantity":1.0,
+        "estimated_fee":0.01,
+        "fee_complete":true,
+        "fill_evidence":[{
+            "id":"fixture-pm-exit-row-1",
+            "fill_id":exit_fill_id,
+            "parent_order_id":"fixture-exit-order-1",
+            "client_order_id":"fixture-exit-order-1",
+            "symbol":symbol,
+            "side":"sell",
+            "quantity":1.0,
+            "execution_price":100.20,
+            "fee":-0.01,
+            "fee_known":true,
+            "fee_currency":"USDT"
+        }]
+    });
+    let build_audit = |position: &TraderPosition| {
+        position_exit_audit_payload(
+            "fixture-entry-decision-1",
+            exit_timestamp_ms,
+            exit_timestamp_ms.saturating_sub(100),
+            symbol,
+            "take-profit",
+            "sell",
+            "Ioc",
+            &exit_response,
+            Some("fixture-exit-order-1"),
+            position.lifecycle_identity.as_ref(),
+            position,
+            1.0,
+            1.0,
+            Some(100.20),
+            0.01,
+            0.18,
+            100.0,
+            0.0018,
+            100.20,
+            100.22,
+            1.0,
+            0.50,
+            0.80,
+            &serde_json::json!({"fixture":"deterministic-executable-path"}),
+        )
+    };
+    let complete_audit = build_audit(&position);
+    assert_eq!(complete_audit["lineage_status"], "complete");
+    assert_eq!(complete_audit["price_path_evidence"]["complete"], true);
+    assert_eq!(
+        complete_audit["price_path_evidence"]["identity_complete"],
+        true
+    );
+    assert_eq!(
+        complete_audit["price_path_evidence"]["policy_evaluation_eligible"],
+        true
+    );
+    assert!(
+        (complete_audit["price_path_evidence"]["gross_executable_mfe_percent"]
+            .as_f64()
+            .unwrap()
+            - 0.60)
+            .abs()
+            < 1e-9
+    );
+    assert!(
+        (complete_audit["price_path_evidence"]["gross_executable_mae_percent"]
+            .as_f64()
+            .unwrap()
+            + 0.50)
+            .abs()
+            < 1e-9
+    );
+    assert_eq!(
+        complete_audit["price_path_evidence"]["fee_adjusted_mfe_mae_status"],
+        "not_computed_without_path_level_execution_costs",
+        "fixture does not claim unmeasured path-level costs"
+    );
+    assert_eq!(complete_audit["realized_r_evidence"]["status"], "complete");
+    assert!(
+        (complete_audit["realized_r_evidence"]["net_realized_r_multiple"]
+            .as_f64()
+            .unwrap()
+            - 0.36)
+            .abs()
+            < 1e-9
+    );
+
+    let interrupted_audit = build_audit(&restored_position);
+    assert_eq!(
+        interrupted_audit["price_path_evidence"]["continuity_complete"],
+        false
+    );
+    assert_eq!(interrupted_audit["price_path_evidence"]["complete"], false);
+    assert_eq!(
+        interrupted_audit["price_path_evidence"]["policy_evaluation_eligible"],
+        false
+    );
+    assert!(
+        interrupted_audit["price_path_evidence"]["missing_coverage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "price_path_restart_interrupted")
+    );
+
+    let mut pending_settings = Settings::default();
+    queue_post_exit_observation(&mut pending_settings, &complete_audit);
+    let pending = pending_settings
+        .post_exit_observations
+        .first()
+        .expect("closed trade creates a post-exit evidence request");
+    assert_eq!(pending["pre_exit_price_path"].as_array().unwrap().len(), 4);
+    assert_eq!(pending["pre_exit_price_path_evidence"]["complete"], true);
+    assert_eq!(pending["realized_r_evidence"]["status"], "complete");
+    assert_eq!(pending["entry_context"]["entry_fill_costs_complete"], true);
+
+    let make_learning_observation = |audit: &serde_json::Value,
+                                     event_id: &str,
+                                     pre_exit_complete: bool| {
+        let post_exit_path = (0..=30)
+            .map(|minute| {
+                let timestamp = exit_timestamp_ms + minute * 60_000;
+                let bid = 100.20 + minute as f64 * 0.001;
+                serde_json::json!({"timestamp":timestamp,"bid":bid,"ask":bid + 0.02})
+            })
+            .collect::<Vec<_>>();
+        let mut pre_exit_evidence = audit["price_path_evidence"].clone();
+        if !pre_exit_complete {
+            pre_exit_evidence["complete"] = serde_json::json!(false);
+        }
+        serde_json::json!({
+            "event_id":event_id,
+            "symbol":symbol,
+            "strategy":strategy_name,
+            "reason":"take-profit",
+            "side":"sell",
+            "exit_timestamp_ms":exit_timestamp_ms,
+            "observed_at_ms":observed_at_ms,
+            "horizon_ms":horizon_ms,
+            "entry_context":audit["entry_context"],
+            "strategy_decision":audit["entry_context"]["strategy_decision"],
+            "exit_parameter_provenance":audit["exit_parameter_provenance"],
+            "effective_stop_loss_percent":audit["effective_stop_loss_percent"],
+            "effective_take_profit_percent":audit["effective_take_profit_percent"],
+            "counterfactual_exit_fee_rate":configured_taker_fee_rate(),
+            "exit_return_percent":audit["net_return_percent"],
+            "post_exit_return_percent":0.10,
+            "missed_return_percent":0.10,
+            "pre_exit_price_path":audit["price_path"],
+            "pre_exit_price_path_evidence":pre_exit_evidence,
+            "exit_fill_evidence":audit["exit_fill_evidence"],
+            "realized_r_evidence":audit["realized_r_evidence"],
+            "independent_reconciliation":{"status":"pending","source":null,"evidence_epoch_id":null},
+            "price_path":post_exit_path,
+            "price_path_evidence":{"schema_version":1,"complete":true,"sample_count":31,"fresh_sample_count":31,"fee_adjusted":false}
+        })
+    };
+    let complete_learning_observation =
+        make_learning_observation(&complete_audit, "fixture-exit-timing-complete", true);
+    let interrupted_learning_observation = make_learning_observation(
+        &interrupted_audit,
+        "fixture-exit-timing-restart-interrupted",
+        false,
+    );
+    let mut accepted = 0;
+    for observation in [
+        complete_learning_observation,
+        interrupted_learning_observation,
+    ] {
+        let (status, response) =
+            learning_json_request(&learning_router, "POST", "/exit-timing", Some(observation))
+                .await;
+        assert_eq!(
+            status, 200,
+            "Learning accepts durable evidence input: {response}"
+        );
+        assert_eq!(response["accepted"], true);
+        accepted += 1;
+    }
+
+    let (status, snapshot) =
+        learning_json_request(&learning_router, "GET", "/decision-snapshot", None).await;
+    assert_eq!(status, 200);
+    let assessment = snapshot["exit_policy_assessments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|assessment| {
+            assessment["symbol"] == symbol
+                && assessment["strategy"] == strategy_name
+                && assessment["profile_id"] == profile_id
+                && assessment["profile_version"] == 1
+        })
+        .expect("Learning reports the exact profile's replay eligibility");
+    assert_eq!(accepted, 2, "both raw observations were durably accepted");
+    assert_eq!(
+        assessment["sample_count"], 1,
+        "the interrupted path is excluded"
+    );
+    assert_eq!(assessment["status"], "insufficient_evidence");
+    assert_eq!(
+        assessment["metrics"]["coverage"]["executable_path_source_coverage_percent"]["sample_count"],
+        1
+    );
+    assert_eq!(
+        assessment["metrics"]["values"]["executable_path_source_coverage_percent"],
+        50.0
+    );
+    assert!(
+        assessment["metrics"]["promotion_blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker == "insufficient_complete_executable_path_observations")
+    );
+    assert!(
+        snapshot["exit_protection_policies"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let _ = std::fs::remove_file(&snapshot_path);
+    let _ = std::fs::remove_file(snapshot_path.with_extension("sqlite-wal"));
+    let _ = std::fs::remove_file(snapshot_path.with_extension("sqlite-shm"));
     let _ = std::fs::remove_file(&learning_db_path);
     let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-wal"));
     let _ = std::fs::remove_file(learning_db_path.with_extension("sqlite-shm"));

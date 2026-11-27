@@ -5,7 +5,9 @@
     "lib": ["es2022", "dom"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "types": ["node"],
     "customConditions": ["@workspace/source"],
+    "allowImportingTsExtensions": true,
     "noEmit": true
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"]

@@ -114,12 +114,6 @@ async fn update_settings(
         || request
             .max_daily_open_positions
             .is_some_and(|value| value > 20)
-        || request
-            .intraday_notional_limit
-            .is_some_and(|value| !value.is_finite() || value < 0.0)
-        || request
-            .daily_strategy_notional_limit
-            .is_some_and(|value| !value.is_finite() || value < 0.0)
     {
         return Err((StatusCode::BAD_REQUEST, "Order and total notional limits must be positive with total notional at least the per-order limit; daily loss cap must be positive, exploration must be between 0% and 100%, max open positions must be 1–20, entries per position must be 1–10, and scout samples must be 2–100".into()));
     }
@@ -144,43 +138,6 @@ async fn update_settings(
         ));
     }
     let mut settings = state.settings.lock().await;
-    if let Some(budgets) = request.daily_strategy_budgets.as_ref() {
-        let configured_total = budgets.values().copied().sum::<f64>();
-        let daily_limit = request
-            .daily_strategy_notional_limit
-            .unwrap_or(settings.daily_strategy_notional_limit);
-        if budgets.iter().any(|(strategy, budget)| {
-            !budget.is_finite()
-                || *budget < 0.0
-                || !Strategy::from_name(strategy)
-                    .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
-        }) || !configured_total.is_finite()
-            || configured_total > daily_limit + 1e-9
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Daily strategy budgets must be non-negative, use known daily strategy names, and sum to no more than the daily budget".into(),
-            ));
-        }
-    }
-    if let Some(budgets) = request.intraday_strategy_budgets.as_ref() {
-        let configured_total = budgets.values().copied().sum::<f64>();
-        let intraday_limit = request
-            .intraday_notional_limit
-            .unwrap_or(settings.intraday_notional_limit);
-        if budgets.iter().any(|(strategy, budget)| {
-            !budget.is_finite()
-                || *budget < 0.0
-                || !Strategy::from_name(strategy).is_some_and(|kind| kind.is_live_insight())
-        }) || !configured_total.is_finite()
-            || configured_total > intraday_limit + 1e-9
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Intraday strategy budgets must be non-negative, use known intraday strategy names, and sum to no more than the intraday budget".into(),
-            ));
-        }
-    }
     reset_daily_budget(&mut settings);
     if request.daily_notional_limit < settings.used_notional_today {
         return Err((
@@ -237,18 +194,6 @@ async fn update_settings(
     }
     if let Some(value) = request.max_daily_open_positions {
         settings.max_daily_open_positions = value;
-    }
-    if let Some(value) = request.intraday_notional_limit {
-        settings.intraday_notional_limit = value;
-    }
-    if let Some(value) = request.daily_strategy_notional_limit {
-        settings.daily_strategy_notional_limit = value;
-    }
-    if let Some(budgets) = request.daily_strategy_budgets {
-        settings.daily_strategy_budgets = budgets;
-    }
-    if let Some(budgets) = request.intraday_strategy_budgets {
-        settings.intraday_strategy_budgets = budgets;
     }
     if let Some(value) = request.max_entries_per_auto_position {
         settings.max_entries_per_auto_position = value;
@@ -380,6 +325,29 @@ mod take_profit_setting_tests {
         assert!(!valid_take_profit_setting(0.049));
         assert!(!valid_take_profit_setting(10.01));
         assert!(!valid_take_profit_setting(f64::NAN));
+    }
+}
+
+#[cfg(test)]
+mod legacy_allocation_request_tests {
+    use super::SettingsRequest;
+
+    #[test]
+    fn accepts_but_ignores_legacy_manual_allocation_fields() {
+        let request: SettingsRequest = serde_json::from_value(serde_json::json!({
+            "max_order_notional": 100.0,
+            "daily_notional_limit": 1000.0,
+            "daily_realized_loss_limit": 10.0,
+            "exploration_percent": 2.0,
+            "max_open_positions": 10,
+            "daily_strategy_notional_limit": 0.0,
+            "intraday_notional_limit": 0.0,
+            "daily_strategy_budgets": {"donchian-20-btc200": 0.0},
+            "intraday_strategy_budgets": {"live-momentum": 50000.0}
+        }))
+        .expect("older clients' unknown allocation keys remain forward compatible");
+        assert_eq!(request.daily_notional_limit, 1000.0);
+        assert_eq!(request.max_order_notional, 100.0);
     }
 }
 

@@ -12,7 +12,6 @@ import {
   type AutoTraderUiSnapshot,
 } from '../auto_trader_stream';
 import { subscribeInsightsStream } from '../insights_stream';
-import { insightsFetch } from '../insights_rsocket';
 import { autoTraderFetch, autoTraderRpc } from '../auto_trader_rsocket';
 import { learningRpc } from '../learning_rsocket';
 import { sharedGet } from '../shared_get';
@@ -118,11 +117,13 @@ export type AutoTraderStrategyParameter = {
   step: number;
   unit: string;
   overridden: boolean;
-  scout_variants: AutoTraderStrategyScoutVariant[];
+  scout_variants?: AutoTraderStrategyScoutVariant[] | null;
 };
 export type AutoTraderStrategyProfile = {
   symbol: string;
   strategy: Strategy;
+  profile_id?: string | null;
+  profile_version?: number | null;
   learning_samples: number;
   positive_rate?: number;
   realized_pnl: number;
@@ -166,6 +167,8 @@ export type AutoTraderDecisionParameters = {
   thresholds: AutoTraderDecisionParameter[];
   contexts: AutoTraderContextParameters[];
   strategy_profiles: AutoTraderStrategyProfile[];
+  exit_policy_assessments?: LearnedExitPolicyAssessment[];
+  exit_protection_policies?: LearnedExitProtectionPolicy[];
   active_exit_policy: {
     stop_loss_percent: number;
     take_profit_percent: number;
@@ -184,6 +187,71 @@ export type AutoTraderDecisionParameters = {
   >;
   version?: number;
 };
+
+export type ExitPolicyMetricCoverage = {
+  status: ExitPolicyMetricCoverageStatus;
+  sample_count: number;
+  source_fields: string[];
+  reason?: string | null;
+};
+
+export type ExitPolicyMetricCoverageStatus =
+  | 'complete'
+  | 'partial'
+  | 'unavailable';
+
+export type ExitPolicyMetricReport = {
+  values: Record<string, number>;
+  coverage: Record<string, ExitPolicyMetricCoverage>;
+  promotion_eligible: boolean;
+  promotion_blockers: string[];
+};
+
+/** A Learning candidate assessment; it is not an active or published policy. */
+export type LearnedExitPolicyAssessment = {
+  symbol: string;
+  strategy: string;
+  profile_id?: string | null;
+  profile_version?: number | null;
+  stop_loss_percent?: number | null;
+  take_profit_percent?: number | null;
+  activation_percent?: number | null;
+  giveback_percent?: number | null;
+  minimum_lock_percent?: number | null;
+  sample_count: number;
+  training_count: number;
+  validation_count: number;
+  as_of_ms: number;
+  maximum_holding_duration_ms?: number | null;
+  status: string;
+  metrics: ExitPolicyMetricReport;
+};
+
+/** Learning-published candidates are still distinct from AutoTrader activation. */
+export type LearnedExitProtectionPolicy = {
+  symbol: string;
+  strategy: string;
+  profile_id?: string | null;
+  profile_version?: number | null;
+  stop_loss_percent?: number | null;
+  take_profit_percent?: number | null;
+  maximum_holding_duration_ms?: number | null;
+  activation_percent: number;
+  giveback_percent: number;
+  minimum_lock_percent: number;
+  sample_count: number;
+  training_count: number;
+  validation_count: number;
+  baseline_validation_mean_percent: number;
+  selected_validation_mean_percent: number;
+  validation_gain_percent: number;
+  validation_positive_rate: number;
+  validation_negative_difference_rate: number;
+  validation_tenth_percentile_difference_percent: number;
+  validation_worst_difference_percent: number;
+  as_of_ms: number;
+};
+
 export type Strategy =
   | 'live-momentum'
   | 'live-trade-flow'
@@ -203,24 +271,26 @@ export type Strategy =
   | 'risk-adjusted-monthly-momentum'
   | 'rsi2-oversold-rebound'
   | 'dated-futures-carry';
-export type StrategyBudget = {
-  strategy: Strategy;
-  base_budget: number;
-  effective_budget: number;
-  used_notional: number;
-  learning_multiplier: number;
-  learning_feedback_multiplier?: number;
-  learning_samples: number;
-  positive_rate?: number | null;
-  realized_pnl: number;
+export type CapitalAllocationRow = {
+  strategy: string;
+  symbol: string;
+  horizon: string;
+  effectiveAllocation: number;
+  reserved: number;
+  used: number;
+  utilization: number | null;
+  evidenceEligible: boolean | null;
+  state: string;
+  reason: string;
 };
-export type ClosedStrategyOutcome = {
-  trades: number;
-  wins: number;
-  losses: number;
-  flat: number;
-  winRate: number;
-  averageReturn: number;
+export type CapitalAllocation = {
+  version: 'v1';
+  model: 'shared_pool';
+  poolLimit: number;
+  used: number;
+  reserved: number;
+  available: number;
+  rows: CapitalAllocationRow[];
 };
 export type StrategyDiagnostic = {
   strategy: Strategy;
@@ -231,6 +301,12 @@ export type StrategyDiagnostic = {
   btc_window_days: number | null;
   btc_gate_required: boolean;
   btc_gate_passed: boolean | null;
+  btc_source_close_time_ms?: number | null;
+  btc_source_timeframe?:
+    | 'daily'
+    | 'monthly_rebalance_anchor_daily'
+    | string
+    | null;
   symbols: Array<{
     symbol: string;
     close: number;
@@ -252,6 +328,16 @@ export type StrategyDiagnostic = {
     relative_strength_gap_pp?: number | null;
   }>;
 };
+
+export function projectStrategyDiagnostics(
+  diagnostics: StrategyDiagnostic[] | undefined,
+): StrategyDiagnostic[] {
+  return (diagnostics ?? []).map((diagnostic) => ({
+    ...diagnostic,
+    btc_source_close_time_ms: diagnostic.btc_source_close_time_ms ?? null,
+    btc_source_timeframe: diagnostic.btc_source_timeframe ?? null,
+  }));
+}
 export type StrategyBlocker = {
   strategy: Strategy;
   symbol: string;
@@ -358,15 +444,7 @@ export type AutoTraderState = {
   scoutMaxActivePositions: string;
   maxIntradayOpenPositions: string;
   maxDailyOpenPositions: string;
-  intradayNotionalLimit: string;
-  dailyStrategyNotionalLimit: string;
-  dailyStrategyBudgets: Partial<Record<Strategy, string>>;
-  dailyStrategyLearning: StrategyBudget[];
-  closedStrategyOutcomes: Record<string, ClosedStrategyOutcome>;
-  intradayStrategyBudgets: Partial<Record<Strategy, string>>;
-  intradayStrategyLearning: StrategyBudget[];
-  intradayUsedNotional: number;
-  dailyStrategyUsedNotional: number;
+  capitalAllocation?: CapitalAllocation;
   maxEntriesPerPosition: string;
   stopLossPercent: number;
   takeProfitPercent: number;
@@ -503,12 +581,8 @@ type TraderStatus = {
   max_open_positions: number;
   max_intraday_open_positions: number;
   max_daily_open_positions: number;
-  intraday_notional_limit: number;
-  daily_strategy_notional_limit: number;
-  daily_strategy_budgets?: StrategyBudget[];
-  intraday_strategy_budgets?: StrategyBudget[];
-  intraday_used_notional: number;
-  daily_strategy_used_notional: number;
+  capital_allocation?: CapitalAllocation;
+  capitalAllocation?: CapitalAllocation;
   max_entries_per_auto_position: number;
   stop_loss_percent: number;
   take_profit_percent: number;
@@ -627,15 +701,7 @@ export class AutoTraderModel {
     scoutMaxActivePositions: '5000',
     maxIntradayOpenPositions: '10',
     maxDailyOpenPositions: '10',
-    intradayNotionalLimit: '500',
-    dailyStrategyNotionalLimit: '500',
-    dailyStrategyBudgets: {},
-    dailyStrategyLearning: [],
-    closedStrategyOutcomes: {},
-    intradayStrategyBudgets: {},
-    intradayStrategyLearning: [],
-    intradayUsedNotional: 0,
-    dailyStrategyUsedNotional: 0,
+    capitalAllocation: undefined,
     maxEntriesPerPosition: '1',
     stopLossPercent: 0.5,
     takeProfitPercent: 0.8,
@@ -767,6 +833,7 @@ export class AutoTraderModel {
     this.stopInsightsStream?.();
     this.stopInsightsStream = undefined;
   }
+
   setLimits(
     maxOrderNotional: string,
     dailyNotionalLimit: string,
@@ -788,37 +855,12 @@ export class AutoTraderModel {
     values: Partial<
       Pick<
         AutoTraderState,
-        | 'maxIntradayOpenPositions'
-        | 'maxDailyOpenPositions'
-        | 'intradayNotionalLimit'
-        | 'dailyStrategyNotionalLimit'
+        'maxIntradayOpenPositions' | 'maxDailyOpenPositions'
       >
     >,
   ) {
     this.categoryLimitsDirty = true;
     this.state$.next({ ...this.state$.value, ...values });
-  }
-
-  setDailyStrategyBudget(strategy: Strategy, value: string) {
-    this.categoryLimitsDirty = true;
-    this.state$.next({
-      ...this.state$.value,
-      dailyStrategyBudgets: {
-        ...this.state$.value.dailyStrategyBudgets,
-        [strategy]: value,
-      },
-    });
-  }
-
-  setIntradayStrategyBudget(strategy: Strategy, value: string) {
-    this.categoryLimitsDirty = true;
-    this.state$.next({
-      ...this.state$.value,
-      intradayStrategyBudgets: {
-        ...this.state$.value.intradayStrategyBudgets,
-        [strategy]: value,
-      },
-    });
   }
 
   setRiskAppetite(riskAppetite: string) {
@@ -842,22 +884,7 @@ export class AutoTraderModel {
 
   setStrategies(strategies: Strategy[]) {
     this.limitsDirty = true;
-    const current = this.state$.value;
-    const dailyStrategyBudgets = { ...current.dailyStrategyBudgets };
-    const intradayStrategyBudgets = { ...current.intradayStrategyBudgets };
-    for (const strategy of strategies) {
-      if (strategy.startsWith('live-')) {
-        intradayStrategyBudgets[strategy] ??= '0';
-      } else if (strategy !== 'dated-futures-carry') {
-        dailyStrategyBudgets[strategy] ??= '0';
-      }
-    }
-    this.state$.next({
-      ...current,
-      strategies,
-      dailyStrategyBudgets,
-      intradayStrategyBudgets,
-    });
+    this.state$.next({ ...this.state$.value, strategies });
   }
 
   setClosedTradeWindow(closedTradeWindow: string) {
@@ -911,21 +938,6 @@ export class AutoTraderModel {
       let status: TraderStatus;
       let activity: TraderActivity;
       let positions: { positions: Array<{ symbol: string; quantity: number }> };
-      let auditRows: Array<{
-        decision_id?: string;
-        stage?: string;
-        strategy?: string;
-        symbol?: string;
-        timestamp?: number;
-        filled_quantity?: number;
-        average_price?: number;
-        exit_filled_quantity?: number;
-        realized_pnl?: number;
-        exit_order_type?: string;
-        barrier_order_id?: string;
-        exit_fills?: Array<{ parent_order_id?: string }>;
-        entry_context?: { quantity?: number; average_price?: number };
-      }>;
       const autoSnapshot = this.autoTraderSnapshot;
       const useStreamSnapshot =
         !!autoSnapshot && isAutoTraderSnapshotFresh(this.autoTraderSnapshotAt);
@@ -940,19 +952,13 @@ export class AutoTraderModel {
             quantity,
           })),
         };
-        auditRows = autoSnapshot.execution_audit.items as typeof auditRows;
       } else {
-        const [
-          statusResponse,
-          activityResponse,
-          positionsResponse,
-          auditResponse,
-        ] = await Promise.all([
-          autoTraderRpc('GET', '/positions/auto-trader'),
-          autoTraderRpc('GET', '/positions/auto-trader/activity'),
-          sharedGet('/positions?source=auto'),
-          insightsFetch('/signals/auto-trader-execution-audit'),
-        ]);
+        const [statusResponse, activityResponse, positionsResponse] =
+          await Promise.all([
+            autoTraderRpc('GET', '/positions/auto-trader'),
+            autoTraderRpc('GET', '/positions/auto-trader/activity'),
+            sharedGet('/positions?source=auto'),
+          ]);
         if (!statusResponse.ok)
           throw await this.responseError('status', statusResponse);
         if (!activityResponse.ok)
@@ -964,10 +970,6 @@ export class AutoTraderModel {
         positions = (await positionsResponse.json()) as {
           positions: Array<{ symbol: string; quantity: number }>;
         };
-        const auditPage = auditResponse.ok
-          ? ((await auditResponse.json()) as { items?: typeof auditRows })
-          : undefined;
-        auditRows = auditPage?.items ?? [];
       }
       let usdRates = this.usdRates;
       const quoteTotals = [
@@ -1082,107 +1084,6 @@ export class AutoTraderModel {
         (order) =>
           order.timestamp >= recoveryResetAtMs && order.filled_quantity > 0,
       ).length;
-      const auditTrades = new Map<
-        string,
-        { entry?: (typeof auditRows)[number]; exits: typeof auditRows }
-      >();
-      for (const row of auditRows) {
-        if (!row.decision_id) continue;
-        const trade = auditTrades.get(row.decision_id) ?? { exits: [] };
-        if (
-          (row.stage === 'entry' || row.stage === 'entry_fill') &&
-          (!trade.entry || (row.timestamp ?? 0) >= (trade.entry.timestamp ?? 0))
-        )
-          trade.entry = row;
-        else if (row.stage?.startsWith('exit')) trade.exits.push(row);
-        auditTrades.set(row.decision_id, trade);
-      }
-      const closedStrategyGroups = new Map<
-        string,
-        Array<{ pnl: number; quantity: number; entryPrice: number }>
-      >();
-      for (const trade of auditTrades.values()) {
-        const entry = trade.entry;
-        const externalIds = new Set(
-          trade.exits
-            .filter((row) => row.exit_order_type === 'external-ledger-fill')
-            .flatMap(
-              (row) =>
-                row.exit_fills
-                  ?.map((fill) => fill.parent_order_id)
-                  .filter((id): id is string => Boolean(id)) ?? [],
-            ),
-        );
-        const exits = trade.exits.filter(
-          (row) =>
-            !(
-              row.exit_order_type === 'StopMarket' &&
-              row.barrier_order_id &&
-              externalIds.has(row.barrier_order_id)
-            ),
-        );
-        const exited = exits.reduce(
-          (sum, row) => sum + (row.exit_filled_quantity ?? 0),
-          0,
-        );
-        const quantity = Math.max(
-          entry?.filled_quantity ?? 0,
-          ...exits.map((row) => row.entry_context?.quantity ?? 0),
-        );
-        const entryPrice =
-          entry?.average_price ||
-          exits.find((row) => row.entry_context?.average_price)?.entry_context
-            ?.average_price;
-        if (
-          !entry ||
-          !(quantity > 0 && typeof entryPrice === 'number' && entryPrice > 0) ||
-          exited + 1e-12 < quantity
-        )
-          continue;
-        const strategy = entry.strategy ?? 'unattributed';
-        const group = closedStrategyGroups.get(strategy) ?? [];
-        group.push({
-          pnl: exits.reduce((sum, row) => sum + (row.realized_pnl ?? 0), 0),
-          quantity,
-          entryPrice,
-        });
-        closedStrategyGroups.set(strategy, group);
-      }
-      const closedStrategyOutcomes = Object.fromEntries(
-        [...closedStrategyGroups].map(([strategy, trades]) => {
-          const wins = trades.filter((trade) => trade.pnl > 0).length;
-          const losses = trades.filter((trade) => trade.pnl < 0).length;
-          return [
-            strategy,
-            {
-              trades: trades.length,
-              wins,
-              losses,
-              flat: trades.length - wins - losses,
-              winRate: (wins / trades.length) * 100,
-              averageReturn:
-                trades.reduce(
-                  (sum, trade) =>
-                    sum +
-                    (trade.pnl / (trade.quantity * trade.entryPrice)) * 100,
-                  0,
-                ) / trades.length,
-            },
-          ];
-        }),
-      );
-      const savedDailyBudgets = Object.fromEntries(
-        (status.daily_strategy_budgets ?? []).map((budget) => [
-          budget.strategy,
-          String(budget.base_budget),
-        ]),
-      ) as Partial<Record<Strategy, string>>;
-      const savedIntradayBudgets = Object.fromEntries(
-        (status.intraday_strategy_budgets ?? []).map((budget) => [
-          budget.strategy,
-          String(budget.base_budget),
-        ]),
-      ) as Partial<Record<Strategy, string>>;
       this.state$.next({
         ...this.state$.value,
         enabled: status.enabled,
@@ -1234,23 +1135,8 @@ export class AutoTraderModel {
         maxDailyOpenPositions: this.categoryLimitsDirty
           ? this.state$.value.maxDailyOpenPositions
           : String(status.max_daily_open_positions),
-        intradayNotionalLimit: this.categoryLimitsDirty
-          ? this.state$.value.intradayNotionalLimit
-          : String(status.intraday_notional_limit),
-        dailyStrategyNotionalLimit: this.categoryLimitsDirty
-          ? this.state$.value.dailyStrategyNotionalLimit
-          : String(status.daily_strategy_notional_limit),
-        dailyStrategyBudgets: this.categoryLimitsDirty
-          ? this.state$.value.dailyStrategyBudgets
-          : savedDailyBudgets,
-        dailyStrategyLearning: status.daily_strategy_budgets ?? [],
-        closedStrategyOutcomes,
-        intradayStrategyBudgets: this.categoryLimitsDirty
-          ? this.state$.value.intradayStrategyBudgets
-          : savedIntradayBudgets,
-        intradayStrategyLearning: status.intraday_strategy_budgets ?? [],
-        intradayUsedNotional: status.intraday_used_notional,
-        dailyStrategyUsedNotional: status.daily_strategy_used_notional,
+        capitalAllocation:
+          status.capitalAllocation ?? status.capital_allocation,
         maxEntriesPerPosition: this.limitsDirty
           ? this.state$.value.maxEntriesPerPosition
           : String(status.max_entries_per_auto_position),
@@ -1295,7 +1181,9 @@ export class AutoTraderModel {
         latestEntryDiagnostic: status.latest_entry_diagnostic ?? null,
         entryDiagnosticHistory: status.entry_diagnostic_history ?? [],
         latestSymbolEntryResults: status.latest_symbol_entry_results ?? [],
-        strategyDiagnostics: status.strategy_diagnostics ?? [],
+        strategyDiagnostics: projectStrategyDiagnostics(
+          status.strategy_diagnostics,
+        ),
         latestStrategyBlockers: status.latest_strategy_blockers ?? [],
         orders,
         openPositionSymbols: activity.open_position_symbols ?? [],
@@ -1629,30 +1517,6 @@ export class AutoTraderModel {
               current.maxIntradayOpenPositions,
             ),
             max_daily_open_positions: Number(current.maxDailyOpenPositions),
-            intraday_notional_limit: Number(current.intradayNotionalLimit),
-            daily_strategy_notional_limit: Number(
-              current.dailyStrategyNotionalLimit,
-            ),
-            daily_strategy_budgets: Object.fromEntries(
-              current.strategies
-                .filter(
-                  (strategy) =>
-                    !strategy.startsWith('live-') &&
-                    strategy !== 'dated-futures-carry',
-                )
-                .map((strategy) => [
-                  strategy,
-                  Number(current.dailyStrategyBudgets[strategy] ?? 0),
-                ]),
-            ),
-            intraday_strategy_budgets: Object.fromEntries(
-              current.strategies
-                .filter((strategy) => strategy.startsWith('live-'))
-                .map((strategy) => [
-                  strategy,
-                  Number(current.intradayStrategyBudgets[strategy] ?? 0),
-                ]),
-            ),
             max_entries_per_auto_position: Number(
               current.maxEntriesPerPosition,
             ),

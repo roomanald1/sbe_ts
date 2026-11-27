@@ -5,11 +5,21 @@ async fn expire_orders_loop(store: Arc<PositionStore>) {
             continue;
         };
         let mut ledger = store.ledger.lock().await;
-        let old_len = ledger.orders.len();
-        ledger
-            .orders
-            .retain(|order| order.expires_at.is_none_or(|expires| expires > now));
-        if ledger.orders.len() != old_len {
+        let mut retained = Vec::with_capacity(ledger.orders.len());
+        let mut expired = Vec::new();
+        for order in std::mem::take(&mut ledger.orders) {
+            if order.expires_at.is_some_and(|expires| expires <= now) {
+                expired.push(order);
+            } else {
+                retained.push(order);
+            }
+        }
+        ledger.orders = retained;
+        let expired_any = !expired.is_empty();
+        for order in expired {
+            terminalize_resting_order(&mut ledger, order, "expired", now);
+        }
+        if expired_any {
             if let Err(error) = store.persist(&ledger).await {
                 crate::service_log!("ERROR", "Could not persist GTD expiry: {error}");
             }
@@ -106,6 +116,19 @@ async fn barrier_order_loop(store: Arc<PositionStore>) {
                 else {
                     continue;
                 };
+                // `barrier` is a polling snapshot. A concurrent durable trigger
+                // adjustment may have replaced its threshold before this claim
+                // lock was acquired, so make the claim decision against the
+                // authoritative current ledger value while holding the same
+                // mutex used by the adjustment route and matcher.
+                let current_barrier = &ledger.barrier_orders[index];
+                let current_threshold_reached = match &current_barrier.trigger_direction {
+                    BarrierDirection::Above => current >= current_barrier.trigger_price,
+                    BarrierDirection::Below => current <= current_barrier.trigger_price,
+                };
+                if !current_threshold_reached {
+                    continue;
+                }
                 let is_auto_stop = barrier.source == "auto"
                     && barrier
                         .parent_order_id

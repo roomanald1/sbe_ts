@@ -114,6 +114,8 @@ mod strategy_blocker_tests {
             btc_gate_required: false,
             btc_gate_passed: None,
             btc_window_days: None,
+            btc_source_close_time_ms: None,
+            btc_source_timeframe: None,
             symbols: vec![StrategySymbolDiagnostic {
                 symbol: "ETH-USDT".to_owned(),
                 close: 90.0,
@@ -145,6 +147,184 @@ mod strategy_blocker_tests {
         assert!(blocker.reason.contains("observed 90.00 price"));
         assert!(blocker.reason.contains("threshold 100.00 price"));
         assert_eq!(blocker.timestamp_ms, 123);
+    }
+}
+
+fn capital_allocation_status(
+    state: &AutoTraderState,
+    settings: &Settings,
+    now_ms: u64,
+) -> CapitalAllocationStatus {
+    const SNAPSHOT_MAX_AGE_MS: u64 = 60_000;
+    let snapshot = state
+        .capital_allocation_snapshot
+        .try_lock()
+        .map(|snapshot| snapshot.clone())
+        .unwrap_or_default();
+    let candidates = if now_ms.saturating_sub(snapshot.as_of_ms) <= SNAPSHOT_MAX_AGE_MS
+        && (snapshot.pool_limit - settings.daily_notional_limit).abs() <= 1e-9
+    {
+        snapshot.candidates
+    } else {
+        BTreeMap::new()
+    };
+    let mut rows = Vec::with_capacity(candidates.len() + settings.strategies.len());
+    for ((strategy, symbol, horizon), candidate) in &candidates {
+        if !settings
+            .strategies
+            .iter()
+            .any(|configured| configured.as_str() == strategy)
+        {
+            continue;
+        }
+        let used = candidate_used_notional(settings, strategy, symbol);
+        let reserved = candidate_reserved_notional(settings, strategy, symbol);
+        rows.push(CapitalAllocationRow {
+            strategy: strategy.clone(),
+            symbol: symbol.clone(),
+            horizon: horizon.clone(),
+            effective_allocation: candidate.effective_allocation,
+            reserved,
+            used,
+            utilization: (candidate.effective_allocation > 0.0)
+                .then_some((used + reserved) / candidate.effective_allocation),
+            evidence_eligible: candidate.evidence_eligible,
+            state: candidate.state.clone(),
+            reason: candidate.reason.clone(),
+        });
+    }
+    for strategy in &settings.strategies {
+        let name = strategy.as_str();
+        if candidates.keys().any(|(candidate, _, _)| candidate == name) {
+            continue;
+        }
+        if strategy.is_dated_carry() && settings.dated_carry_reserved_usd > 0.0 {
+            let committed = settings.dated_carry_reserved_usd;
+            rows.push(CapitalAllocationRow {
+                strategy: name.to_owned(),
+                symbol: "*".to_owned(),
+                horizon: "daily".to_owned(),
+                effective_allocation: committed,
+                reserved: 0.0,
+                used: committed,
+                utilization: Some(1.0),
+                evidence_eligible: None,
+                state: "committed".to_owned(),
+                reason: "Open dated-carry spot and future exposure is committed from the shared pool; new sizing remains bounded by the separate carry-book spot cap".to_owned(),
+            });
+            continue;
+        }
+        rows.push(CapitalAllocationRow {
+            strategy: name.to_owned(),
+            symbol: "*".to_owned(),
+            horizon: if strategy.is_live_insight() {
+                "intraday"
+            } else {
+                "daily"
+            }
+            .to_owned(),
+            effective_allocation: 0.0,
+            reserved: 0.0,
+            used: 0.0,
+            utilization: None,
+            evidence_eligible: None,
+            state: "unavailable".to_owned(),
+            reason: "No fresh eligible directional candidate; capital remains in the shared pool"
+                .to_owned(),
+        });
+    }
+    if settings.dated_carry_reserved_usd > 0.0
+        && !rows
+            .iter()
+            .any(|row| row.strategy == Strategy::DatedCarry.as_str())
+    {
+        let committed = settings.dated_carry_reserved_usd;
+        rows.push(CapitalAllocationRow {
+            strategy: Strategy::DatedCarry.as_str().to_owned(),
+            symbol: "*".to_owned(),
+            horizon: "daily".to_owned(),
+            effective_allocation: committed,
+            reserved: 0.0,
+            used: committed,
+            utilization: Some(1.0),
+            evidence_eligible: None,
+            state: "committed".to_owned(),
+            reason: "Open dated-carry spot and future exposure is committed from the shared pool; new sizing remains bounded by the separate carry-book spot cap".to_owned(),
+        });
+    }
+    let allocated = allocated_notional(settings);
+    let reserved = settings
+        .orders
+        .iter()
+        .filter(|order| {
+            order.purpose == "signal"
+                && matches!(
+                    order.status.as_str(),
+                    "submitting" | "accepted" | "resting" | "partially_filled"
+                )
+                && order.quantity > order.filled_quantity + 1e-12
+        })
+        .map(|order| {
+            let remaining_fraction = ((order.quantity - order.filled_quantity).max(0.0)
+                / order.quantity)
+                .clamp(0.0, 1.0);
+            let reference = if order.reserved_notional > 0.0 {
+                order.reserved_notional
+            } else {
+                order.average_price.unwrap_or(0.0)
+                    * order.quantity
+                    * quote_usd_rate(settings, &order.symbol)
+            };
+            reference
+                * remaining_fraction
+                * scheduled_stop_headroom_multiplier(&order.order_type, order.strategy.as_deref())
+        })
+        .sum::<f64>();
+    CapitalAllocationStatus {
+        version: "v1".to_owned(),
+        model: "shared_pool".to_owned(),
+        pool_limit: settings.daily_notional_limit,
+        available: (settings.daily_notional_limit - allocated).max(0.0),
+        reserved,
+        used: (allocated - reserved).max(0.0),
+        rows,
+    }
+}
+
+#[cfg(test)]
+mod capital_allocation_contract_tests {
+    use super::*;
+
+    #[test]
+    fn status_contract_uses_camel_case_and_reports_committed_carry_exposure() {
+        let status = CapitalAllocationStatus {
+            version: "v1".to_owned(),
+            model: "shared_pool".to_owned(),
+            pool_limit: 1_000.0,
+            available: 300.0,
+            reserved: 100.0,
+            used: 600.0,
+            rows: vec![CapitalAllocationRow {
+                strategy: "dated-futures-carry".to_owned(),
+                symbol: "*".to_owned(),
+                horizon: "daily".to_owned(),
+                effective_allocation: 600.0,
+                reserved: 0.0,
+                used: 600.0,
+                utilization: Some(1.0),
+                evidence_eligible: None,
+                state: "committed".to_owned(),
+                reason: "Open carry exposure is committed from the shared pool".to_owned(),
+            }],
+        };
+        let value = serde_json::to_value(status).unwrap();
+        assert_eq!(value["version"], "v1");
+        assert_eq!(value["model"], "shared_pool");
+        assert_eq!(value["poolLimit"], 1_000.0);
+        assert_eq!(value["available"], 300.0);
+        assert_eq!(value["rows"][0]["effectiveAllocation"], 600.0);
+        assert_eq!(value["rows"][0]["evidenceEligible"], serde_json::Value::Null);
+        assert_eq!(value["rows"][0]["state"], "committed");
     }
 }
 
@@ -225,65 +405,7 @@ fn status(state: &AutoTraderState, settings: &Settings) -> StatusResponse {
         max_open_positions: settings.max_open_positions,
         max_intraday_open_positions: settings.max_intraday_open_positions,
         max_daily_open_positions: settings.max_daily_open_positions,
-        intraday_notional_limit: settings.intraday_notional_limit,
-        daily_strategy_notional_limit: settings.daily_strategy_notional_limit,
-        daily_strategy_budgets: settings
-            .strategies
-            .iter()
-            .copied()
-            .filter(|strategy| !strategy.is_live_insight() && !strategy.is_dated_carry())
-            .map(|strategy| {
-                // Match the recent-outcome profile used to calculate this multiplier and cap.
-                let learning = strategy_learning_stats_across_symbols(settings, strategy);
-                StrategyBudgetStatus {
-                    strategy: strategy.as_str().to_owned(),
-                    base_budget: daily_strategy_budget(settings, strategy.as_str()),
-                    effective_budget: daily_strategy_effective_budget(settings, strategy.as_str()),
-                    used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
-                    learning_multiplier: settings
-                        .learned_strategy_size_multipliers
-                        .get(strategy.as_str())
-                        .copied()
-                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
-                    learning_feedback_multiplier: settings
-                        .learned_strategy_size_multipliers
-                        .get(strategy.as_str())
-                        .copied()
-                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
-                    learning_samples: learning.samples,
-                    positive_rate: (learning.samples > 0)
-                        .then_some(learning.positive as f64 / learning.samples as f64),
-                    realized_pnl: learning.realized_pnl,
-                }
-            })
-            .collect(),
-        intraday_strategy_budgets: settings
-            .strategies
-            .iter()
-            .copied()
-            .filter(|strategy| strategy.is_live_insight() && !strategy.is_legacy_composite())
-            .map(|strategy| {
-                let learning = strategy_learning_stats_across_symbols(settings, strategy);
-                StrategyBudgetStatus {
-                    strategy: strategy.as_str().to_owned(),
-                    base_budget: intraday_strategy_budget(settings, strategy.as_str()),
-                    effective_budget: intraday_strategy_effective_budget(settings, strategy.as_str(), now_ms),
-                    used_notional: allocated_notional_for_strategy(settings, strategy.as_str()),
-                    learning_multiplier: intraday_strategy_size_multiplier(settings, strategy, now_ms),
-                    learning_feedback_multiplier: settings
-                        .learned_strategy_size_multipliers
-                        .get(strategy.as_str())
-                        .copied()
-                        .unwrap_or_else(|| learned_strategy_size_multiplier(&learning)),
-                    learning_samples: learning.samples,
-                    positive_rate: (learning.samples > 0)
-                        .then_some(learning.positive as f64 / learning.samples as f64),
-                    realized_pnl: learning.realized_pnl,
-                }
-            })
-            .collect(),
-        intraday_used_notional: allocated_notional_for_category(&settings, Some(StrategyCategory::Intraday)),
-        daily_strategy_used_notional: allocated_notional_for_category(&settings, Some(StrategyCategory::Daily)),
+        capital_allocation: capital_allocation_status(state, settings, now_ms),
         max_entries_per_auto_position: settings.max_entries_per_auto_position,
         stop_loss_percent: settings.stop_loss_percent,
         take_profit_percent: settings.take_profit_percent,

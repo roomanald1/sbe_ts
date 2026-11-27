@@ -18,6 +18,8 @@ async fn snapshot_position_ledger(ledger: &Mutex<Ledger>) -> (Ledger, f64, f64, 
         barrier_orders: guard.barrier_orders.clone(),
         scheduled_runs: guard.scheduled_runs.clone(),
         no_fill_order_responses: guard.no_fill_order_responses.clone(),
+        execution_path_history: guard.execution_path_history.clone(),
+        execution_path_history_truncated: guard.execution_path_history_truncated,
         fill_id_epoch: guard.fill_id_epoch.clone(),
         fill_id_sequence: guard.fill_id_sequence,
         portfolio_baseline_source_system: guard.portfolio_baseline_source_system.clone(),
@@ -491,6 +493,16 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
             .map(serde_json::from_value::<Vec<NoFillOrderResponse>>)
             .transpose()?
             .unwrap_or_default();
+        ledger.execution_path_history = meta
+            .get("execution_path_history")
+            .cloned()
+            .map(serde_json::from_value::<Vec<ExecutionPathTerminalRecord>>)
+            .transpose()?
+            .unwrap_or_default();
+        ledger.execution_path_history_truncated = meta
+            .get("execution_path_history_truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         ledger.fill_id_epoch = meta
             .get("fill_id_epoch")
             .and_then(serde_json::Value::as_str)
@@ -518,6 +530,11 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
             let excess = ledger.no_fill_order_responses.len() - NO_FILL_IDEMPOTENCY_CAPACITY;
             ledger.no_fill_order_responses.drain(..excess);
         }
+        if ledger.execution_path_history.len() > MAX_TERMINAL_EXECUTION_PATH_ORDERS {
+            let excess = ledger.execution_path_history.len() - MAX_TERMINAL_EXECUTION_PATH_ORDERS;
+            ledger.execution_path_history.drain(..excess);
+            ledger.execution_path_history_truncated = true;
+        }
     }
     macro_rules! read_rows {
         ($table:literal, $field:ident, $ty:ty) => {{
@@ -539,6 +556,7 @@ fn load_sqlite_ledger(path: &std::path::Path) -> anyhow::Result<Ledger> {
     read_rows!("resting_orders", orders, RestingOrder);
     read_rows!("barrier_orders", barrier_orders, BarrierOrder);
     read_rows!("scheduled_runs", scheduled_runs, VwapRunStatus);
+    trim_global_execution_path_samples(&mut ledger);
     Ok(ledger)
 }
 
@@ -644,6 +662,8 @@ struct PortfolioEvidenceIntervalV1 {
     baseline_evidence_id: Option<String>,
     #[serde(default)]
     is_baseline: bool,
+    #[serde(default)]
+    baseline_reason: Option<String>,
     #[serde(default)]
     opening_cash_amount: Option<f64>,
     #[serde(default)]
@@ -866,6 +886,8 @@ fn save_sqlite_ledger_at(
             "initial_cash": ledger.initial_cash,
             "max_leverage": ledger.max_leverage,
             "no_fill_order_responses": ledger.no_fill_order_responses,
+            "execution_path_history": ledger.execution_path_history,
+            "execution_path_history_truncated": ledger.execution_path_history_truncated,
             "fill_id_epoch": ledger.fill_id_epoch,
             "fill_id_sequence": ledger.fill_id_sequence,
             "portfolio_baseline_source_system": ledger.portfolio_baseline_source_system,
@@ -1122,41 +1144,6 @@ fn save_sqlite_ledger_at(
         .as_ref()
         .map(|values| values.values().sum::<f64>())
         .filter(|value| value.is_finite());
-    let opening_cash_balances_by_currency = if explicit_baseline_request {
-        Some(cash_balances_by_currency.clone())
-    } else {
-        previous
-            .as_ref()
-            .map(|prior| prior.cash_balances_by_currency.clone())
-    };
-    let opening_cash_value_usd_by_currency = if explicit_baseline_request {
-        closing_cash_value_usd_by_currency.clone()
-    } else {
-        previous
-            .as_ref()
-            .and_then(|prior| prior.closing_cash_value_usd_by_currency.clone())
-    };
-    let opening_cash_total_usd = if explicit_baseline_request {
-        closing_cash_total_usd
-    } else {
-        previous
-            .as_ref()
-            .and_then(|prior| prior.closing_cash_total_usd)
-    };
-    let opening_fx_rates_usd_by_currency = if explicit_baseline_request {
-        Some(closing_fx_rates_usd_by_currency.clone())
-    } else {
-        previous
-            .as_ref()
-            .map(|prior| prior.closing_fx_rates_usd_by_currency.clone())
-    };
-    let opening_fx_rates_updated_at_by_currency = if explicit_baseline_request {
-        Some(closing_fx_rates_updated_at_by_currency.clone())
-    } else {
-        previous
-            .as_ref()
-            .map(|prior| prior.closing_fx_rates_updated_at_by_currency.clone())
-    };
     let heartbeat_gap = previous
         .as_ref()
         .is_some_and(|prior| observed_at_ms.saturating_sub(prior.heartbeat_at_utc_ms) > 60_000);
@@ -1259,7 +1246,18 @@ fn save_sqlite_ledger_at(
         completeness_reasons.push("fill_allocator_epoch_changed".to_owned());
     }
     let source_quality = completeness_reasons.is_empty();
-    let baseline_source = if explicit_baseline_request && source_quality {
+    let recovered_after_gap = !explicit_baseline_request
+        && source_quality
+        && previous.as_ref().is_some_and(|prior| {
+            !prior.complete
+                && prior
+                    .baseline_evidence_id
+                    .as_deref()
+                    .is_some_and(|id| !id.is_empty())
+        });
+    let baseline_source = if recovered_after_gap {
+        Some("position_manager_recovered_flat_cash_checkpoint_v1".to_owned())
+    } else if explicit_baseline_request && source_quality {
         if ledger.portfolio_baseline_source_record_id.is_some()
             && ledger.portfolio_baseline_source_epoch.is_some()
             && ledger.portfolio_baseline_source_cursor.is_some()
@@ -1275,7 +1273,49 @@ fn save_sqlite_ledger_at(
     } else {
         None
     };
-    let is_baseline = explicit_baseline_request && source_quality;
+    let is_baseline = (explicit_baseline_request && source_quality) || recovered_after_gap;
+    let baseline_reason = if recovered_after_gap {
+        Some("recovered_after_incomplete_interval_at_source_complete_flat_boundary".to_owned())
+    } else if explicit_baseline_request && source_quality {
+        Some("explicit_opening_baseline".to_owned())
+    } else {
+        None
+    };
+    let opening_cash_balances_by_currency = if is_baseline {
+        Some(cash_balances_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.cash_balances_by_currency.clone())
+    };
+    let opening_cash_value_usd_by_currency = if is_baseline {
+        closing_cash_value_usd_by_currency.clone()
+    } else {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.closing_cash_value_usd_by_currency.clone())
+    };
+    let opening_cash_total_usd = if is_baseline {
+        closing_cash_total_usd
+    } else {
+        previous
+            .as_ref()
+            .and_then(|prior| prior.closing_cash_total_usd)
+    };
+    let opening_fx_rates_usd_by_currency = if is_baseline {
+        Some(closing_fx_rates_usd_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.closing_fx_rates_usd_by_currency.clone())
+    };
+    let opening_fx_rates_updated_at_by_currency = if is_baseline {
+        Some(closing_fx_rates_updated_at_by_currency.clone())
+    } else {
+        previous
+            .as_ref()
+            .map(|prior| prior.closing_fx_rates_updated_at_by_currency.clone())
+    };
     if is_baseline {
         // A baseline anchors current balances; it is not itself a period of
         // cash movement from the unknown prior state.
@@ -1417,28 +1457,36 @@ fn save_sqlite_ledger_at(
         },
         topup_cursor_end: ledger.topups.len(),
         baseline_source,
-        baseline_independent_source_system: if is_baseline {
+        baseline_independent_source_system: if recovered_after_gap {
+            None
+        } else if is_baseline {
             ledger.portfolio_baseline_source_system.clone()
         } else {
             previous
                 .as_ref()
                 .and_then(|prior| prior.baseline_independent_source_system.clone())
         },
-        baseline_independent_source_record_id: if is_baseline {
+        baseline_independent_source_record_id: if recovered_after_gap {
+            None
+        } else if is_baseline {
             ledger.portfolio_baseline_source_record_id.clone()
         } else {
             previous
                 .as_ref()
                 .and_then(|prior| prior.baseline_independent_source_record_id.clone())
         },
-        baseline_independent_source_epoch: if is_baseline {
+        baseline_independent_source_epoch: if recovered_after_gap {
+            None
+        } else if is_baseline {
             ledger.portfolio_baseline_source_epoch.clone()
         } else {
             previous
                 .as_ref()
                 .and_then(|prior| prior.baseline_independent_source_epoch.clone())
         },
-        baseline_independent_source_cursor: if is_baseline {
+        baseline_independent_source_cursor: if recovered_after_gap {
+            None
+        } else if is_baseline {
             ledger.portfolio_baseline_source_cursor
         } else {
             previous
@@ -1447,8 +1495,13 @@ fn save_sqlite_ledger_at(
         },
         baseline_evidence_id,
         is_baseline,
+        baseline_reason,
         opening_cash_amount: if is_baseline {
-            Some(ledger.initial_cash)
+            if recovered_after_gap {
+                cash_balances_by_currency.get("USD").copied()
+            } else {
+                Some(ledger.initial_cash)
+            }
         } else {
             previous
                 .as_ref()
@@ -1499,7 +1552,14 @@ fn save_sqlite_ledger_at(
         known_fee_fills,
         unknown_fee_fills,
         legacy_fill_rows_without_allocator_identity,
-        provenance: if ledger.portfolio_baseline_source_record_id.is_some() {
+        provenance: if recovered_after_gap {
+            vec![
+                "position_manager_sqlite_fill_ledger".to_owned(),
+                "position_manager_recovered_flat_cash_checkpoint_pending_independent_reconciliation".to_owned(),
+                "position_manager_sqlite_usd_topup_ledger".to_owned(),
+                "position_manager_dated_carry_ledger".to_owned(),
+            ]
+        } else if ledger.portfolio_baseline_source_record_id.is_some() {
             vec![
                 "position_manager_sqlite_fill_ledger".to_owned(),
                 "paper_exchange_simulator_opening_capital_v1".to_owned(),
@@ -1880,6 +1940,109 @@ mod ledger_snapshot_tests {
     }
 
     #[test]
+    fn source_complete_flat_recovery_appends_a_new_reporting_baseline_after_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "position-management-portfolio-recovered-baseline-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut ledger = Ledger {
+            initial_cash: 10_000.0,
+            fill_id_epoch: Some("test-epoch".to_owned()),
+            ..Ledger::default()
+        };
+        save_sqlite_ledger_at(&path, &ledger, 1_000, true).unwrap();
+        let original_baseline = latest_portfolio_evidence(&path).unwrap();
+        assert!(original_baseline.is_baseline && original_baseline.complete);
+
+        let mut opening_fill = fill("open", "buy", 1, 2_000);
+        opening_fill.symbol = "BTC-USD".to_owned();
+        opening_fill.fee_currency = "USD".to_owned();
+        ledger.trades.push(opening_fill);
+        ledger.fill_id_sequence = 1;
+        save_sqlite_ledger_at(&path, &ledger, 3_000, false).unwrap();
+        let unvalued = latest_portfolio_evidence(&path).unwrap();
+        assert!(!unvalued.complete);
+        assert!(
+            unvalued
+                .completeness_reasons
+                .iter()
+                .any(|reason| reason == "nonflat_positions_need_point_in_time_valuation")
+        );
+
+        // Simulate process restart during the unvalued interval.
+        let mut restarted = load_sqlite_ledger(&path).unwrap();
+        let mut closing_fill = fill("close", "sell", 2, 4_000);
+        closing_fill.symbol = "BTC-USD".to_owned();
+        closing_fill.fee_currency = "USD".to_owned();
+        restarted.trades.push(closing_fill);
+        restarted.fill_id_sequence = 2;
+        save_sqlite_ledger_at(&path, &restarted, 5_000, false).unwrap();
+        let recovered_baseline = latest_portfolio_evidence(&path).unwrap();
+        assert!(recovered_baseline.is_baseline && recovered_baseline.complete);
+        assert_eq!(
+            recovered_baseline.baseline_source.as_deref(),
+            Some("position_manager_recovered_flat_cash_checkpoint_v1")
+        );
+        assert_eq!(
+            recovered_baseline.baseline_reason.as_deref(),
+            Some("recovered_after_incomplete_interval_at_source_complete_flat_boundary")
+        );
+        assert!((recovered_baseline.opening_cash_amount.unwrap() - 9_999.8).abs() < 1e-8);
+        assert_eq!(
+            recovered_baseline.baseline_independent_source_record_id,
+            None
+        );
+        assert_eq!(
+            recovered_baseline.baseline_evidence_id.as_deref(),
+            Some(recovered_baseline.evidence_id.as_str())
+        );
+        assert!(!recovered_baseline.portfolio_return_complete);
+        assert!(recovered_baseline.flat_cash_period_net_pnl_usd.is_none());
+        assert!(recovered_baseline.gap_before_baseline);
+
+        // Historical rows remain unchanged and the new period continues from
+        // the append-only anchor after another restart.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let rows = {
+            let mut statement = db
+                .prepare(
+                    "SELECT payload FROM portfolio_evidence_intervals ORDER BY observed_at_ms, rowid",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| {
+                    serde_json::from_str::<PortfolioEvidenceIntervalV1>(&row.unwrap()).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        drop(db);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].evidence_id, original_baseline.evidence_id);
+        assert!(!rows[1].complete);
+        assert!(rows[2].is_baseline);
+        let next_ledger = load_sqlite_ledger(&path).unwrap();
+        save_sqlite_ledger_at(&path, &next_ledger, 6_000, false).unwrap();
+        let next_period = latest_portfolio_evidence(&path).unwrap();
+        assert!(next_period.complete && !next_period.is_baseline);
+        assert_eq!(next_period.interval_start_utc_ms, Some(5_000));
+        assert_eq!(
+            next_period.baseline_evidence_id.as_deref(),
+            Some(recovered_baseline.evidence_id.as_str())
+        );
+        assert!(next_period.portfolio_return_complete);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
     fn explicit_flat_baseline_heartbeat_topup_and_fill_coverage_survive_restart() {
         let path = std::env::temp_dir().join(format!(
             "position-management-portfolio-baseline-{}-{}.sqlite",
@@ -2100,7 +2263,7 @@ mod ledger_snapshot_tests {
             "quantity": 0.25, "execution_price": 40000.0, "timestamp": 123
         }))
         .unwrap();
-        let ledger = Ledger {
+        let mut ledger = Ledger {
             trades: vec![trade],
             initial_cash: 12_345.0,
             topups: vec![AccountTopup {
@@ -2111,6 +2274,22 @@ mod ledger_snapshot_tests {
             max_leverage: Some(3.0),
             ..Ledger::default()
         };
+        let expired: RestingOrder = serde_json::from_value(serde_json::json!({
+            "id":"expired-round-trip", "symbol":"BTC-USDT", "side":"buy",
+            "quantity":1.0, "remaining_quantity":0.0, "limit_price":99.0,
+            "timestamp":456, "parent_order_id":"parent-round-trip",
+            "client_order_id":"client-round-trip", "market_path_completeness":"observed_only",
+            "market_path":[{
+                "source_system":"paper_exchange.match_response", "source_epoch":"epoch-1",
+                "source_cursor":7, "source_cursor_kind":"global", "source_capture_complete":true,
+                "request_fingerprint":"sha256:7", "attempt_order_id":"attempt-7",
+                "parent_order_id":"parent-round-trip", "recorded_at_utc_ms":700,
+                "book_updated_at_ms":699, "best_bid":98.0, "best_ask":100.0,
+                "reference_price":99.0
+            }]
+        }))
+        .unwrap();
+        terminalize_resting_order(&mut ledger, expired, "expired", 800);
         save_sqlite_ledger(&path, &ledger).unwrap();
         let restored = load_sqlite_ledger(&path).unwrap();
         assert_eq!(restored.initial_cash, 12_345.0);
@@ -2119,6 +2298,19 @@ mod ledger_snapshot_tests {
         assert_eq!(restored.trades[0].id, "round-trip");
         assert_eq!(restored.topups.len(), 1);
         assert_eq!(restored.topups[0].amount, 50.0);
+        let path_record = &restored.execution_path_history[0];
+        assert_eq!(path_record.terminal_reason, "expired");
+        assert_eq!(path_record.terminal_at_ms, 800);
+        assert_eq!(
+            path_record.order.market_path[0].source_epoch.as_deref(),
+            Some("epoch-1")
+        );
+        assert_eq!(path_record.order.market_path[0].source_cursor, Some(7));
+        assert_eq!(path_record.order.market_path[0].best_bid, Some(98.0));
+        assert_eq!(
+            path_record.order.parent_order_id.as_deref(),
+            Some("parent-round-trip")
+        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));

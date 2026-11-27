@@ -43,6 +43,13 @@ pub struct StrategyParameterScoutVariant {
 pub struct StrategyParameterProfile {
     pub symbol: String,
     pub strategy: String,
+    /// Exact Learning-owned parameter-set identity when one was published.
+    /// Catalog/bootstrap rows leave this absent rather than synthesizing a
+    /// learned profile identity from their defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_version: Option<u64>,
     pub learning_samples: usize,
     pub positive_rate: Option<f64>,
     pub realized_pnl: f64,

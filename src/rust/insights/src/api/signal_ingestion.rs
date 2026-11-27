@@ -534,10 +534,40 @@ fn strategy_signal_from_snapshot(
     }
 }
 
+/// Keep the strategy-facing cached quote monotonic, matching the SignalEngine
+/// quote guard. Older/equal source events remain observable through provenance
+/// diagnostics but cannot replace the market snapshot used downstream.
+fn update_market_cache_if_newer(
+    cache: &DashMap<String, CachedMarket>,
+    symbol: &str,
+    update: CachedMarket,
+) -> Result<(), u64> {
+    match cache.entry(symbol.to_owned()) {
+        dashmap::mapref::entry::Entry::Vacant(entry) => {
+            entry.insert(update);
+            Ok(())
+        }
+        dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+            let current_timestamp = entry.get().timestamp;
+            if update.timestamp > current_timestamp {
+                entry.insert(update);
+                Ok(())
+            } else {
+                Err(current_timestamp)
+            }
+        }
+    }
+}
+
 async fn ingest_signal_event(
     axum::extract::State(runtime): axum::extract::State<Arc<SignalRuntime>>,
     Json(request): Json<SignalEventRequest>,
 ) -> Result<Json<Option<SignalSnapshot>>, (StatusCode, String)> {
+    let received_at_ms = now_ms();
+    let event_queue_wait_ms = request
+        .queued_at
+        .as_ref()
+        .map(|queued_at| queued_at.elapsed().as_millis() as u64);
     if request.symbol.is_empty() || !request.symbol.is_ascii() || request.symbol.len() > 32 {
         return Err((StatusCode::BAD_REQUEST, "Invalid signal symbol".to_owned()));
     }
@@ -832,8 +862,9 @@ async fn ingest_signal_event(
                 ask_levels,
             } => {
                 let engine_work_started = Instant::now();
-                engine.on_book(
+                engine.on_book_with_receive_time(
                     timestamp,
+                    received_at_ms,
                     best_bid,
                     best_ask,
                     &bid_sizes,
@@ -853,16 +884,35 @@ async fn ingest_signal_event(
                     && best_bid > 0.0
                     && best_ask >= best_bid
                 {
-                    runtime.market_cache.insert(
-                        request.symbol.clone(),
-                        CachedMarket {
+                    let update = CachedMarket {
+                        timestamp,
+                        best_bid,
+                        best_ask,
+                        bid_levels,
+                        ask_levels,
+                    };
+                    if let Err(previous_timestamp) =
+                        update_market_cache_if_newer(&runtime.market_cache, &request.symbol, update)
+                        && signal_diagnostic_due(&runtime, &request.symbol, received_at_ms)
+                    {
+                        crate::service_log!(
+                            "WARN",
+                            "Signal book cache rejected non-advancing quote: symbol={} event_id={} reason={} source_timestamp_ms={} cached_timestamp_ms={} received_at_ms={} source_receive_delta_ms={} queue_wait_ms={:?} process_started_at_ms={}",
+                            request.symbol,
+                            event_identity.event_id,
+                            if timestamp == previous_timestamp {
+                                "equal_timestamp"
+                            } else {
+                                "older_timestamp"
+                            },
                             timestamp,
-                            best_bid,
-                            best_ask,
-                            bid_levels,
-                            ask_levels,
-                        },
-                    );
+                            previous_timestamp,
+                            received_at_ms,
+                            i128::from(received_at_ms) - i128::from(timestamp),
+                            event_queue_wait_ms,
+                            runtime.signal_process_started_at_ms,
+                        );
+                    }
                 }
                 None
             }
@@ -1149,6 +1199,32 @@ mod signal_ingestion_tests {
     fn benchmark_event(index: usize) -> Vec<u8> {
         let timestamp = INGEST_BENCHMARK_START_MS + index as u64 * INGEST_BENCHMARK_STEP_MS;
         raw_price_event(timestamp, 100.0 + index as f64 * 0.01)
+    }
+
+    #[test]
+    fn live_market_cache_does_not_regress_on_late_or_equal_books() {
+        let cache = DashMap::new();
+        let market = |timestamp, bid| CachedMarket {
+            timestamp,
+            best_bid: bid,
+            best_ask: bid + 0.2,
+            bid_levels: [(bid, 1.0); 7],
+            ask_levels: [(bid + 0.2, 1.0); 7],
+        };
+        assert!(update_market_cache_if_newer(&cache, "BTC-USDT", market(20_000, 100.0)).is_ok());
+        assert_eq!(
+            update_market_cache_if_newer(&cache, "BTC-USDT", market(10_000, 90.0)),
+            Err(20_000)
+        );
+        assert_eq!(
+            update_market_cache_if_newer(&cache, "BTC-USDT", market(20_000, 105.0)),
+            Err(20_000)
+        );
+        assert!(update_market_cache_if_newer(&cache, "BTC-USDT", market(21_000, 101.0)).is_ok());
+
+        let current = cache.get("BTC-USDT").unwrap();
+        assert_eq!(current.timestamp, 21_000);
+        assert_eq!(current.best_bid, 101.0);
     }
 
     fn raw_price_event(timestamp_ms: u64, price: f64) -> Vec<u8> {

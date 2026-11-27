@@ -377,6 +377,7 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                 price_path_total_samples,
                 price_path_truncated,
                 price_path_restart_interrupted,
+                price_path_epoch,
                 position_quantity,
                 effective_stop_loss_percent,
                 effective_take_profit_percent,
@@ -388,8 +389,11 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                 prior_total_fees,
                 total_entry_fees_paid,
                 entry_fill_ids,
+                entry_fill_links,
                 entry_fee_currencies,
                 entry_fill_costs_complete,
+                initial_risk_reference,
+                exit_parameter_provenance,
                 entry_context,
                 scout_entry,
                 strategy_decision,
@@ -406,6 +410,7 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                         position.price_path_total_samples,
                         position.price_path_truncated,
                         position.price_path_restart_interrupted,
+                        position.price_path_epoch.clone(),
                         position.quantity,
                         position
                             .stop_loss_percent
@@ -422,8 +427,11 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                         position.total_fees_paid,
                         position.total_entry_fees_paid,
                         position.entry_fill_ids.clone(),
+                        position.entry_fill_links.clone(),
                         position.entry_fee_currencies.clone(),
                         position.entry_fill_costs_complete,
+                        position.initial_risk_reference.clone(),
+                        position.exit_parameter_provenance.clone(),
                         position.entry_context.clone(),
                         position.scout_entry,
                         position.strategy_decision.clone(),
@@ -437,6 +445,7 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     0,
                     false,
                     false,
+                    None,
                     0.0,
                     settings.stop_loss_percent,
                     settings.take_profit_percent,
@@ -449,7 +458,10 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     0.0,
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     false,
+                    None,
+                    None,
                     String::new(),
                     false,
                     None,
@@ -595,8 +607,11 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     exploratory,
                     scout_entry,
                     entry_fill_ids: entry_fill_ids.clone(),
+                    entry_fill_links: entry_fill_links.clone(),
                     entry_fee_currencies: entry_fee_currencies.clone(),
                     entry_fill_costs_complete,
+                    initial_risk_reference: initial_risk_reference.clone(),
+                    exit_parameter_provenance: exit_parameter_provenance.clone(),
                     strategy_decision: strategy_decision.clone(),
                     ..TraderPosition::default()
                 };
@@ -743,16 +758,27 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                let price_path_evidence = price_path_excursion_evidence_for_samples(
-                    &price_path,
+                let evidence_position = TraderPosition {
+                    quantity: position_quantity,
+                    average_entry_price: entry_price_before,
+                    entry_timestamp_ms: position_entry_timestamp_ms,
+                    price_path: price_path.clone(),
                     price_path_total_samples,
                     price_path_truncated,
                     price_path_restart_interrupted,
-                    entry_price_before,
-                    position_quantity,
-                    position_entry_timestamp_ms,
-                    update_timestamp,
-                );
+                    price_path_epoch: price_path_epoch.clone(),
+                    trade_id: trade_id.clone(),
+                    lifecycle_identity: lifecycle_identity.clone(),
+                    entry_fill_ids: entry_fill_ids.clone(),
+                    entry_fill_links: entry_fill_links.clone(),
+                    entry_fee_currencies: entry_fee_currencies.clone(),
+                    entry_fill_costs_complete,
+                    initial_risk_reference: initial_risk_reference.clone(),
+                    exit_parameter_provenance: exit_parameter_provenance.clone(),
+                    ..TraderPosition::default()
+                };
+                let price_path_evidence =
+                    price_path_excursion_evidence(&evidence_position, update_timestamp);
                 let mut payload = protective_stop_audit_payload(
                     &decision_id,
                     &stop,
@@ -763,7 +789,7 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     barrier,
                     total_filled,
                     total_fee,
-                    cumulative_strategy_pnl,
+                    trade_realized_pnl,
                     entry_price_before,
                     entry_fees,
                     entry_quantity,
@@ -804,6 +830,58 @@ async fn sync_protective_stops(state: &AutoTraderState) -> Result<(), (StatusCod
                     payload["trade_id"] = serde_json::json!(trade_id);
                     payload["entry_context"]["trade_id"] = serde_json::json!(trade_id);
                 }
+                payload["canonical_lifecycle_identity"] = serde_json::json!(lifecycle_identity);
+                payload["canonical_identity_status"] =
+                    serde_json::json!(if lifecycle_identity.as_ref().is_some_and(|identity| {
+                        identity.schema_version == 1
+                            && identity.trade_id == trade_id.as_deref().unwrap_or_default()
+                            && !identity.episode_id.is_empty()
+                            && !identity.opportunity_id.is_empty()
+                    }) {
+                        "complete"
+                    } else {
+                        "missing_or_mismatched"
+                    });
+                payload["entry_context"]["lifecycle_identity"] =
+                    serde_json::json!(lifecycle_identity);
+                payload["entry_context"]["entry_fill_ids"] = serde_json::json!(entry_fill_ids);
+                payload["entry_context"]["entry_fill_links"] = serde_json::json!(entry_fill_links);
+                payload["entry_context"]["entry_fee_currencies"] =
+                    serde_json::json!(entry_fee_currencies);
+                payload["entry_context"]["entry_fill_costs_complete"] =
+                    serde_json::json!(entry_fill_costs_complete);
+                payload["entry_context"]["initial_risk_reference"] =
+                    serde_json::json!(initial_risk_reference);
+                payload["entry_context"]["exit_parameter_provenance"] =
+                    serde_json::json!(exit_parameter_provenance);
+                payload["exit_parameter_provenance"] =
+                    serde_json::json!(exit_parameter_provenance);
+                payload["realized_r_evidence"] = realized_r_evidence(
+                    &evidence_position,
+                    &symbol,
+                    fully_closed,
+                    trade_realized_pnl,
+                    (outcome_fee_currencies.len() == 1)
+                        .then(|| outcome_fee_currencies.iter().next().unwrap().as_str()),
+                    outcome_fees_complete,
+                );
+                payload["price_path"] = serde_json::json!(price_path
+                    .iter()
+                    .map(|sample| serde_json::json!({
+                        "timestamp": sample.timestamp,
+                        "sequence": sample.sequence,
+                        "epoch": sample.epoch,
+                        "trade_id": trade_id,
+                        "episode_id": lifecycle_identity.as_ref().map(|identity| &identity.episode_id),
+                        "opportunity_id": lifecycle_identity.as_ref().map(|identity| &identity.opportunity_id),
+                        "bid": sample.bid,
+                        "ask": sample.ask,
+                        "source_updated_at_ms": sample.source_updated_at_ms,
+                        "freshness_contract_version": sample.freshness_contract_version,
+                        "freshness_max_age_ms": sample.freshness_max_age_ms,
+                        "source_fresh": sample.source_fresh,
+                    }))
+                    .collect::<Vec<_>>());
                 payload["entry_context"]["learning_context"] = serde_json::json!(entry_context);
                 payload["entry_context"]["strategy_decision"] =
                     serde_json::json!(strategy_decision);
@@ -917,6 +995,8 @@ fn protective_stop_audit_payload(
         "effective_take_profit_percent": effective_take_profit_percent,
         "price_path": price_path.iter().map(|sample| serde_json::json!({
             "timestamp": sample.timestamp,
+            "sequence": sample.sequence,
+            "epoch": sample.epoch,
             "bid": sample.bid,
             "ask": sample.ask,
             "source_updated_at_ms": sample.source_updated_at_ms,

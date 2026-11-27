@@ -201,7 +201,7 @@ Analyse each evidence source separately by strategy, symbol, direction, regime, 
 - Execute the canonical Section 4 audit checklist below, covering realised learning, replay, daily coverage, walk-forward and missed opportunities.
 Acceptance: reconcile eligible counts/returns and demonstrate accepted outcomes influence learning; apply shared evidence/recovery tests, including missing attribution, mode separation, profile changes and empty/populated replay. Treat screenshot anomalies as investigation targets, not confirmed defects.
 
-## 5. Multi-timeframe strategies and dynamic allocation — High [ENG + QUANT]
+## 5. Multi-timeframe strategies and dynamic allocation — Critical [ENG + QUANT]
 Keep ranking, sizing and atomic reservations within the shared latency budget; test concurrent opportunities and consistent portfolio state.
 [QUANT] Verify daily evidence and why positive daily strategies rarely execute. Evaluate 15m/1h/4h variants and higher-timeframe alignment using existing scouting; compare regimes, net expectancy, frequency, holding duration, drawdown and capital/time efficiency. Apply I3; do not transplant parameters blindly.
 - [ENG, Wave 1A] Trace sizing defaults, exploratory notional, minimum order/dust rules, rounding, balances, cap precedence and atomic reservation creation/release on fills, cancellation, closure and restart. Explain $11.76/$1,000 with 10/10 slots before optimiser work; do not assume a leak. Apply shared capital/risk tests.
@@ -210,7 +210,8 @@ Keep ranking, sizing and atomic reservations within the shared latency budget; t
 - Optimise the whole available capital pool, not individual strategy budgets in isolation. Reconcile deployable funds, balances, reservations, liquidity and hard risk headroom; dynamically recycle released capital and reallocate idle budgets across eligible strategies, symbols and horizons. Size and rank competing opportunities by marginal expected net portfolio benefit per unit of capital and time, accounting for uncertainty, covariance, costs and drawdown. Investigate persistent underutilisation (baseline $11.76/$1,000 with 10/10 intraday slots); distinguish justified cash reserves from avoidable allocation, eligibility or execution bottlenecks. Apply I3.
 - Show base/effective budgets, multipliers, utilisation, reservations, deployable idle funds, reasons for idle capital, marginal opportunity value, rankings, eligibility, evidence gaps and rejection rationale. Compare fixed-budget/cap baselines; apply shared capital/risk tests, including strict starvation and allocation stability. Acceptance: compare net return on total available capital, risk-adjusted return, drawdown, turnover, time-weighted utilisation and avoidable idle capital against fixed-allocation baselines under equivalent conditions; demonstrate that higher utilisation improves portfolio outcomes rather than merely increasing exposure.
 
-## 6. Instrumentation and UI consolidation — High [ENG]
+## 6. Instrumentation and UI consolidation — Critical [ENG]
+The original six dashboard areas remain required capabilities. They are disaggregated into eight independently configurable operator widgets in the UI requirements below; this preserves the original scope while making each operator workflow separately inspectable and testable.
 Apply I4; verify instrumentation overhead and freeze stage timing contracts before dependent analytics. Apply the SBE/VWAP guardrails in AGENTS.md.
 [ENG] Freeze instrumentation schema before dependent analytics. Capture gross/net MFE/MAE, profit capture relative to positive executable net MFE, giveback/losses, time to extremes/first profit, signal at decision/submission/fill and during holding, fill delay, gross/net returns, expected/actual fees/slippage, trigger versus execution return, configuration and opportunity IDs. Record adverse post-stop movement at 100ms/500ms/1s/5s. Expose in decision/gates/position/learning drill-downs. Use bounded ring buffers, asynchronous batched writes, configurable TTL/downsampling and storage budgets for high-frequency telemetry; monitor dropped samples and backpressure. Apply I4 and the shared overload/restart tests.
 
@@ -262,8 +263,21 @@ Learning owns evidence requirements; existing schedulers fulfil them. Publish ve
 ## 14. Exploration efficiency — Medium [QUANT]
 Use existing scouting for inexpensive evidence; justify live exploration by incremental execution information. Apply I3; calibrate scout execution from comparable live outcomes. Record rejected context and subsequent movement; cap exploratory fees, losses and exposure; allocate by information value.
 
-## 15. Volatility-adjusted SL/TP — Medium [QUANT]
-Evaluate fixed -0.50%/+0.75% against volatility, MFE/MAE, duration and costs by symbol/regime. Test adaptive distances with economic minimums, maximum risk and appropriate sizing using historical evidence/scouting before approved live validation.
+## 15. Autonomous profile-owned exit parameters — Critical [ENG + QUANT]
+Global AutoTrader controls own hard capital, exposure, loss, position-count and risk limits. They do not define universal per-trade protective distances. The current global status/UI reports 0.50% stop / 0.75% target, while protective strategy parameter catalogues commonly bootstrap at 0.50% / 0.80%; selected profile parameters and active validated exit policies can override these values. Strategies may also disable fixed stops or targets. The global pair is therefore not universally executed, but broad strategy defaults remain fixed bootstrap values rather than evidence learned. Source inspection also confirms that `adapt_exit_policy` changes the global fallback target with `risk_appetite`; many strategy profiles shadow it, while unprofiled/counterfactual/legacy fallback paths remain sensitive to it. A further trace confirmed a concrete target override: exit and activity logic used `max(horizon_take_profit_percent, global take_profit_percent)`, which could raise a selected horizon target to the global fallback. The open-position activity response also substitutes global stop/target values when position values are absent. These leaks are being removed from selected policy execution and replaced with separately identified fallback/current fields; compatibility values must not be presented as the entry selection. Keep defaults during the replacement, expose exact persisted source, and test that risk appetite/global fallback never silently overrides a selected profile value. See Beads `sbe_ts-c7ag.5` and `sbe_ts-q8or.15`.
+
+### 15.1 Parameter ownership, learning and propagation
+- Separate operator safety constraints from strategy policy. Validated strategy profiles own stop-loss and take-profit distances, maximum holding duration, profit-protection activation/giveback, trailing activation/distance, breakeven protection and supported volatility-adjusted thresholds. Attribute every selected value to symbol, strategy, profile ID/version and its source. Add direction, regime, volatility, exchange and horizon only where effective independent evidence supports that granularity.
+- Evaluate candidate exits with executable MFE/MAE and post-exit paths, fill/fee/FX costs and the historical What-if Simulator. Compare net expectancy and expectancy in R, Profit Factor, payoff ratio, average winner/loser, winner preservation, loser recovery, drawdown, risk-adjusted return, capital efficiency, holding duration, execution costs and robustness across conditions. Do not optimize win rate or gross return alone. Preserve effective-sample, confidence, holdout, walk-forward and promotion safeguards; prefer stable parameter regions to isolated optima.
+- Implement an explicit fallback hierarchy: validated symbol-specific profile; validated broader strategy profile; bounded exploratory policy; documented bootstrap/fallback default; insufficient evidence; awaiting validation. Record the exact source/provenance selected for each order and position. Never describe an unvalidated default as learned. Preserve existing fail-closed and controlled exploration behavior where no valid protection exists.
+- Keep learned thresholds within operator-defined hard limits. Wider stops must not increase monetary risk: size from the selected stop and authoritative initial risk while accounting for available capital, fees/costs, liquidity, slippage/gap risk, existing exposure, remaining daily loss and correlation constraints. A stop is not a guaranteed maximum loss. Adjust size to the applicable policy rather than enforcing identical distances.
+- Trace Learning → validated profile → Strategy → signal → AutoTrader → allocation → Position Management → barrier. Persist profile ID/version, parameter source, selected initial stop/target, immutable initial-risk denominator, actual barrier thresholds, subsequent adjustments/reasons, trigger and execution prices. Preserve original risk for realized-R calculations. A profile promotion must not silently alter an open position beyond its authorized protection policy.
+- Test distinct symbols under one strategy, distinct strategies for one symbol, supported direction/regime/volatility variants, broader-profile fallback, insufficient evidence, promotion/version change, restart persistence, exact barrier propagation, unsafe-policy rejection, stop-aware sizing and monetary risk, open-position protection under profile changes, unchanged initial risk, Learning safeguards, and UI provenance. Vary global risk appetite with a validated profile and prove that its exit parameters remain unchanged; separately verify and label fallback-only adaptation. Include deterministic end-to-end fixtures proving two positions receive different profile-selected barriers; isolated calculation tests alone are insufficient.
+- UI: remove global fixed SL/TP from the primary Controls summary. Retain genuine hard safety limits and identify bootstrap settings as fallbacks where needed. Show selected policies in Strategy Performance and Learning, and actual per-position thresholds/provenance/adjustments in Orders and Positions. Add a configurable read-only Learned Exit Policies view with exchange, symbol, strategy, profile version, supported direction/regime, stop, target, max hold, trailing/profit protection, planned reward/risk, parameter source, effective samples, validation status, last evaluation and promotion. Drill down into prior/candidate values, path evidence, What-if results, sensitivity heatmaps, winner/loser transitions, out-of-sample validation, promotion history and accept/reject reasons. The What-if Simulator must not write trading configuration.
+- Acceptance: exact profile-selected parameters reach protective execution and survive durable recovery; monetary risk/capital invariants and existing protection remain correct; missing/unsafe evidence fails closed; all offline deterministic contracts pass. Empirical strategy selection, promotion and paper activation additionally require complete reconciled evidence and their existing approval gates.
+
+## 15.2 Volatility-adjusted protection [ENG + QUANT; dependency of 15.1]
+Evaluate existing 0.50%/0.80% strategy bootstrap defaults separately from global 0.50%/0.75% UI settings. Compare bounded volatility-adjusted exits against the validated profile baseline using executable MFE/MAE, duration, costs and symbol/regime where evidence supports it. Preserve economic minimums, maximum monetary risk and stop-aware sizing; no activation on incomplete historical evidence.
 
 ## 16. Passive stop-loss execution — Deferred [ENG + QUANT; deferred]
 Out of implementation scope until Sections 2, 7 and 12 are validated in production and separately approved. Compare maker savings with fill probability, queue uncertainty, latency, adverse movement and tail losses using Section 6 evidence. Never replace hard IOC stops with unprotected post-only orders.
@@ -298,6 +312,7 @@ During Phase 0 copy this checklist into the linked Section 4 Beads task. Delegat
 - Realised learning: 1,374+ reported trades versus zero profile-attributed results; budget multipliers show no closed trades; P&L totals disagree. Trace ledger → eligibility → learning → persistence → API → UI; verify entry profile ID/version through closure, partial exits and restarts, execution-mode filters and exclusions. Recover attribution only when supported and within a bounded investigation; preserve unrecoverable records with explicit `legacy_unattributed` provenance and exclude them from quantitative training/evaluation.
 - Scout replay: RSocket closed, 0/0 durable records, cache limit 4,096. Verify generation, retention, eviction, routing and retrieval; reconcile legitimate count differences. Add bounded pagination, cancellation/reconnection and explicit completeness/errors; durable learning must not depend on runtime cache or UI connectivity. Version durable replay schema and retain exact entry parameter hashes and historical readers across migrations.
 - Daily coverage: dated futures carry missing worker reports/zero returns; Donchian missing evidence/BTC SMA200 rejection. Check supported instruments, history, warm-up, worker health, reporting, natural signal frequency and ingestion. Verify zero is not a missing-value default; allow separately labelled gate counterfactuals in existing scouting.
+- BTC SMA regime scope is strategy-local, never a global AutoTrader filter. Current required strategies are Donchian 55/20/10 BTC200 (including the 20-day hold variant), BTC-regime trend sleeves, risk-adjusted trend portfolio and risk-adjusted monthly momentum. Own-asset SMA, RSI2, relative-strength leader, live insight strategies and dated carry do not inherit this gate. A required but missing BTC regime fails closed; the gate is direction-independent within each strategy contract. Preserve rejected candidates for separately attributed Scout observation where that contract allows, while never bypassing a required gate for a live or exploratory entry. Deterministic acceptance covers gated and ungated strategies across symbols/directions, strict and supported exploratory paths, and missing required regime. Donchian-20-BTC parameter probes remain explicitly unsupported/unclassified until separately specified; do not imply they are tested variants.
 - Walk-forward: missing Donchian samples, stale intraday evidence (18 Nov), ADA momentum 213 raw/5.1 effective and trend 48 raw/1 effective. Audit scheduling and data [ENG]; validate independent windows [QUANT], effective samples, confidence intervals (including unexpectedly narrow intervals), drawdown/downside, freshness and ingestion.
 - Missed opportunities: zero samples despite rejections; trace eligible skipped signals, horizon completion, evaluation, persistence and filters.
 
@@ -324,3 +339,2097 @@ For each package report confirmed behaviour, data/code references, changes, depe
 
 - Runtime circuit breakers: monitor stale/missing evidence, worker stalls, unexpected costs/slippage, reconciliation failures, allocation oscillation and risk breaches. Define calibrated thresholds, minimum evidence, recovery conditions and tests per feature; fall back to last validated safe configuration, reduce exposure or suspend affected entries. Preserve protective exits. Apply I5.
 - Measure incremental contribution of each feature using existing scouting, walk-forward and AutoTrader paper mode; bound scheduler compute/storage budgets, monitor queue fairness and accepted evidence per resource unit.
+
+
+## Operational Trading UI and Independent Functional Verification — Critical [ENG]
+
+This section incorporates the full requirements from `research/V35_UI_VIEW_PLAN.md` into the authoritative v35 master plan. The source file is marked superseded only after this incorporation; this master plan and the original v35 sections remain authoritative. The UI specifications supplement and preserve Sections 1–16, canonical contracts, financial gates, risk controls, performance targets, promotion criteria and WP16 deferral.
+
+Governance reconciliation: one existing v35 coordinator owns both functional lifecycle and UI implementation, plan/Beads state, shared contracts and integration. Up to two existing specialists work concurrently with disjoint file ownership; no nested delegation; the coordinator owns and serializes Cargo builds. Canonical service contracts remain authoritative and versioned; React must not duplicate business logic or fabricate missing values. Existing financial reconciliation, runtime acceptance, statistical promotion, performance and deployment gates remain distinct. Correct empty, unavailable and insufficient-evidence UI states can be accepted deterministically without a completed trade, but they do not satisfy the separate end-to-end trading or empirical v35 gates. No deployment or commit occurs without approval.
+
+Immediate parallel delivery priority: (1) Decision Funnel Diagnostics; (2) Execution Quality and the first settled trade lifecycle investigation; (3) autonomous shared capital allocation; (4) Learning and targeted evidence acquisition; (5) AutoTrader Controls and Safety. Capital allocation offline engineering is complete under `sbe_ts-gu78.28`/`.29`; deployed behavior remains unverified. WP5 and WP6 are Critical. Do not change existing financial, risk, promotion or performance thresholds.
+
+The complete operator mission, governance-compatible dashboard architecture, eight widget specifications, data owners, interactions, metrics, visualisations, historical contracts, Grafana boundary, performance/resource rules, implementation phases, testing and acceptance criteria follow. All widgets must proceed incrementally; UI work must not wait for the backend lifecycle to produce a fill, and backend defects must not be hidden by the UI.
+
+
+### UI 1. Mission
+
+Deliver a comprehensive operational trading UI that makes the behaviour, performance, intelligence and financial integrity of the automated trading system visible and understandable.
+
+The UI must enable the operator to understand:
+
+- What the system is doing.
+- Why individual symbols and strategies are or are not trading.
+- Why trading opportunities are accepted, rejected or ranked out.
+- How capital is autonomously allocated.
+- Whether orders are being executed effectively.
+- Whether positions are correctly managed and protected.
+- Whether trading is profitable after all costs.
+- Whether Learning is improving trading intelligence.
+- Whether financial outcomes are independently reconciled.
+- Whether intervention is required.
+
+The UI must support autonomous trading rather than require manual management of individual strategy or horizon allocations.
+
+This implementation must also serve as an independent functional review of v35, identifying missing functionality, incorrect implementations, observability gaps and omissions in the master plan.
+
+### UI 2. Agent Responsibilities and Working Arrangements
+
+#### UI 2.1 Independent existing v35 coordinator
+
+The existing v35 coordinator is the single overall coordinator for this work and retains the current task context, master plan, Beads ownership, serialized build queue, trading behavior and overall acceptance responsibility. UI work is an independent concurrent implementation track, not a second overall coordinator.
+
+Do not assume that existing v35 functionality is correct or complete.
+
+The coordinator must actively implement and integrate work, rather than operate solely as a project manager.
+
+#### UI 2.2 Existing v35 coordinator
+
+The existing v35 coordinator retains responsibility for:
+
+- Trading functionality.
+- Runtime validation.
+- Trading-system defects.
+- Financial reconciliation.
+- Quantitative evaluation.
+- Performance acceptance.
+- Overall v35 acceptance.
+
+Coordinate shared backend changes through Beads and explicit file ownership.
+
+#### UI 2.3 Specialist agents
+
+Use existing specialist configurations where available:
+
+- React specialist: widgets, charts, tables, interactions, layouts and frontend testing.
+- Backend contract specialist: authoritative APIs, diagnostic contracts, functional verification and missing data.
+- Grafana or integration specialist when required: technical monitoring and cross-service verification.
+
+Run independent work in parallel where safe.
+
+Avoid conflicting edits, competing builds and duplicated investigations.
+
+#### UI 2.4 Existing tooling
+
+Reuse:
+
+- Existing AGENTS.md instructions.
+- Existing Codex specialist configurations.
+- Beads for task management and dependencies.
+- Persistent repository navigation knowledge through `bd remember`.
+- RTK.
+- Existing bounded execution and diagnostic scripts.
+- Existing API and database inspection tools.
+- Existing regression and preparation tooling.
+
+Do not undertake another general tooling optimisation or repository discovery exercise.
+
+### UI 3. Relationship to the v35 Master Plan
+
+#### UI 3.1 Authoritative sources
+
+Before implementation, read:
+
+- `src/rust/auto_trader/TRADING_IMPROVEMENTS.MD`.
+- All applicable v35 work packages and acceptance criteria.
+- The latest `plan.md`.
+- Relevant open, completed, blocked and in-progress Beads tasks.
+- Existing source implementation and backend contracts.
+- Relevant deterministic tests and runtime evidence.
+- Existing React widget catalog and rendering implementation.
+- Existing Grafana dashboards and exporters.
+
+WP16 remains deferred.
+
+The v35 master plan remains authoritative for trading behaviour, risk management, financial integrity, Learning, performance and acceptance requirements.
+
+This UI plan supplements the master plan. It does not replace it.
+
+#### UI 3.2 Requirements traceability
+
+Maintain a traceability matrix linking each widget and its capabilities to:
+
+- Relevant v35 section and work package.
+- Exact functional requirement.
+- Authoritative backend service.
+- Existing implementation and API.
+- Relevant source files.
+- Associated Beads tasks.
+- Available deterministic tests.
+- Available runtime evidence.
+- Missing or incomplete functionality.
+- Required frontend changes.
+- Required backend changes.
+- Acceptance status.
+
+The work-package references in this UI plan are initial mappings. Verify them against the authoritative master plan rather than treating them as exhaustive.
+
+Review every applicable v35 work package for operationally relevant information that should be visible in the UI.
+
+Do not assume a requirement is satisfied simply because a field exists, a widget displays a value or a Beads task is closed.
+
+#### UI 3.3 UI implementation as functional verification
+
+Use implementation of each widget to verify the underlying system behaviour.
+
+For example:
+
+- Capital Allocation must establish that capital is genuinely shared and dynamically allocated.
+- Decision Funnel Diagnostics must establish that relevant decision stages are observable and correctly attributed.
+- Orders and Positions must establish that protective exits, holding-duration rules and recovery states operate correctly.
+- Execution Quality must establish that matching, cancellation, revalidation and execution costs are captured correctly.
+- Portfolio and Reconciliation must establish that independent financial evidence is complete.
+- Strategy Performance must establish that outcomes are attributable, fee-adjusted and evidence-qualified.
+- Learning must establish that acquisition activity produces measurable accepted evidence gains.
+
+A visually correct widget does not constitute acceptance of the underlying trading functionality.
+
+#### UI 3.4 Gap classification
+
+Classify every discovered gap as:
+
+1. Frontend presentation defect.
+2. Backend observability gap.
+3. Backend functional defect.
+4. Missing implementation of an existing v35 requirement.
+5. Master plan omission, ambiguity or contradiction.
+6. Runtime or empirical evidence gap.
+7. New enhancement outside v35.
+
+For each gap, record:
+
+- Affected widget and operator workflow.
+- Relevant master plan requirement.
+- Expected versus actual behaviour.
+- Supporting source, test or runtime evidence.
+- Responsible backend service.
+- Trading, financial, risk, Learning and performance implications.
+- Dependencies.
+- Proposed resolution.
+- Acceptance criteria.
+- Associated Beads task.
+
+Reopen previously completed tasks where evidence demonstrates that their acceptance criteria were not satisfied.
+
+#### UI 3.5 Gap resolution
+
+Resolve confirmed frontend defects and existing v35 observability requirements.
+
+Coordinate backend functional defects and missing v35 implementation with the existing v35 coordinator.
+
+Do not conceal backend defects through:
+
+- Frontend workarounds.
+- Inferred financial values.
+- Fabricated diagnostics.
+- Duplicate business logic.
+- Misleading default values.
+- Artificially successful status indicators.
+
+Where backend functionality is missing, implement or coordinate the authoritative contract rather than duplicating the functionality in React.
+
+#### UI 3.6 Master plan amendments
+
+Where implementation reveals a genuine omission, contradiction or ambiguity in v35:
+
+- Identify the exact affected section.
+- Explain why the existing requirement is insufficient.
+- Explain the consequences.
+- Propose the smallest necessary amendment.
+- Identify affected work packages, contracts, tests and dependencies.
+- Record the proposed amendment in `plan.md` and Beads.
+- Obtain approval before materially changing authoritative requirements.
+
+Do not silently change trading policies, financial contracts, risk limits, promotion criteria or performance targets.
+
+Record genuinely new enhancements in a separate next-wave candidate backlog.
+
+Do not create a replacement v36 master plan during this work.
+
+### UI 4. Dashboard Architecture
+
+Retain eight independently configurable operator widgets:
+
+| Widget | Purpose |
+|---|---|
+| AutoTrader Controls and Safety | Configure overall trading and risk |
+| Decision Funnel Diagnostics | Explain why opportunities progress or fail |
+| Orders and Positions | Inspect the complete trading lifecycle |
+| Execution Quality | Evaluate execution effectiveness and costs |
+| Portfolio and Reconciliation | Understand financial performance and integrity |
+| Capital Allocation | Understand autonomous capital distribution |
+| Strategy Performance | Evaluate cost-adjusted strategy performance |
+| Learning and Evidence Acquisition | Understand autonomous improvement |
+
+Each widget must be independently:
+
+- Addable.
+- Removable.
+- Movable.
+- Resizable.
+- Configurable.
+- Filterable where applicable.
+
+These are individual widgets, not eight fixed pages.
+
+#### UI 4.0 Visual direction and permanent mockup references (2026-11-27)
+
+The concrete visual references and handling rules are maintained under [research/v35-ui-mocks/](../../../research/v35-ui-mocks/); begin with [START_HERE.md](../../../research/v35-ui-mocks/START_HERE.md). The PNGs are the visual targets and matching HTML files are layout references only. Their numbers, trades, statuses, and market values are illustrative fixtures, never production data. Preserve the UI plan's superseded status: this master plan remains authoritative for behavior, data provenance, architecture, dependencies, and acceptance.
+
+| Widget target | PNG visual target | HTML layout reference |
+|---|---|---|
+| AutoTrader Controls and Safety | [01-controls.png](../../../research/v35-ui-mocks/01-controls.png) | [01-controls.html](../../../research/v35-ui-mocks/01-controls.html) |
+| Decision Funnel | [02-funnel.png](../../../research/v35-ui-mocks/02-funnel.png) | [02-funnel.html](../../../research/v35-ui-mocks/02-funnel.html) |
+| Orders and Positions — open | [03-positions.png](../../../research/v35-ui-mocks/03-positions.png) | [03-positions.html](../../../research/v35-ui-mocks/03-positions.html) |
+| Orders and Positions — closed | [03b-closed.png](../../../research/v35-ui-mocks/03b-closed.png) | [03b-closed.html](../../../research/v35-ui-mocks/03b-closed.html) |
+| Execution Quality | [04-execution.png](../../../research/v35-ui-mocks/04-execution.png) | [04-execution.html](../../../research/v35-ui-mocks/04-execution.html) |
+| Portfolio and Reconciliation | [05-portfolio.png](../../../research/v35-ui-mocks/05-portfolio.png) | [05-portfolio.html](../../../research/v35-ui-mocks/05-portfolio.html) |
+| Autonomous Capital Allocation | [06-capital.png](../../../research/v35-ui-mocks/06-capital.png) | [06-capital.html](../../../research/v35-ui-mocks/06-capital.html) |
+| Strategy Performance | [07-performance.png](../../../research/v35-ui-mocks/07-performance.png) | [07-performance.html](../../../research/v35-ui-mocks/07-performance.html) |
+| Learning and Evidence Acquisition | [08-learning.png](../../../research/v35-ui-mocks/08-learning.png) | [08-learning.html](../../../research/v35-ui-mocks/08-learning.html) |
+| Excursions and Exit Analysis | [09-excursions.png](../../../research/v35-ui-mocks/09-excursions.png) | [09-excursions.html](../../../research/v35-ui-mocks/09-excursions.html) |
+
+Match the mockups' compact trading-terminal hierarchy: dark navy/slate surfaces, concise sans-serif typography, aligned tabular numbers, compact summary metrics and controls, dense banded tables, restrained semantic green/red/amber, clear selected tabs, and supporting visualisations. Avoid oversized cards, repeated headings, verbose diagnostics, excessive padding and unused space. Use responsive proportions and wrapping rather than fixed mockup pixel dimensions; expanded details must not overlap or require horizontal scrolling. Preserve the actual Paper mode label and clearly distinguish AutoTrader execution from Scout simulation.
+
+For Orders and Positions, implement the open and closed states in [03-positions.png](../../../research/v35-ui-mocks/03-positions.png) and [03b-closed.png](../../../research/v35-ui-mocks/03b-closed.png): a compact summary strip, population/venue/column controls, dense sortable tables, an inline Net vs Breakeven bar with only sourced executable-close, breakeven, stop, target and dynamic protection markers, and compact expandable execution/identity details. The closed table should support the reference's net P&L/return/R/MFE/MAE/exit/evidence columns, but each field must remain unavailable unless its authoritative evidence is complete. Signal-managed positions must not show inactive fixed thresholds. Preserve stable lifecycle identity, copyable technical diagnostics inside expanded detail, and tested per-instance `Model.ts` state ownership.
+
+Render only source-backed values. When a mark, barrier, cost, identity, reconciliation state, or excursion is absent or stale, use the existing explicit unavailable/stale semantics and omit unsupported chart markers; never substitute the static HTML's values. These supplied targets update the visual acceptance criteria, not trading behavior, eligibility, financial accounting or risk settings.
+
+#### UI 4.1 Default dashboard presets
+
+#### Trading Overview
+
+- AutoTrader Controls and Safety.
+- Portfolio and Reconciliation.
+- Capital Allocation.
+- Decision Funnel Diagnostics.
+- Orders and Positions.
+
+#### Strategy and Learning
+
+- Strategy Performance.
+- Learning and Evidence Acquisition.
+- Decision Funnel Diagnostics.
+- Capital Allocation.
+
+#### Execution Analysis
+
+- Decision Funnel Diagnostics.
+- Execution Quality.
+- Orders and Positions.
+
+These are customisable presets.
+
+Preserve user-created dashboard layouts and existing widget configuration where possible.
+
+#### UI 4.2 Research and market dashboards
+
+Preserve optional access to existing research and general market functionality.
+Keep the **Crypto News & Signals** widget available in the optional market
+dashboard/catalog; it is not part of the default automated-trading presets.
+
+Do not clutter the default automated trading workspace with unrelated market widgets.
+
+Grafana remains responsible for technical infrastructure monitoring.
+
+#### UI 4.3 Mandatory tested Model.ts architecture
+
+Every independently stateful operator widget and drill-down view must have a corresponding tested `*Model.ts`; this applies to all eight widgets, including existing views being consolidated. Follow the established `MarketLiquidityModel` and `useBehaviorSnapshot` pattern and reuse current models rather than adding a second state framework.
+
+- TSX is presentation-only: render model snapshots, bind controls to explicit model commands, compose presentational components, and forward React lifecycle/prop changes. Do not put fetches, subscriptions, timers, business logic, state machines or asynchronous workflows in TSX.
+- Each widget instance owns its model and persisted view configuration. Models expose typed observable `state$` and explicit commands, and own applicable initialization, activation/deactivation, visibility, connection/scope, filter/group/time-range changes, drill-down/back, pagination, refresh, loading/error/stale state, cancellation, retry, configuration persistence and disposal. Authoritative trading/financial calculations remain in backend services.
+- Constructors must not launch unmanaged side effects during render. Forward stable or changed inputs explicitly through the repository's supported lifecycle pattern. Repeated activation/cleanup and React Strict Mode must not duplicate subscriptions/timers. Hidden widgets suspend work; disposal releases subscriptions/timers; superseded requests are invalidated and late results cannot overwrite current state. Share transport/cache infrastructure where appropriate, not mutable instance view state.
+- Every model has independent model-level tests using the existing test framework. Cover initial state; activation/deactivation; changed inputs; subscriptions; cancellation and out-of-order results; error/recovery and stale/missing data; filters/navigation; persistence; disposal; repeated mount/unmount and visibility; and independent instances as applicable. Use deterministic fake transport/clock fixtures. Keep rendered component/browser tests for presentation, event binding, responsive sizing and integration; these complement model tests.
+- Acceptance of each widget requires its tested model, thin TSX view, and passing relevant model and integration tests. Record implementation, deterministic test, deployment, runtime verification and empirical/trade-dependent status separately. Deliver widget increments as dependencies permit; this gate must not make UI delivery wait for completed-trade evidence. Apply the rule to affected v35 views only; do not expand into an unrelated application-wide refactor.
+
+### UI 5. Widget 1 — AutoTrader Controls and Safety
+
+#### UI Description
+
+The central control panel for autonomous trading.
+
+The operator configures overall capital, trading scope and risk restrictions. The trading system determines how eligible capital is allocated across opportunities.
+
+#### UI Operator questions
+
+- Is automated trading enabled?
+- Is the intended execution mode active?
+- What global risk restrictions apply?
+- Is trading blocked by a safety latch or audit failure?
+- What capital and trading limits are effective?
+
+#### UI Summary information
+
+Display:
+
+- AutoTrader enabled/disabled status.
+- Effective execution mode.
+- Paper Exchange confirmation.
+- Audit health.
+- Safety latch state.
+- Emergency stop state.
+- Total trading capital.
+- Available trading budget.
+- Active risk restrictions.
+- Effective configuration version.
+- Configuration freshness.
+- Latest configuration change where available.
+
+#### UI Configurable controls
+
+Retain authorised controls for:
+
+- Global capital limits.
+- Maximum order notional.
+- Daily notional limit.
+- Daily loss limit.
+- Maximum open positions.
+- Exploration budget.
+- Bootstrap stop/target fallback settings only where required; identify their source and do not present them as effective trade parameters. Remove global fixed SL/TP from the primary Controls summary.
+- Permitted symbol and strategy scope.
+- Existing justified safety overrides.
+
+Separate frequently used controls from advanced configuration.
+
+Material trading-control changes must require appropriate confirmation and backend acknowledgement.
+
+#### UI Remove legacy controls
+
+Remove:
+
+- Editable per-strategy allocation maps.
+- Editable per-horizon allocation maps.
+- Manual allocation repair warnings.
+- Obsolete allocation configuration dependencies.
+- Transmission of stale legacy budget maps.
+
+Do not simply hide these controls while leaving their obsolete restrictions active.
+
+Do not introduce a live-venue switch.
+
+#### UI Navigation
+
+Link to:
+
+- Capital Allocation.
+- Decision Funnel Diagnostics.
+- Portfolio and Reconciliation.
+
+#### UI Authoritative data owner
+
+AutoTrader.
+
+#### UI Initial v35 mapping
+
+WP5, WP6, WP9 and global risk and execution requirements.
+
+#### UI Functional verification
+
+Confirm:
+
+- Capital allocation is genuinely autonomous.
+- Obsolete manual budgets do not constrain eligible strategies.
+- Zero legacy allocations do not disable eligible strategies.
+- Effective settings match displayed settings.
+- Global safety restrictions remain enforced.
+- Configuration updates do not overwrite unrelated settings.
+
+### UI 6. Widget 2 — Decision Funnel Diagnostics
+
+#### UI Description
+
+The primary diagnostic widget for understanding the complete decision pipeline.
+
+It must identify precisely which symbols and strategies are trading, which are not, and why.
+
+An overall aggregate funnel is insufficient.
+
+#### UI Operator questions
+
+- Are strategies generating signals?
+- Which symbols generate opportunities?
+- Which symbol/strategy combinations are inactive?
+- Which gates reject candidates?
+- Why are eligible candidates not selected?
+- Why are selected candidates not submitted?
+- Why are submitted orders not filling?
+- Are strict or exploratory opportunities being starved?
+- Are decisions ultimately producing reconciled outcomes and useful Learning evidence?
+
+#### UI 6.1 Aggregation dimensions
+
+Support complete funnels grouped by:
+
+- Entire portfolio.
+- Individual symbol.
+- Individual strategy.
+- Symbol and strategy combination.
+- Strategy profile.
+- Direction.
+- Trading horizon.
+- Market regime where available.
+- Strict eligibility.
+- Exploratory eligibility.
+- Actual selection mode.
+
+Allow applicable dimensions to be combined.
+
+Include all configured strategies and applicable monitored symbols, including combinations with zero activity.
+
+Distinguish:
+
+- Configured but inactive.
+- No qualifying signals.
+- Signals rejected.
+- Evidence blocked.
+- Execution blocked.
+- Missing diagnostics.
+- Stale data.
+- Unsupported symbol/strategy combination.
+
+#### UI 6.2 Funnel stages
+
+Represent the actual production pipeline, including applicable stages for:
+
+1. Market events received.
+2. Worker evaluations.
+3. Signals generated.
+4. Fresh and valid signals.
+5. Directional candidates.
+6. Strategy gates.
+7. Evidence eligibility.
+8. Portfolio and risk eligibility.
+9. Candidate selection.
+10. Execution eligibility.
+11. Order attempts.
+12. Order submissions.
+13. Order acknowledgements.
+14. Partial or complete fills.
+15. Positions opened.
+16. Positions closed.
+17. Financial outcomes reconciled.
+18. Outcomes accepted by Learning.
+
+The displayed stage ordering must reflect actual production behaviour.
+
+Strict and exploratory eligibility may branch rather than form a single sequential funnel.
+
+Market events, evaluations, decisions, orders, fills and trades are different populations. Do not force them into an artificially monotonic funnel.
+
+Use linked lifecycle sub-funnels where necessary.
+
+#### UI 6.3 Funnel matrix
+
+Provide a sortable, filterable matrix.
+
+Example compact presentation:
+
+| Symbol / Strategy | Signals | Fresh | Directional | Eligible | Selected | Attempted | Submitted | Filled | Closed |
+|---|---|---|---|---|---|---|---|---|---|
+
+Allow grouping by symbol, strategy and symbol/strategy combination.
+
+Support:
+
+- Absolute counts.
+- Stage conversion percentages.
+- Rejection counts.
+- Dominant rejection reasons.
+- Latest activity timestamp.
+- Data freshness.
+- Population coverage.
+- Pending outcomes.
+- Truncation indicators.
+
+Provide expandable detailed columns for additional stages.
+
+Use heatmap-style formatting to highlight:
+
+- Zero activity.
+- Persistent starvation.
+- Low conversion.
+- Dominant rejection stages.
+- Execution failures.
+- Missing evidence.
+
+Allow sorting by any applicable metric.
+
+#### UI 6.4 Symbol/strategy heatmap
+
+Provide a matrix with:
+
+- Symbols on one axis.
+- Strategies on the other axis.
+- Selectable metric displayed in each cell.
+
+Selectable metrics should include:
+
+- Signal count.
+- Eligible candidate count.
+- Strict eligibility rate.
+- Exploratory eligibility rate.
+- Selection rate.
+- Submission rate.
+- Fill rate.
+- Dominant rejection stage.
+- Time since last activity.
+
+Selecting a cell opens the complete funnel for that symbol/strategy combination.
+
+Distinguish genuine zero values from missing or unsupported combinations.
+
+#### UI 6.5 Gate analysis
+
+Expose applicable rejection categories, including:
+
+- Market-data freshness.
+- Missing local books.
+- Strategy conditions.
+- Trend filters.
+- Directional confidence.
+- Expected net edge.
+- Evidence requirements.
+- Profile eligibility.
+- Exploration eligibility.
+- Capital availability.
+- Portfolio exposure.
+- Correlation restrictions.
+- Risk limits.
+- Duplicate event or episode reservations.
+- Cooldown restrictions.
+- Candidate ranking.
+- Execution restrictions.
+- Post-only revalidation.
+- Invalid or incomplete inputs.
+
+Only display gates that exist in the authoritative implementation.
+
+Distinguish primary rejection reasons from additional failed gates.
+
+Do not count multiple failed gates as multiple rejected candidates unless explicitly reporting gate occurrences.
+
+#### UI 6.6 Candidate drill-down
+
+Selecting any funnel cell, stage or rejection category must expose the underlying decisions.
+
+Display:
+
+- Decision ID.
+- Event ID.
+- Episode ID.
+- Cycle ID.
+- Symbol.
+- Strategy.
+- Profile and profile version.
+- Direction.
+- Horizon.
+- Strict eligibility.
+- Exploratory eligibility.
+- Actual selection mode.
+- Decision-time market price.
+- Executable bid and ask.
+- Market-data source.
+- Market-data freshness.
+- Gate name.
+- Observed value.
+- Required value.
+- Comparator.
+- Pass/fail result.
+- Primary rejection reason.
+- Additional failed gates.
+- Selection and ranking information.
+- Associated order, fill and trade identities.
+
+Link to the originating worker evaluation and downstream lifecycle.
+
+Never describe a cycle as having no signals when candidates were generated and rejected.
+
+#### UI 6.7 Historical visualisations
+
+Provide:
+
+- Signal generation over time.
+- Directional candidate counts.
+- Stage conversion trends.
+- Rejection reasons over time.
+- Strict versus exploratory eligibility.
+- Selection and submission rates.
+- Fill rates.
+- Persistent symbol starvation.
+- Persistent strategy starvation.
+- Symbol/strategy conversion comparisons.
+
+Support:
+
+- Latest cycle.
+- Last hour.
+- Last 24 hours.
+- Last seven days.
+- Last 30 days.
+- Custom ranges.
+
+Limit available ranges to actual retained evidence.
+
+#### UI 6.8 Data integrity
+
+Define stage-specific:
+
+- Populations.
+- Denominators.
+- Identity.
+- Time-window membership.
+- Coverage.
+- Deduplication rules.
+
+Distinguish unique events, repeated evaluations and unique episodes.
+
+Handle asynchronous order transitions, retries, repeated acknowledgements and partial fills.
+
+Distinguish pending outcomes from terminal failures.
+
+Do not infer strict/exploratory eligibility from eventual submitted order mode.
+
+Extend authoritative diagnostic contracts where necessary.
+
+Use bounded server-side aggregation rather than downloading unlimited history into React.
+
+#### UI Authoritative data owners
+
+- Strategy: worker evaluations.
+- AutoTrader: candidate selection, gates and submissions.
+- Position Management: order and position transitions.
+- Paper Exchange: matching and settlement.
+- Insights and FeedHandlers: decision-time market context.
+- Learning: accepted outcome and evidence status.
+
+#### UI Initial v35 mapping
+
+WP1, WP4–WP15 where applicable, plus execution and lifecycle requirements.
+
+#### UI Functional verification
+
+Use the widget to identify missing gates, incorrectly applied restrictions, persistent starvation, stale inputs and incomplete decision attribution.
+
+This widget must be capable of explaining the current runtime situation where opportunities are generated but orders remain unfilled.
+
+### UI 7. Widget 3 — Orders and Positions
+
+#### UI Description
+
+A consolidated lifecycle widget replacing overlapping order, fill, open-position and completed-position views.
+
+#### UI Operator questions
+
+- What orders are active?
+- What positions are open?
+- Are all positions protected?
+- Why did an order terminate?
+- Why was a position closed?
+- Can every trade be traced to its original decision?
+
+#### UI Tabs
+
+- Open Positions.
+- Active Orders.
+- Protective Exits.
+- Order History.
+- Closed Positions.
+
+#### UI 7.1 Open positions
+
+Display:
+
+- Symbol, strategy and profile.
+- Direction and selection mode.
+- Entry price.
+- Current executable price.
+- Quantity and notional.
+- Gross unrealised P&L.
+- Net unrealised P&L.
+- Paid fees.
+- Estimated exit fees.
+- Holding duration.
+- Maximum permitted holding duration.
+- Stop-loss level.
+- Take-profit level.
+- Selected exit-policy profile/version and parameter source.
+- Original selected stop/target and initial monetary risk denominator.
+- Subsequent protection adjustments, authorization/reason, and trigger versus execution prices.
+- Profit-protection state.
+- Protective order and barrier status.
+- Forecast-driven exit or deferral state.
+- Market-data freshness.
+- Position and decision lineage.
+
+#### UI 7.2 Orders
+
+Display:
+
+- Stable order identity.
+- Parent order identity.
+- Original decision.
+- Strategy and profile.
+- Selection mode.
+- Order type.
+- Requested quantity.
+- Filled quantity.
+- Remaining quantity.
+- Limit price.
+- Average execution price.
+- Maker/taker classification.
+- Creation and update timestamps.
+- Order age.
+- Current status.
+- Cancellation, expiry or rejection reason.
+- Acknowledgement and recovery state.
+
+Preserve partial-fill and asynchronous lifecycle information.
+
+#### UI 7.3 Protective exits
+
+Display:
+
+- Associated position.
+- Protection type.
+- Trigger price.
+- Protective quantity.
+- Barrier status.
+- Pending, active, triggered or interrupted state.
+- Recovery requirements.
+- Last update.
+- Relevant audit warnings.
+
+Make missing or interrupted protection prominent.
+
+#### UI 7.4 Closed positions
+
+Display:
+
+- Entry and exit prices.
+- Gross realised P&L.
+- Net realised P&L.
+- Entry and exit fees.
+- Holding duration.
+- Exit reason.
+- Strategy and profile.
+- Selection mode.
+- Maximum favourable excursion.
+- Maximum adverse excursion.
+- Independent reconciliation status.
+- Learning acceptance or exclusion reason.
+
+Only display excursion metrics where executable price-path evidence is sufficiently complete. Only report realized R when authoritative initial risk and complete reconciled executable-path and fee evidence are available.
+
+#### UI 7.5 Visualisations
+
+- Position exposure by symbol.
+- Position exposure by strategy.
+- Open position holding duration.
+- Position-level net P&L.
+- Exit-reason distribution.
+
+#### UI Navigation
+
+Link to:
+
+- Original decision.
+- Execution Quality.
+- Portfolio reconciliation.
+- Strategy Performance.
+- Learning outcome.
+
+#### UI Authoritative data owners
+
+Position Management, AutoTrader and Paper Exchange.
+
+#### UI Initial v35 mapping
+
+WP2, WP4, WP6, WP7, WP8, WP12 and WP15.
+
+#### UI Functional verification
+
+Verify protective barriers, fee attribution, holding-duration rules, recovery behaviour, exit reasons and stable lifecycle identity.
+
+Do not infer missing attribution.
+
+### UI 8. Widget 4 — Execution Quality
+
+#### UI Description
+
+Evaluate how effectively trading decisions become actual executions, including the effectiveness and cost of passive orders.
+
+#### UI Operator questions
+
+- Why are orders not filling?
+- Are passive orders priced competitively?
+- Are orders cancelled prematurely?
+- Is revalidation preventing valid executions?
+- Are fees and slippage excessive?
+- Which symbols and strategies execute most effectively?
+
+#### UI 8.1 Summary metrics
+
+- Eligible opportunities.
+- Attempted orders.
+- Submitted orders.
+- Acknowledged orders.
+- Full-fill rate.
+- Partial-fill rate.
+- Unfilled rate.
+- Rejection rate.
+- Cancellation rate.
+- Expiry rate.
+- Time to first fill.
+- Time to completion.
+- Maker/taker distribution.
+- Execution fees.
+- Slippage.
+- Cost evidence coverage.
+
+Define denominators and distinguish overlapping order outcomes from mutually exclusive terminal states.
+
+#### UI 8.2 Breakdown dimensions
+
+- Symbol.
+- Strategy.
+- Symbol/strategy combination.
+- Direction.
+- Horizon.
+- Order type.
+- Strict/exploratory mode.
+
+#### UI 8.3 Passive-order analysis
+
+For each passive order, show:
+
+- Submitted price.
+- Decision-time executable bid and ask.
+- Distance from executable market price.
+- Order lifetime.
+- Market movement during the order lifetime.
+- Whether the market reached the order price.
+- Available matching evidence.
+- Partial-fill behaviour.
+- Terminal reason.
+- Revalidation reason.
+- Cancellation reason.
+- Market-data completeness.
+
+Distinguish legitimate passive-order non-execution from:
+
+- Pricing defects.
+- Missing or stale market data.
+- Matcher defects.
+- Premature cancellation.
+- Incorrect revalidation.
+- Lifecycle inconsistencies.
+
+A market price touching an order price does not automatically establish that the order should have filled.
+
+#### UI 8.4 Opportunity cost
+
+Show observed post-cancellation market movement separately from simulated counterfactual returns.
+
+Define:
+
+- Reference price.
+- Executable price source.
+- Observation window.
+- Evaluation horizon.
+- Eligible population.
+- Sample count.
+- Cost assumptions.
+- Evidence completeness.
+
+Do not present hypothetical missed profits or savings as realised financial outcomes.
+
+#### UI 8.5 Historical visualisations
+
+- Fill rates by symbol and strategy.
+- Cancellation and expiry trends.
+- Time-to-fill distributions.
+- Maker/taker proportions.
+- Fees over time.
+- Slippage over time.
+- Execution conversion trends.
+- Passive-order effectiveness.
+
+#### UI Authoritative data owners
+
+AutoTrader, Position Management, Paper Exchange and Insights.
+
+#### UI Initial v35 mapping
+
+WP6, WP7, WP8, WP10 and WP14.
+
+#### UI Functional verification
+
+Investigate current unfilled-order behaviour.
+
+Verify matching, passive pricing, revalidation and cancellation against the intended v35 behaviour.
+
+Do not relax trading requirements or force trades to obtain execution evidence.
+
+### UI 9. Widget 5 — Portfolio and Reconciliation
+
+#### UI Description
+
+The authoritative financial overview, showing portfolio performance alongside the completeness and trustworthiness of financial evidence.
+
+#### UI Operator questions
+
+- How much capital do I have?
+- How much is available, reserved or deployed?
+- Am I making money after costs?
+- What is my drawdown?
+- Are financial outcomes independently reconciled?
+- Is financial evidence missing?
+
+#### UI 9.1 Summary metrics
+
+- Opening capital.
+- Current cash by currency.
+- Current equity.
+- Available trading capital.
+- Reserved capital.
+- Deployed capital.
+- Capital utilisation.
+- Gross realised P&L.
+- Net realised P&L.
+- Unrealised P&L.
+- Paid fees.
+- Estimated exit fees.
+- Contributions and withdrawals.
+- Current drawdown.
+- Maximum drawdown.
+
+#### UI 9.2 Historical visualisations
+
+- Equity curve.
+- Cumulative net P&L.
+- Daily and weekly returns.
+- Drawdown.
+- Capital utilisation.
+- Fees over time.
+- Cash and position exposure.
+
+Returns must account for contributions and withdrawals using the authoritative financial contract.
+
+Do not subtract fees twice.
+
+#### UI 9.3 Independent reconciliation
+
+Display:
+
+- Financial evidence epoch.
+- Source and ledger cursors.
+- Snapshot timestamps.
+- Independent execution coverage.
+- Fee coverage.
+- Cash-movement coverage.
+- Contribution coverage.
+- FX coverage and freshness.
+- Complete and incomplete intervals.
+- Matched and unmatched records.
+- Reconciliation mismatches.
+- Missing evidence reasons.
+- Source attribution and provenance limitations.
+
+Support drill-down into affected source records and trades.
+
+#### UI 9.4 Evidence states
+
+Clearly distinguish:
+
+- Complete.
+- Provisional.
+- Not evaluated.
+- Incomplete.
+- Stale.
+- Unavailable.
+
+Do not represent missing values as zero.
+
+Do not represent matching flat-cash intervals as proof of trade profitability.
+
+Do not represent match probes as settled executions.
+
+Do not imply independent reconciliation merely because two projections of the same ledger agree.
+
+#### UI Authoritative data owners
+
+- Position Management: portfolio ledger and financial snapshots.
+- Paper Exchange: independent capital, settlement, fee, cash and FX evidence.
+- Existing reconciliation tooling: independent comparison.
+
+#### UI Initial v35 mapping
+
+WP2, WP3, WP5, WP6, WP9, WP10 and WP14.
+
+#### UI Functional verification
+
+Verify displayed financial values against authoritative sources.
+
+Verify independent financial reconstruction and completeness semantics.
+
+Do not implement duplicate financial accounting in React.
+
+### UI 10. Widget 6 — Capital Allocation
+
+#### UI Description
+
+A read-only explanation of how the autonomous trading system allocates its shared capital pool across competing opportunities.
+
+This replaces the legacy manual strategy and horizon allocation interface.
+
+#### UI Operator questions
+
+- How much capital is available?
+- How much is reserved or deployed?
+- Which strategies and symbols receive capital?
+- Why is capital allocated to them?
+- Why is capital unused?
+- Which constraints limit allocation?
+
+#### UI 10.1 Global summary
+
+- Total capital.
+- Eligible shared trading pool.
+- Available capital.
+- Reserved capital.
+- Deployed capital.
+- Remaining daily notional allowance.
+- Exploration allowance.
+- Exploration usage.
+- Capital constrained by risk limits.
+
+Distinguish stock measures such as available capital from flow limits such as daily traded notional.
+
+#### UI 10.2 Allocation breakdown
+
+Support grouping by:
+
+- Strategy.
+- Symbol.
+- Symbol/strategy combination.
+- Horizon.
+- Direction.
+- Strict/exploratory mode.
+
+Display:
+
+- Effective allocation.
+- Used capital.
+- Reserved capital.
+- Available capital where attributable.
+- Current eligible opportunities.
+- Evidence eligibility.
+- Validated expected net edge.
+- Directional confidence.
+- Allocation reason.
+- Binding constraints.
+- Calculation timestamp.
+
+Do not imply that the shared available pool is separately reserved for every strategy.
+
+Where allocations are opportunity-specific rather than persistent budgets, display them accordingly.
+
+#### UI 10.3 Visualisations
+
+- Shared capital pool utilisation.
+- Allocation distribution by strategy.
+- Allocation distribution by symbol.
+- Allocation distribution by horizon.
+- Allocation history.
+- Unused capital over time.
+- Capital constrained by different restrictions.
+
+#### UI 10.4 Required behaviour
+
+- No editable strategy budgets.
+- No editable horizon allocation maps.
+- No obsolete allocation repair warnings.
+- No stale legacy allocation maps transmitted by the UI.
+- No implicit disabling through obsolete zero allocations.
+- No double counting across overlapping allocation dimensions.
+- Global risk limits remain configurable in AutoTrader Controls.
+
+#### UI Authoritative data owner
+
+AutoTrader shared allocator.
+
+#### UI Initial v35 mapping
+
+WP5, WP6, WP9 and WP10.
+
+Reuse existing Beads tasks:
+
+- `sbe_ts-gu78.28`: backend shared allocator contract.
+- `sbe_ts-gu78.29`: read-only allocation UI.
+
+Verify their current status before implementation.
+
+#### UI Functional verification
+
+Confirm:
+
+- Capital is allocated across the whole eligible shared pool.
+- Allocation is not constrained by obsolete manual budgets.
+- Capital conservation is maintained.
+- Concurrent reservations cannot double-allocate capital.
+- Cold-start exploration remains appropriately bounded.
+- Displayed allocation reasons reflect actual decisions.
+
+The offline shared allocator and read-only allocation view are implemented and deterministically tested under the linked Beads tasks. Keep deployment/runtime activation and empirical allocation evaluation as separate gates; this does not block the other widgets.
+
+### UI 11. Widget 7 — Strategy Performance
+
+#### UI Description
+
+Evaluate which strategies are producing sustainable, cost-adjusted returns, and under which market conditions.
+
+This is the primary comparative performance widget.
+
+#### UI Operator questions
+
+- Which strategies are profitable after fees?
+- Which symbols work best for each strategy?
+- Which strategies consume capital without producing returns?
+- Are strict trades outperforming exploratory trades?
+- Which profiles, directions and horizons perform best?
+- Is performance improving?
+- Is the evidence sufficient to support conclusions?
+
+#### UI 11.1 Summary metrics
+
+- Reconciled trade count.
+- Raw sample count.
+- Effective sample count.
+- Gross P&L.
+- Net P&L.
+- Net return.
+- Win rate.
+- Average net win.
+- Average net loss.
+- Win/loss payoff ratio.
+- Profit factor.
+- Net expectancy.
+- Return uncertainty.
+- Drawdown.
+- Average holding duration.
+- Capital efficiency.
+- Fees.
+- Execution costs.
+- Evidence freshness.
+
+Define all financial denominators and cost bases.
+
+Do not present unsupported ratios where denominators are zero or evidence is incomplete.
+
+#### UI 11.2 Comparison dimensions
+
+- Strategy.
+- Symbol.
+- Symbol/strategy combination.
+- Profile.
+- Profile version.
+- Direction.
+- Horizon.
+- Market regime.
+- Strict versus exploratory selection mode.
+
+Allow side-by-side comparison of equivalent cohorts.
+
+#### UI 11.3 Strategy performance matrix
+
+Provide sortable strategy-level and symbol/strategy-level tables.
+
+Include:
+
+- Trade count.
+- Effective sample count.
+- Net P&L.
+- Net return.
+- Expectancy.
+- Win rate.
+- Average win/loss.
+- Profit factor.
+- Drawdown.
+- Fees.
+- Capital utilisation.
+- Evidence status.
+
+Include inactive strategies rather than hiding them.
+
+#### UI 11.4 Visualisations
+
+- Cumulative net performance by strategy.
+- Net expectancy comparisons.
+- Win/loss distributions.
+- Fee-adjusted performance.
+- Drawdown comparisons.
+- Holding duration versus net return.
+- Capital deployed versus net return.
+- Performance by market regime.
+- Strict versus exploratory performance.
+- Symbol/strategy performance heatmap.
+
+#### UI 11.5 Strategy drill-down
+
+Selecting a strategy should expose:
+
+- Individual symbols.
+- Directions.
+- Active profiles.
+- Profile versions.
+- Relevant parameters.
+- Historical performance.
+- Closed trades.
+- Execution quality.
+- Capital allocation.
+- Decision funnel.
+- Learning evidence.
+- Promotion blockers.
+
+#### UI 11.6 Evidence requirements
+
+- Compare equivalent time windows and cost bases.
+- Separate Scout outcomes from actual paper trades.
+- Exclude unreconciled or ineligible results from validated performance.
+- Display excluded counts and reasons.
+- Distinguish descriptive statistics from statistically supported conclusions.
+- Show uncertainty and effective sample limitations.
+- Do not rank strategies using insufficient evidence.
+- Do not infer promotion readiness from profitability alone.
+
+Display observed execution counts even when profitability evidence is insufficient.
+
+#### UI Authoritative data owners
+
+AutoTrader, Position Management, Paper Exchange and Learning.
+
+#### UI Initial v35 mapping
+
+WP1, WP2, WP3, WP5, WP6, WP10–WP15.
+
+#### UI Functional verification
+
+Verify outcome identity, cohort attribution, fee-adjusted returns, effective sample calculations and evidence eligibility.
+
+Identify missing or incorrectly implemented strategy evaluation requirements.
+
+### UI 12. Widget 8 — Learning and Evidence Acquisition
+
+#### UI Description
+
+Explain how Learning is acquiring evidence, resolving uncertainty and improving trading decisions.
+
+The widget must distinguish productive Learning from activity that does not improve eligibility or decision quality.
+
+Preserve the authoritative Section 13 Evidence Coverage requirements.
+
+#### UI Operator questions
+
+- What is Learning currently doing?
+- What evidence is missing?
+- Why is a strategy or profile not eligible?
+- Is Learning actively addressing the gap?
+- Is acquisition producing useful evidence?
+- Are profiles approaching promotion?
+- Is Learning stalled?
+- Has Learning improved actual trading behaviour?
+
+#### UI 12.1 Learning progression summary
+
+Display:
+
+- Strategies and profiles monitored.
+- Evidence gaps identified.
+- Evidence requests queued.
+- Evidence acquisition underway.
+- Requests waiting for market conditions.
+- Capacity-blocked requests.
+- Stalled requests.
+- Failed requests.
+- Completed acquisition work.
+- Evidence accepted by the evaluator.
+- Profiles meeting evidence requirements.
+- Profiles eligible for promotion.
+- Actual promotions.
+- Rejected or demoted profiles where supported.
+
+Do not assume these states form mutually exclusive sequential populations unless the authoritative contract establishes that.
+
+#### UI 12.2 Evidence coverage matrix
+
+Group by:
+
+- Strategy.
+- Profile.
+- Symbol.
+- Direction.
+- Market regime.
+- Horizon.
+
+Display:
+
+- Current raw samples.
+- Required raw samples.
+- Current effective samples.
+- Required effective samples.
+- Current and required observation windows.
+- Confidence.
+- Freshness.
+- Missing evidence ranges.
+- Evidence gap reason.
+- Blocked trading or promotion decision.
+- Acquisition priority.
+- Current request state.
+- Last accepted evidence gain.
+- Last worker heartbeat.
+- Last evaluation.
+- Next evaluation.
+- Recovery and retry status.
+
+#### UI 12.3 Evidence acquisition drill-down
+
+For each acquisition request, show:
+
+- Reason for the request.
+- Strategy and profile.
+- Target evidence gap.
+- Requested data range.
+- Acquisition method.
+- Assigned worker.
+- Current state.
+- Start time.
+- Last progress.
+- Expected evaluation condition.
+- Accepted evidence gained.
+- Remaining gap.
+- Blocker.
+- Recovery action.
+
+Distinguish:
+
+- Waiting for market conditions.
+- Waiting for capacity.
+- Active acquisition.
+- Stale or stalled activity.
+- Failed acquisition.
+- Completed work.
+- Excluded evidence.
+- Accepted evidence.
+
+#### UI 12.4 Learning improvement
+
+Show actual accepted improvements where supported:
+
+- Evidence gaps resolved.
+- Effective sample gains.
+- Increased confidence.
+- Validated profile improvements.
+- Promotion eligibility changes.
+- Actual promotions.
+- Strict trading activation following validated promotion.
+- Subsequent reconciled trading performance.
+
+Do not equate Scout count, worker activity or completed jobs with successful Learning.
+
+#### UI 12.5 Historical visualisations
+
+- Evidence coverage growth.
+- Effective sample growth.
+- Accepted evidence gains.
+- Evidence acquisition cost.
+- Acquisition completion rates.
+- Evidence gaps resolved.
+- Promotion eligibility progression.
+- Actual promotion history.
+- Evidence gain relative to exploration cost.
+
+#### UI 12.6 Scout research access
+
+Preserve optional access to existing:
+
+- Scout positions.
+- Scout outcomes.
+- Scout activity.
+- Scout replay history.
+- Walk-forward results.
+
+Consolidate decision-relevant information into the Learning widget.
+
+Remove redundant Scout widgets from the default operator workspace, but preserve convenient research and diagnostic access.
+
+Do not expand unrelated research functionality during v35.
+
+#### UI Authoritative data owner
+
+Learning, supported by Strategy, Insights, AutoTrader and financial outcome sources.
+
+#### UI Initial v35 mapping
+
+WP1, WP3, WP4, WP11, WP13, WP14 and WP15.
+
+Preserve the canonical Section 13 contract and existing implementation associated with `sbe_ts-15ok`.
+
+#### UI Functional verification
+
+Verify:
+
+- Evidence gaps correspond to actual blocked decisions.
+- Acquisition requests are actionable.
+- Worker progress is genuine.
+- Accepted evidence gains are correctly attributed.
+- Raw samples are not confused with effective samples.
+- Promotion gates remain enforced.
+- Scout-only evidence is not presented as actual trading profitability.
+- Restart recovery does not duplicate or incorrectly accept evidence.
+
+### UI 13. Shared Filters and Cross-Widget Navigation
+
+#### UI 13.1 Shared filters
+
+Provide consistent filters across applicable widgets:
+
+- Time period.
+- Symbol.
+- Strategy.
+- Profile.
+- Direction.
+- Horizon.
+- Market regime.
+- Strict/exploratory mode.
+- Evidence epoch.
+
+Support dashboard-wide filters and explicit local widget overrides.
+
+Clearly indicate when a widget does not support a particular dimension.
+
+#### UI 13.2 Navigation
+
+Use stable identities to navigate between:
+
+- Worker evaluation.
+- Trading decision.
+- Entry gate.
+- Candidate.
+- Order.
+- Fill.
+- Position.
+- Closed trade.
+- Financial reconciliation.
+- Learning outcome.
+- Evidence acquisition request.
+
+Preserve applicable filter context.
+
+Examples:
+
+- Select a symbol/strategy funnel cell to inspect rejected decisions.
+- Select a submitted order to inspect its execution quality.
+- Select a closed position to inspect its original decision and financial reconciliation.
+- Select a strategy to inspect its capital allocation and evidence gaps.
+- Select an evidence gap to inspect the affected trading decisions.
+
+Do not require users to manually copy IDs between widgets.
+
+### UI 14. Grafana Responsibilities
+
+Keep technical infrastructure monitoring in Grafana rather than duplicating it in React.
+
+#### UI 14.1 Service monitoring
+
+- Service and container health.
+- CPU and memory.
+- Queue depth.
+- Dropped events.
+- Database performance.
+- RSocket reliability.
+- Request latency.
+- Trading pipeline latency.
+- Emergency execution latency.
+- Resource saturation.
+
+#### UI 14.2 Per-symbol feed and worker reliability
+
+Display:
+
+- Active book subscriptions.
+- Latest book timestamp.
+- Latest trade timestamp.
+- Data age.
+- Invalid events.
+- Data gaps.
+- Reconnects.
+- Worker heartbeat.
+- Latest worker decision.
+- Worker errors.
+- Evidence freshness.
+
+Do not infer per-symbol freshness from global feed activity.
+
+#### UI 14.3 Deployment traceability
+
+Display:
+
+- Service and container identity.
+- Deployed image digest.
+- Source revision.
+- Build time.
+- Dirty or unknown build status.
+- Configuration version.
+- Schema version.
+- Runtime identity.
+- Restart time.
+- Attestation status.
+
+Display unknown or unattested provenance explicitly.
+
+Do not infer deployed source identity from image tags.
+
+#### UI 14.4 React boundary
+
+Trading-specific data freshness, decision blockers, safety state and evidence completeness must remain visible in React.
+
+Grafana is not a substitute for operational trading diagnostics.
+
+### UI 15. Existing Widget Disposition
+
+Review the actual widget catalog and rendering implementation before migration.
+
+Initial intended disposition:
+
+| Existing widgets | Disposition |
+|---|---|
+| Auto Trader | Keep and narrow to global controls |
+| Auto Trader Diagnostics | Extend into Decision Funnel Diagnostics |
+| Orders, Fills, Live Positions, Completed Positions | Consolidate into Orders and Positions |
+| Account, Risk, P&L, Execution Fees | Consolidate into Portfolio and Reconciliation |
+| Legacy strategy allocation controls | Remove after backend dependency resolution |
+| AutoTrader Outcomes, Strategy Performance, Learning Realised | Consolidate into Strategy Performance |
+| Learning Decisions, Learning Scouts, Scout Activity | Consolidate decision-relevant content into Learning |
+| Execution Check and passive-order evidence | Consolidate into Execution Quality |
+| Scout Positions and Outcomes | Preserve optional research access |
+| Scout Replay History and Walk-forward Data | Preserve optional research access |
+| Signal replay and research diagnostics | Remove from default operator workspace |
+| General market widgets | Preserve outside this plan |
+| Portfolio hedging and dated futures carry | Preserve existing controls and expose committed exposure in shared Capital Allocation wherever it consumes the global pool; no dedicated widget unless required |
+
+Retirement means removal from the default operator workspace or replacement of redundant widgets.
+
+Do not unnecessarily delete shared components, research capabilities or historical data.
+
+#### UI Migration requirements
+
+- Inventory persisted widget types.
+- Map obsolete widgets to replacements.
+- Preserve layout position and dimensions where practical.
+- Preserve compatible filters and settings.
+- Provide clear unavailable-widget handling where migration is impossible.
+- Verify replacements before retiring existing widgets.
+- Avoid destructive changes to user layouts.
+
+### UI 16. UI Design and Interaction Principles
+
+Use:
+
+- Compact summary metrics.
+- Historical charts.
+- Sortable tables.
+- Symbol/strategy heatmaps.
+- Expandable rows.
+- Related-content tabs.
+- Clear drill-down interactions.
+- Consistent financial units and precision.
+- Consistent timestamps.
+- Consistent colour semantics.
+
+Avoid:
+
+- Overloaded diagnostic tables.
+- Displaying every backend field simultaneously.
+- Multiple widgets answering the same question.
+- Unnecessary modal dialogs.
+- Excessive visual clutter.
+- Duplicate financial calculations.
+- Misleading success indicators.
+
+Every widget must support explicit:
+
+- Loading state.
+- Empty state.
+- Zero activity.
+- Stale data.
+- Unavailable data.
+- Incomplete evidence.
+- Truncated population.
+- Error state.
+- Insufficient statistical evidence.
+
+Do not substitute zero for unknown.
+
+Use clear visual distinctions between confirmed success, pending validation, warnings and failures.
+
+### UI 17. Historical Data and Metric Contracts
+
+Before implementing charts or historical comparisons, establish:
+
+- Authoritative source.
+- Available retention period.
+- Sampling frequency.
+- Aggregation rules.
+- Timestamp semantics.
+- Identity and deduplication.
+- Population coverage.
+- Missing interval handling.
+- Financial cost basis.
+- Evidence epoch.
+- Metric version.
+
+Do not combine incompatible historical epochs or profiles without explicit cohort handling.
+
+Do not silently reconstruct missing historical data.
+
+Reuse existing authoritative history wherever possible.
+
+Where new history capture is required, assess whether it is necessary for existing v35 acceptance or an optional next-wave enhancement.
+
+### UI 18. Performance and Resource Requirements
+
+The UI and its diagnostics must not interfere with trading or emergency execution.
+
+Implement:
+
+- Bounded queries.
+- Server-side pagination.
+- Server-side historical aggregation.
+- Bounded chart sample counts.
+- Shared subscriptions.
+- Reuse of authoritative snapshots.
+- Request deduplication.
+- Cancellation of obsolete requests.
+- Suspension of unnecessary hidden-widget requests.
+- Virtualisation of large tables where appropriate.
+- Explicit coverage and truncation.
+- Bounded diagnostic concurrency.
+
+Avoid:
+
+- Unlimited historical downloads.
+- Repeated full-ledger scans.
+- Independent polling of the same data by multiple widgets.
+- Expensive frontend aggregation of raw event history.
+- Unbounded diagnostic memory growth.
+- Diagnostic work blocking emergency exits.
+
+Do not introduce synchronous diagnostic persistence into the trading hot path without validating its impact.
+
+Preserve all existing v35 performance acceptance thresholds.
+
+Test representative dashboard workloads alongside trading activity where possible.
+
+### UI 19. Implementation Phases
+
+#### UI Phase 1 — Independent review and contract inventory
+
+- Read authoritative v35 requirements.
+- Review all eight widget specifications.
+- Inspect existing UI components.
+- Identify authoritative data owners.
+- Identify available and missing contracts.
+- Review existing Beads tasks.
+- Create the requirements traceability matrix.
+- Classify discovered gaps.
+- Establish file ownership.
+- Coordinate with the existing v35 coordinator.
+- Separate existing requirements from optional enhancements.
+
+Keep this review bounded. Begin implementation once dependencies are understood.
+
+#### UI Phase 2 — Autonomous capital allocation
+
+Priority: Critical.
+
+- Verify the shared allocator contract.
+- Resolve obsolete manual allocation dependencies.
+- Update AutoTrader Controls and Safety.
+- Remove manual strategy and horizon controls.
+- Implement read-only Capital Allocation.
+- Verify capital conservation and concurrent reservations.
+- Verify effective runtime settings.
+
+Reuse existing allocator Beads tasks.
+
+#### UI Phase 3 — Decision Funnel Diagnostics
+
+Priority: Critical.
+
+- Extend existing diagnostics rather than create a duplicate widget.
+- Implement per-symbol funnels.
+- Implement per-strategy funnels.
+- Implement combined symbol/strategy funnels.
+- Implement the symbol/strategy heatmap.
+- Add strict/exploratory eligibility diagnostics.
+- Add gate-level drill-down.
+- Add historical aggregation.
+- Verify stage populations and denominators.
+- Validate against actual runtime decisions.
+
+Identify and coordinate underlying v35 defects.
+
+#### UI Phase 4 — Execution Quality
+
+Priority: Critical.
+
+- Implement order lifecycle and terminal-reason analysis.
+- Add passive-order effectiveness.
+- Add price competitiveness.
+- Add market-context coverage.
+- Add time-to-fill metrics.
+- Investigate current unfilled-order behaviour.
+- Add historical execution metrics.
+- Verify matching and revalidation contracts.
+
+Do not force executions or relax risk controls.
+
+#### UI Phase 5 — Orders, Positions and Portfolio
+
+Priority: High.
+
+- Consolidate Orders and Positions.
+- Add protective-exit visibility.
+- Add complete lifecycle attribution.
+- Consolidate Portfolio and Reconciliation.
+- Add financial completeness and mismatch presentation.
+- Add equity, P&L, drawdown and utilisation charts where supported.
+- Verify authoritative financial values.
+
+#### UI Phase 6 — Strategy Performance and Learning
+
+Priority: High.
+
+- Implement strategy and symbol/strategy comparisons.
+- Add cost-adjusted performance metrics.
+- Add profile and cohort drill-down.
+- Extend Evidence Coverage.
+- Add Learning progression.
+- Add accepted evidence gain analysis.
+- Preserve Scout research access.
+- Verify promotion and evidence gates.
+
+#### UI Phase 7 — Dashboard integration and Grafana
+
+Priority: High.
+
+- Implement shared filters.
+- Implement cross-widget navigation.
+- Deliver default dashboard presets.
+- Verify independent widget configuration.
+- Complete required Grafana reliability views.
+- Complete deployment traceability presentation.
+- Verify diagnostic workload isolation.
+
+#### UI Phase 8 — Consolidation and retirement
+
+Priority: Medium.
+
+- Verify replacement widgets in the rendered browser.
+- Migrate persisted layouts.
+- Retire redundant operator widgets.
+- Preserve optional research and shared market views.
+- Verify all required operational workflows remain possible.
+
+#### UI Phase 9 — Independent v35 acceptance review
+
+- Review the traceability matrix.
+- Reassess every affected v35 work package.
+- Identify unresolved functional defects.
+- Identify unresolved master plan omissions.
+- Identify outstanding runtime and empirical evidence.
+- Verify Beads status against actual evidence.
+- Update `plan.md`.
+- Produce the final UI implementation and functional review report.
+
+### UI 20. Parallel Implementation Policy
+
+The existing v35 coordinator should delegate independent work while actively implementing and integrating.
+
+Suggested allocation:
+
+- React specialist: widget presentation, layouts, charts, interactions and frontend tests.
+- Backend contract specialist: diagnostics, API completeness, authoritative source verification and missing contracts.
+- existing v35 coordinator: traceability, integration, shared navigation, cross-system verification and implementation.
+
+Coordinate material trading-system changes with the existing v35 coordinator.
+
+Use clear ownership of shared files and contracts.
+
+Do not allow both coordinators to independently implement conflicting changes to AutoTrader, Position Management, Strategy, Learning or Paper Exchange.
+
+Use Beads to record dependencies and handoffs.
+
+Avoid unnecessary waiting where independent frontend work can proceed against validated contracts and deterministic fixtures.
+
+### UI 21. Testing and Acceptance Criteria
+
+#### UI 21.1 Widget functionality
+
+- All eight widgets operate independently.
+- Default dashboard presets work.
+- Shared and local filters behave consistently.
+- Cross-widget navigation preserves identity and context.
+- Existing dashboard layouts migrate safely.
+- Redundant manual allocation controls are removed.
+- Optional research functionality remains accessible.
+
+#### UI 21.2 Decision diagnostics
+
+- Complete funnels are available per symbol.
+- Complete funnels are available per strategy.
+- Complete funnels are available per symbol/strategy combination.
+- Symbol/strategy heatmaps use authoritative counts.
+- Stage counts reconcile within defined populations.
+- Retries do not cause double counting.
+- Partial fills are handled correctly.
+- Asynchronous transitions are correctly attributed.
+- Strict/exploratory eligibility is explicit.
+- Zero-activity strategies remain visible.
+- Gate drill-down identifies actual observed and required values.
+- Missing evidence is not misrepresented as zero activity.
+
+#### UI 21.3 Capital allocation
+
+- Legacy manual allocations do not constrain eligible opportunities.
+- Shared capital is correctly represented.
+- Global risk controls remain effective.
+- Concurrent reservations cannot double-allocate capital.
+- Allocation reasons originate from actual decisions.
+- Stock and flow limits are distinguished.
+
+#### UI 21.4 Execution and lifecycle
+
+- Order status matches authoritative lifecycle state.
+- Partial fills and terminal outcomes are correctly represented.
+- Protective exits and interrupted barriers are visible.
+- Cancellation and rejection reasons are attributable.
+- Execution metrics use defined denominators.
+- Counterfactual estimates are clearly separated from realised outcomes.
+
+#### UI 21.5 Financial integrity
+
+- Displayed financial values match authoritative sources.
+- Fees are not double counted.
+- Independent reconciliation status is accurate.
+- Incomplete evidence remains visible.
+- Unreconciled trades do not contaminate validated performance.
+- Match probes are not represented as settled executions.
+- Contributions and withdrawals are correctly reflected in return calculations.
+
+#### UI 21.6 Learning
+
+- Scout outcomes are separated from actual paper trades.
+- Evidence acquisition activity is distinguished from accepted evidence gains.
+- Evidence gap and blocker information is accurate.
+- Effective samples are distinguished from raw samples.
+- Promotion eligibility is not inferred from activity or raw counts.
+- Existing promotion gates remain enforced.
+
+#### UI 21.7 Deterministic fixtures
+
+Test:
+
+- Populated data.
+- Empty data.
+- Zero activity.
+- Stale data.
+- Unavailable data.
+- Truncated populations.
+- Mixed strict/exploratory eligibility.
+- Repeated events and retries.
+- Partial fills.
+- Asynchronous lifecycle transitions.
+- Pending orders.
+- Interrupted protective barriers.
+- Reconciliation mismatches.
+- Missing fee or FX evidence.
+- Multiple evidence epochs.
+- Zero-activity strategies.
+- Persisted layout migration.
+
+#### UI 21.8 Frontend verification
+
+Run:
+
+- Focused React component tests.
+- Integration tests.
+- Typechecking.
+- Rendered browser verification.
+- Layout and resizing verification.
+- Filter and navigation verification.
+- Empty and error-state verification.
+- Bounded query and subscription verification.
+
+Do not declare the UI complete based solely on compilation or unit tests.
+
+#### UI 21.9 Backend verification
+
+Run relevant focused regression tests for any modified authoritative contracts.
+
+Verify that observability changes do not alter trading behaviour.
+
+Where a functional defect is fixed, add regression coverage demonstrating the original defect and corrected behaviour.
+
+#### UI 21.10 Runtime verification
+
+Where genuine runtime evidence is available, compare rendered values against authoritative service responses and financial evidence.
+
+Do not invent trades or force execution to populate widgets.
+
+UI acceptance can validate correct empty, incomplete and insufficient-evidence states.
+
+However, UI acceptance does not establish that the underlying v35 runtime or empirical acceptance requirements have been met.
+
+### UI 22. Current Runtime Evidence and Immediate Priorities
+
+Review the latest runtime status rather than assuming earlier snapshots remain current. As of 2026-11-26 16:31 UTC, read-only APIs report enabled paper AutoTrader with healthy audit, $1,000 daily pool available, 137 Insights decision samples, 38 exploratory submitted orders, 37 terminal unfilled expiries and one post-only crossing rejection; there are zero fills, positions, trades, fees or barriers. In the retained 69 AutoTrader cycle reports (11:16–15:57 UTC), 231 fresh directional rows led to 143 selected attempts, 38 submissions and 105 execution-blocked outcomes; 29 cycles reported duplicate exploratory source-event reservations and two reported audit persistence unavailable. These counts are not strict-eligibility denominators. See plan.md and Beads sbe_ts-7eeb for source/evidence references. No trade has been forced and no thresholds or risk controls changed.
+
+Known issues from the preceding v35 review include:
+
+- Exploratory orders were submitted but remained unfilled.
+- No completed end-to-end paper trade had been demonstrated.
+- Strict eligibility was not explicitly exposed in candidate diagnostics.
+- Missing fresh local books blocked some opportunities.
+- Duplicate reserved events were among observed blockers.
+- Some worker streams experienced recurring idle/reconnect messages.
+- Independent financial infrastructure existed but genuine settled-execution reconciliation remained unverified.
+- Scout outcomes existed without actual trade Learning samples.
+- Legacy manual strategy allocation controls remained visible.
+- Some deployed artifacts lacked exact source revision attestation.
+
+These are investigation priorities, not assumptions that the issues still exist.
+
+Verify current status before implementing fixes.
+
+Current Critical delivery order, with the lifecycle and UI workstreams progressing in parallel:
+
+1. Decision Funnel Diagnostics: complete per-symbol, per-strategy and symbol/strategy explanations, including gates and observed/required values.
+2. Execution Quality: reservation lifecycle, unfilled orders, cancellations, execution prices, revalidation and matching evidence.
+3. Autonomous Capital Allocation: shared-pool use, allocation decisions, binding constraints and removal of legacy dependencies; offline WP5/WP6 code is complete, runtime activation remains pending.
+4. Learning and Evidence Acquisition: strict eligibility blockers, evidence gaps, acquisition progress and accepted gains.
+5. AutoTrader Controls and Safety: effective configuration, global risk restrictions and safety states.
+
+The Critical backend objective remains a natural end-to-end paper trade through reservation, matching, protection, close, independent financial reconciliation and Learning. UI implementation and honest empty/unknown states do not wait for a trade; v35 runtime and empirical acceptance still require genuine evidence.
+
+### UI 23. Completion Reporting
+
+Maintain `plan.md` and Beads throughout implementation.
+
+At completion, produce a report containing:
+
+#### UI Widget delivery
+
+For each of the eight widgets:
+
+- Implementation status.
+- Existing components reused.
+- New components.
+- Authoritative contracts.
+- Supported functionality.
+- Missing functionality.
+- Tests completed.
+- Browser verification.
+- Runtime verification.
+- Outstanding limitations.
+
+#### UI v35 functional review
+
+For every affected work package:
+
+- Original requirement.
+- Existing implementation status.
+- Gaps discovered.
+- Defects corrected.
+- Evidence collected.
+- Remaining acceptance blockers.
+- Associated Beads tasks.
+
+#### UI Master plan review
+
+List:
+
+- Genuine omissions discovered.
+- Ambiguities or contradictions.
+- Proposed amendments.
+- Approved amendments.
+- Unresolved decisions.
+
+#### UI Runtime and empirical evidence
+
+Separately identify:
+
+- Functional implementation complete.
+- Deterministically verified.
+- Deployed.
+- Runtime verified.
+- Financially reconciled.
+- Empirically validated.
+- Performance accepted.
+
+Do not collapse these into a single completion status.
+
+#### UI Next-wave candidates
+
+Record genuinely new capabilities and optional analytical enhancements that are not necessary for v35 completion.
+
+Do not automatically implement them.
+
+### UI 24. Non-Negotiable Delivery Constraints
+
+- Keep v35 authoritative.
+- Preserve paper-only execution.
+- Preserve existing risk controls.
+- Preserve strict entry and evidence gates.
+- Preserve independent financial reconciliation requirements.
+- Preserve Learning promotion restrictions.
+- Preserve performance acceptance thresholds.
+- Keep WP16 deferred.
+- Do not introduce new trading strategies as part of UI work.
+- Do not force trades.
+- Do not reset the current financial evidence epoch.
+- Do not fabricate missing data.
+- Do not duplicate authoritative business logic in React.
+- Do not reopen general tooling optimisation.
+- Reuse existing Beads tasks where possible.
+- Coordinate shared backend changes.
+- Maintain clear file ownership.
+- Do not commit or deploy without approval.
+
+Complete existing v35 operational visibility and functional requirements first.
+
+Optional enhancements requiring substantial new infrastructure should be recorded for the next improvement wave rather than indefinitely extending v35.
+
+### UI 25. Definition of Done
+
+The UI plan is complete when:
+
+- All eight required operator widgets satisfy their applicable requirements.
+- The dashboard presets and custom layouts operate correctly.
+- Legacy manual allocation controls and obsolete dependencies are resolved.
+- Complete decision funnels are available per symbol, strategy and symbol/strategy combination.
+- The operator can trace decisions through execution, financial reconciliation and Learning.
+- Financial and evidence limitations are presented accurately.
+- Redundant widgets have been safely consolidated.
+- Relevant research access remains available.
+- Required Grafana monitoring is implemented.
+- Source contracts and rendered behaviour have been verified.
+- All discovered v35 gaps are resolved or explicitly tracked with dependencies and acceptance criteria.
+- Proposed master plan amendments are documented and approved where necessary.
+- `plan.md`, Beads and the authoritative v35 master plan remain consistent.
+
+UI completion must not automatically imply v35 completion.
+
+The overall v35 coordinator retains responsibility for declaring v35 accepted only when its required functional, financial, runtime, quantitative and performance gates have been satisfied.
+
+Begin with the bounded independent review, establish traceability and proceed directly into implementation using the existing specialist agent configuration.

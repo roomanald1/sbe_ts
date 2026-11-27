@@ -1,5 +1,7 @@
 pub fn publish_signal_snapshot(symbol: &str, snapshot: Bytes) -> bool {
-    let Some(feeds) = SIGNAL_FEEDS.get() else { return false; };
+    let Some(feeds) = SIGNAL_FEEDS.get() else {
+        return false;
+    };
     let sender = feeds.get(symbol).map(|entry| entry.value().clone());
     if let Some(sender) = sender {
         let _ = sender.send(snapshot);
@@ -38,11 +40,14 @@ fn start_signal_feed(
         }
     };
     if should_start {
-        tokio::spawn(run_signal_feed(instrument.to_owned(), price_receiver, events.clone()));
+        tokio::spawn(run_signal_feed(
+            instrument.to_owned(),
+            price_receiver,
+            events.clone(),
+        ));
     }
     sender
 }
-
 
 async fn run_signal_feed(
     instrument: String,
@@ -57,7 +62,16 @@ async fn run_signal_feed(
                 Ok(bytes) if has_symbol(&bytes, &instrument) => {
                     crate::metrics::record_queue_depth(&format!("signal_prices/{instrument}"), prices.len());
                     if bytes.len() >= 56 && read_f64(&bytes, 40).is_some() {
-                        let _ = events.send(bytes);
+                        let event = crate::metrics::market_event_timestamp(&bytes);
+                        let delivered = events.send(bytes).is_ok();
+                        if let Some((kind, timestamp_ms)) = event {
+                            crate::metrics::record_symbol_aggregate_event(
+                                &instrument,
+                                kind,
+                                timestamp_ms,
+                                delivered,
+                            );
+                        }
                         crate::metrics::record_queue_depth("signal_events", events.len());
                     }
                 }
@@ -73,7 +87,18 @@ async fn run_signal_feed(
                     let bytes = bytes.as_ref();
                     if has_symbol(bytes, &instrument) {
                         if bytes.len() >= 97 {
-                            let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
+                            let event = crate::metrics::market_event_timestamp(bytes);
+                            let delivered = events
+                                .send(Bytes::clone(payload.data().expect("checked payload data")))
+                                .is_ok();
+                            if let Some((kind, timestamp_ms)) = event {
+                                crate::metrics::record_symbol_aggregate_event(
+                                    &instrument,
+                                    kind,
+                                    timestamp_ms,
+                                    delivered,
+                                );
+                            }
                             crate::metrics::record_queue_depth("signal_events", events.len());
                         }
                     }
@@ -83,7 +108,18 @@ async fn run_signal_feed(
                 if let Some(bytes) = payload.data() {
                     let bytes = bytes.as_ref();
                     if has_symbol(bytes, &instrument) && bytes.len() >= 272 {
-                        let _ = events.send(Bytes::clone(payload.data().expect("checked payload data")));
+                        let event = crate::metrics::market_event_timestamp(bytes);
+                        let delivered = events
+                            .send(Bytes::clone(payload.data().expect("checked payload data")))
+                            .is_ok();
+                        if let Some((kind, timestamp_ms)) = event {
+                            crate::metrics::record_symbol_aggregate_event(
+                                &instrument,
+                                kind,
+                                timestamp_ms,
+                                delivered,
+                            );
+                        }
                         crate::metrics::record_queue_depth("signal_events", events.len());
                     }
                 }
@@ -94,7 +130,10 @@ async fn run_signal_feed(
 
 fn symbol_from_sbe(bytes: &[u8]) -> Option<&str> {
     let field = bytes.get(8..40)?;
-    let end = field.iter().position(|byte| *byte == b' ' || *byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|byte| *byte == b' ' || *byte == 0)
+        .unwrap_or(field.len());
     std::str::from_utf8(&field[..end]).ok()
 }
 
@@ -113,4 +152,3 @@ fn read_f64(bytes: &[u8], offset: usize) -> Option<f64> {
     let value = f64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?);
     value.is_finite().then_some(value)
 }
-

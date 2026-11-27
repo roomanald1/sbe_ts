@@ -6,6 +6,284 @@ async fn get_orders(State(store): State<Arc<PositionStore>>) -> Json<OrdersRespo
     })
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AdjustBarrierTriggerRequest {
+    request_id: String,
+    symbol: String,
+    side: TradeSide,
+    quantity: f64,
+    expected_parent_order_id: RequiredNullableString,
+    expected_lifecycle_trade_id: RequiredNullableString,
+    profile_id: String,
+    profile_version: u64,
+    policy_source: String,
+    reason: TriggerAdjustmentReason,
+    target_net_return_percent: f64,
+    expected_trigger_price: f64,
+    new_trigger_price: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RequiredNullableString(Option<String>);
+
+impl<'de> Deserialize<'de> for RequiredNullableString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<String>::deserialize(deserializer).map(Self)
+    }
+}
+
+#[derive(Serialize)]
+struct AdjustBarrierTriggerResponse {
+    barrier_id: String,
+    request_id: String,
+    adjusted_at_ms: u64,
+    trigger_price: f64,
+    idempotent_replay: bool,
+}
+
+async fn adjust_barrier_trigger(
+    State(store): State<Arc<PositionStore>>,
+    Path(id): Path<String>,
+    Json(request): Json<AdjustBarrierTriggerRequest>,
+) -> Result<Json<AdjustBarrierTriggerResponse>, (StatusCode, String)> {
+    if !valid_adjustment_label(&request.request_id, 128)
+        || !valid_adjustment_label(&request.symbol, 64)
+        || !valid_adjustment_label(&request.profile_id, 128)
+        || !valid_adjustment_label(&request.policy_source, 64)
+        || !request.quantity.is_finite()
+        || request.quantity <= 0.0
+        || !request.target_net_return_percent.is_finite()
+        || !request.expected_trigger_price.is_finite()
+        || request.expected_trigger_price <= 0.0
+        || !request.new_trigger_price.is_finite()
+        || request.new_trigger_price <= 0.0
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Trigger adjustment identity and prices must be valid".into(),
+        ));
+    }
+
+    // Match the persistence writer's lock order: writer lock, then ledger.
+    // Holding both through the durable transaction prevents the matcher and
+    // trigger poller from observing an unpersisted or partially rolled back
+    // threshold.
+    let _write_guard = store.persistence_write_lock.lock().await;
+    let mut ledger = store.ledger.lock().await;
+    let mut proposed_record = TriggerAdjustmentRecord {
+        request_id: request.request_id.clone(),
+        adjusted_at_ms: 0,
+        barrier_id: id.clone(),
+        symbol: request.symbol.clone(),
+        side: request.side.clone(),
+        quantity: request.quantity,
+        parent_order_id: request.expected_parent_order_id.0.clone(),
+        lifecycle_trade_id: request.expected_lifecycle_trade_id.0.clone(),
+        profile_id: request.profile_id.clone(),
+        profile_version: request.profile_version,
+        policy_source: request.policy_source.clone(),
+        reason: request.reason.clone(),
+        target_net_return_percent: request.target_net_return_percent,
+        expected_trigger_price: request.expected_trigger_price,
+        new_trigger_price: request.new_trigger_price,
+    };
+
+    if let Some(existing) = ledger
+        .barrier_orders
+        .iter()
+        .flat_map(|barrier| barrier.trigger_adjustments.iter())
+        .find(|record| record.request_id == request.request_id)
+        .cloned()
+    {
+        if !same_trigger_adjustment_request(&existing, &proposed_record) {
+            return Err((
+                StatusCode::CONFLICT,
+                "Trigger adjustment request_id was already used with different values".into(),
+            ));
+        }
+        let Some(barrier) = ledger
+            .barrier_orders
+            .iter()
+            .find(|barrier| barrier.id == id)
+        else {
+            return Err((StatusCode::NOT_FOUND, "Barrier order not found".into()));
+        };
+        let response_trigger = barrier.trigger_price;
+        let response_barrier_id = barrier.id.clone();
+        let adjusted_at_ms = existing.adjusted_at_ms;
+        persist_trigger_adjustment_snapshot(&store.path, ledger.clone())
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Unable to confirm durable trigger adjustment retry: {error}"),
+                )
+            })?;
+        return Ok(Json(AdjustBarrierTriggerResponse {
+            barrier_id: response_barrier_id,
+            request_id: request.request_id,
+            adjusted_at_ms,
+            trigger_price: response_trigger,
+            idempotent_replay: true,
+        }));
+    }
+
+    let Some(index) = ledger
+        .barrier_orders
+        .iter()
+        .position(|barrier| barrier.id == id)
+    else {
+        return Err((StatusCode::NOT_FOUND, "Barrier order not found".into()));
+    };
+    let barrier = &ledger.barrier_orders[index];
+    if barrier.status != "armed" {
+        return Err((
+            StatusCode::CONFLICT,
+            "Only an armed protective barrier can be adjusted".into(),
+        ));
+    }
+    if barrier.order_kind != "stop-market"
+        || barrier.execution_type != "market"
+        || barrier.limit_price.is_some()
+        || barrier.trailing_amount.is_some()
+        || barrier.trailing_percent.is_some()
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Only an armed stop-market barrier can be adjusted".into(),
+        ));
+    }
+    let lifecycle_trade_id = barrier
+        .lifecycle
+        .as_ref()
+        .map(|lifecycle| lifecycle.trade_id.as_str());
+    let lifecycle_profile = barrier.lifecycle.as_ref();
+    if barrier.symbol != request.symbol
+        || barrier.side != request.side
+        || barrier.quantity.to_bits() != request.quantity.to_bits()
+        || barrier.parent_order_id != request.expected_parent_order_id.0
+        || lifecycle_trade_id != request.expected_lifecycle_trade_id.0.as_deref()
+        || lifecycle_profile.and_then(|lifecycle| lifecycle.profile_id.as_deref())
+            != Some(request.profile_id.as_str())
+        || lifecycle_profile.and_then(|lifecycle| lifecycle.profile_version)
+            != Some(request.profile_version)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Trigger adjustment identity does not match the armed barrier".into(),
+        ));
+    }
+    let current_trigger = barrier.trigger_price;
+    if current_trigger.to_bits() != request.expected_trigger_price.to_bits() {
+        return Err((
+            StatusCode::CONFLICT,
+            "Expected trigger price is stale".into(),
+        ));
+    }
+    let protective = match (&barrier.side, &barrier.trigger_direction) {
+        (TradeSide::Sell, BarrierDirection::Below) => request.new_trigger_price > current_trigger,
+        (TradeSide::Buy, BarrierDirection::Above) => request.new_trigger_price < current_trigger,
+        _ => false,
+    };
+    if !protective {
+        return Err((
+            StatusCode::CONFLICT,
+            "Trigger movement must tighten protection in the barrier's risk-reducing direction"
+                .into(),
+        ));
+    }
+    if barrier.trigger_adjustments.len() >= MAX_TRIGGER_ADJUSTMENTS_PER_BARRIER {
+        return Err((
+            StatusCode::CONFLICT,
+            "Barrier trigger adjustment history reached its durable limit".into(),
+        ));
+    }
+
+    let observed_at_ms = now_ms().map_err(internal_error)?;
+    proposed_record.adjusted_at_ms = observed_at_ms;
+    ledger.barrier_orders[index].trigger_price = request.new_trigger_price;
+    ledger.barrier_orders[index]
+        .trigger_adjustments
+        .push(proposed_record);
+    let snapshot = ledger.clone();
+    let durable_result =
+        persist_trigger_adjustment_snapshot_at(&store.path, snapshot, observed_at_ms).await;
+    if let Err(error) = durable_result {
+        ledger.barrier_orders[index].trigger_price = current_trigger;
+        ledger.barrier_orders[index].trigger_adjustments.pop();
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unable to durably persist barrier trigger adjustment: {error}"),
+        ));
+    }
+    let _ = store.state_updates.send(());
+    Ok(Json(AdjustBarrierTriggerResponse {
+        barrier_id: id,
+        request_id: request.request_id,
+        adjusted_at_ms: observed_at_ms,
+        trigger_price: request.new_trigger_price,
+        idempotent_replay: false,
+    }))
+}
+
+async fn persist_trigger_adjustment_snapshot(
+    path: &std::path::Path,
+    snapshot: Ledger,
+) -> anyhow::Result<()> {
+    let observed_at_ms = now_ms()?;
+    persist_trigger_adjustment_snapshot_at(path, snapshot, observed_at_ms).await
+}
+
+async fn persist_trigger_adjustment_snapshot_at(
+    path: &std::path::Path,
+    snapshot: Ledger,
+    observed_at_ms: u64,
+) -> anyhow::Result<()> {
+    let path = path.to_owned();
+    match tokio::task::spawn_blocking(move || {
+        save_sqlite_ledger_at(&path, &snapshot, observed_at_ms, false)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(anyhow::anyhow!(
+            "Position Manager persistence task failed: {error}"
+        )),
+    }
+}
+
+fn valid_adjustment_label(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty()
+        && value.trim() == value
+        && value.len() <= max_bytes
+        && !value.chars().any(char::is_control)
+}
+
+fn same_trigger_adjustment_request(
+    stored: &TriggerAdjustmentRecord,
+    proposed: &TriggerAdjustmentRecord,
+) -> bool {
+    stored.request_id == proposed.request_id
+        && stored.barrier_id == proposed.barrier_id
+        && stored.symbol == proposed.symbol
+        && stored.side == proposed.side
+        && stored.quantity.to_bits() == proposed.quantity.to_bits()
+        && stored.parent_order_id == proposed.parent_order_id
+        && stored.lifecycle_trade_id == proposed.lifecycle_trade_id
+        && stored.profile_id == proposed.profile_id
+        && stored.profile_version == proposed.profile_version
+        && stored.policy_source == proposed.policy_source
+        && stored.reason == proposed.reason
+        && stored.target_net_return_percent.to_bits()
+            == proposed.target_net_return_percent.to_bits()
+        && stored.expected_trigger_price.to_bits() == proposed.expected_trigger_price.to_bits()
+        && stored.new_trigger_price.to_bits() == proposed.new_trigger_price.to_bits()
+}
+
 const DEFAULT_ORDERS_HISTORY_LIMIT: usize = 50;
 const MAX_ORDERS_HISTORY_LIMIT: usize = 200;
 
@@ -27,6 +305,8 @@ fn default_orders_history_limit() -> usize {
 struct OrdersHistoryPage {
     orders: Vec<RestingOrder>,
     barrier_orders: Vec<BarrierOrder>,
+    execution_paths: Vec<ExecutionPathTerminalRecord>,
+    execution_paths_truncated: bool,
     active_orders: Vec<RestingOrder>,
     active_barrier_orders: Vec<BarrierOrder>,
     limit: usize,
@@ -66,6 +346,8 @@ async fn get_orders_history(
     Ok(Json(OrdersHistoryPage {
         orders: order_page.items,
         barrier_orders: barrier_page.items,
+        execution_paths: ledger.execution_path_history.clone(),
+        execution_paths_truncated: ledger.execution_path_history_truncated,
         active_orders,
         active_barrier_orders,
         limit: query.limit,
@@ -217,6 +499,8 @@ fn make_history_page<T>(
 #[cfg(test)]
 mod orders_history_tests {
     use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
 
     fn resting(id: &str, timestamp: u64, remaining_quantity: f64) -> RestingOrder {
         RestingOrder {
@@ -237,6 +521,9 @@ mod orders_history_tests {
             client_order_id: None,
             lifecycle: None,
             reduce_only: false,
+            market_path: Vec::new(),
+            market_path_completeness: default_market_path_completeness(),
+            market_path_dropped_samples: 0,
         }
     }
 
@@ -267,6 +554,7 @@ mod orders_history_tests {
             parent_order_id: None,
             client_order_id: None,
             lifecycle: None,
+            trigger_adjustments: Vec::new(),
         }
     }
 
@@ -327,6 +615,17 @@ mod orders_history_tests {
     }
 
     #[test]
+    fn legacy_barrier_rows_default_trigger_adjustment_history() {
+        let mut legacy = serde_json::to_value(barrier("legacy", 1, "armed")).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("trigger_adjustments");
+        let decoded: BarrierOrder = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.trigger_adjustments.is_empty());
+    }
+
+    #[test]
     fn history_limit_is_explicitly_bounded() {
         assert!(!valid_orders_history_limit(0));
         assert!(valid_orders_history_limit(1));
@@ -383,6 +682,439 @@ mod orders_history_tests {
             decode_history_cursor("broken").unwrap_err().0,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    fn trigger_test_store(barrier: BarrierOrder, path: PathBuf) -> Arc<PositionStore> {
+        let (state_updates, _) = broadcast::channel(8);
+        let ledger = Ledger {
+            barrier_orders: vec![barrier],
+            ..Ledger::default()
+        };
+        Arc::new(PositionStore {
+            path,
+            ledger: Arc::new(Mutex::new(ledger)),
+            persistence_notify: Arc::new(Notify::new()),
+            persistence_write_lock: Arc::new(Mutex::new(())),
+            pending_client_order_commits: StdMutex::new(HashSet::new()),
+            state_updates,
+            persistence_timings_ms: Arc::new(StdMutex::new(BTreeMap::new())),
+            trade_index: StdMutex::new(LedgerTradeIndex::default()),
+            realized_pnl_cache: StdMutex::new(None),
+            market_marks: StdRwLock::new(HashMap::new()),
+            market_mark_pollers: StdMutex::new(HashSet::new()),
+            vwap_runs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn trigger_test_path(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "pm-trigger-adjustment-{}-{label}-{nonce}.sqlite",
+            std::process::id()
+        ))
+    }
+
+    fn stop_market_barrier(id: &str, side: TradeSide) -> BarrierOrder {
+        let mut barrier = barrier(id, 1, "armed");
+        barrier.order_kind = "stop-market".to_owned();
+        barrier.execution_type = "market".to_owned();
+        barrier.parent_order_id = Some("parent-1".to_owned());
+        barrier.client_order_id = Some("parent-1".to_owned());
+        barrier.lifecycle = Some(CanonicalLifecycleLink {
+            schema_version: 1,
+            opportunity_id: "opportunity-1".to_owned(),
+            episode_id: "episode-1".to_owned(),
+            trade_id: "trade-1".to_owned(),
+            profile_id: Some("profile-1".to_owned()),
+            profile_hash: Some("hash-1".to_owned()),
+            profile_version: Some(3),
+            execution_mode: "paper".to_owned(),
+            entry_policy: "strict".to_owned(),
+            source: "auto".to_owned(),
+        });
+        barrier.side = side.clone();
+        match side {
+            TradeSide::Sell => {
+                barrier.trigger_price = 90.0;
+                barrier.trigger_direction = BarrierDirection::Below;
+            }
+            TradeSide::Buy => {
+                barrier.trigger_price = 110.0;
+                barrier.trigger_direction = BarrierDirection::Above;
+            }
+        }
+        barrier
+    }
+
+    fn trigger_request(
+        request_id: &str,
+        barrier: &BarrierOrder,
+        symbol: &str,
+        parent_order_id: Option<&str>,
+        expected: f64,
+        new: f64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "request_id": request_id,
+            "symbol": symbol,
+            "side": barrier.side,
+            "quantity": barrier.quantity,
+            "expected_parent_order_id": parent_order_id,
+            "expected_lifecycle_trade_id": "trade-1",
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "policy_source": "validated_profile",
+            "reason": "trailing-stop",
+            "target_net_return_percent": 0.25,
+            "expected_trigger_price": expected,
+            "new_trigger_price": new
+        })
+    }
+
+    async fn post_trigger_adjustment(
+        store: Arc<PositionStore>,
+        id: &str,
+        request: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = position_router(store)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/positions/orders/{id}/trigger"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_tightens_both_sides_and_survives_sqlite_restart() {
+        for (id, side, old, new) in [
+            ("long-stop", TradeSide::Sell, 90.0, 95.0),
+            ("short-stop", TradeSide::Buy, 110.0, 105.0),
+        ] {
+            let barrier = stop_market_barrier(id, side.clone());
+            let path = trigger_test_path(id);
+            let store = trigger_test_store(barrier.clone(), path.clone());
+            let mut request = trigger_request(
+                "request-1",
+                &barrier,
+                "BTC-USDT",
+                Some("parent-1"),
+                old,
+                new,
+            );
+            if matches!(side, TradeSide::Buy) {
+                request["reason"] = serde_json::json!("breakeven-protection");
+            }
+            let (status, body) = post_trigger_adjustment(Arc::clone(&store), id, request).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["trigger_price"], new);
+            assert_eq!(body["idempotent_replay"], false);
+            let adjustment_timestamp = body["adjusted_at_ms"].as_u64().unwrap();
+            assert!(adjustment_timestamp > 0);
+
+            #[cfg(feature = "test-support")]
+            let ledger = {
+                let restarted = PositionStore::load_from_path_without_writer(path.clone())
+                    .await
+                    .unwrap();
+                restarted.ledger.lock().await.clone()
+            };
+            #[cfg(not(feature = "test-support"))]
+            let ledger = load_sqlite_ledger(&path).unwrap();
+            let persisted = ledger
+                .barrier_orders
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap();
+            assert_eq!(persisted.trigger_price, new);
+            assert_eq!(persisted.id, barrier.id);
+            assert_eq!(persisted.quantity, barrier.quantity);
+            assert_eq!(persisted.side, barrier.side);
+            assert_eq!(persisted.status, "armed");
+            assert_eq!(persisted.trigger_adjustments.len(), 1);
+            assert_eq!(
+                persisted.trigger_adjustments[0].adjusted_at_ms,
+                adjustment_timestamp
+            );
+
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_accepts_explicit_zero_profile_version() {
+        let mut barrier = stop_market_barrier("stop-profile-zero", TradeSide::Sell);
+        barrier.lifecycle.as_mut().unwrap().profile_version = Some(0);
+        let path = trigger_test_path("profile-zero");
+        let store = trigger_test_store(barrier.clone(), path.clone());
+        let mut request = trigger_request(
+            "profile-zero-request",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        request["profile_version"] = serde_json::json!(0);
+        let (status, _) = post_trigger_adjustment(store, &barrier.id, request).await;
+        assert_eq!(status, StatusCode::OK);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_retry_is_idempotent_and_stale_or_reused_ids_conflict() {
+        let barrier = stop_market_barrier("stop-idempotent", TradeSide::Sell);
+        let path = trigger_test_path("idempotent");
+        let store = trigger_test_store(barrier.clone(), path.clone());
+        let request = trigger_request(
+            "stable-request",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        let (first, first_body) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, request.clone()).await;
+        let (retry, response) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, request.clone()).await;
+        assert_eq!(first, StatusCode::OK);
+        assert_eq!(retry, StatusCode::OK);
+        assert_eq!(response["idempotent_replay"], true);
+        let stored_timestamp = response["adjusted_at_ms"].as_u64().unwrap();
+        assert!(stored_timestamp > 0);
+        assert_eq!(first_body["adjusted_at_ms"], stored_timestamp);
+
+        let mut reused = request.clone();
+        reused["new_trigger_price"] = serde_json::json!(96.0);
+        let (reused_status, _) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, reused).await;
+        assert_eq!(reused_status, StatusCode::CONFLICT);
+
+        let stale = trigger_request(
+            "another-request",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            97.0,
+        );
+        let (stale_status, _) = post_trigger_adjustment(store, &barrier.id, stale).await;
+        assert_eq!(stale_status, StatusCode::CONFLICT);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_rejects_identity_state_and_nonprotective_updates() {
+        let barrier = stop_market_barrier("stop-reject", TradeSide::Sell);
+        let path = trigger_test_path("reject");
+        let store = trigger_test_store(barrier.clone(), path.clone());
+
+        for (request_id, symbol, parent, expected, new, status) in [
+            (
+                "wrong-symbol",
+                "ETH-USDT",
+                Some("parent-1"),
+                90.0,
+                95.0,
+                "identity",
+            ),
+            (
+                "wrong-parent",
+                "BTC-USDT",
+                Some("other-parent"),
+                90.0,
+                95.0,
+                "identity",
+            ),
+            (
+                "widen",
+                "BTC-USDT",
+                Some("parent-1"),
+                90.0,
+                85.0,
+                "direction",
+            ),
+        ] {
+            let request = trigger_request(request_id, &barrier, symbol, parent, expected, new);
+            let (actual, _) =
+                post_trigger_adjustment(Arc::clone(&store), &barrier.id, request).await;
+            assert_eq!(actual, StatusCode::CONFLICT, "{status}");
+        }
+
+        for (index, state) in ["triggering", "filled", "cancelled"].iter().enumerate() {
+            {
+                let mut ledger = store.ledger.lock().await;
+                ledger.barrier_orders[0].status = (*state).to_owned();
+            }
+            let request = trigger_request(
+                &format!("non-armed-{index}"),
+                &barrier,
+                "BTC-USDT",
+                Some("parent-1"),
+                90.0,
+                95.0,
+            );
+            let (actual, _) =
+                post_trigger_adjustment(Arc::clone(&store), &barrier.id, request).await;
+            assert_eq!(actual, StatusCode::CONFLICT);
+        }
+
+        // The following malformed-request assertions exercise decoding and
+        // value validation independently of the terminal-state rejection.
+        store.ledger.lock().await.barrier_orders[0].status = "armed".to_owned();
+
+        let mut malformed = trigger_request(
+            "malformed",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        malformed["expected_trigger_price"] = serde_json::json!(0.0);
+        let (actual, _) = post_trigger_adjustment(Arc::clone(&store), &barrier.id, malformed).await;
+        assert_eq!(actual, StatusCode::BAD_REQUEST);
+
+        let missing_identity = serde_json::json!({
+            "request_id": "missing-parent-identity",
+            "symbol": "BTC-USDT",
+            "side": "sell",
+            "quantity": 1.0,
+            "expected_lifecycle_trade_id": "trade-1",
+            "profile_id": "profile-1",
+            "profile_version": 3,
+            "policy_source": "validated_profile",
+            "reason": "trailing-stop",
+            "target_net_return_percent": 0.25,
+            "expected_trigger_price": 90.0,
+            "new_trigger_price": 95.0
+        });
+        let (actual, _) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, missing_identity).await;
+        assert_eq!(
+            actual,
+            StatusCode::CONFLICT,
+            "missing parent identity is rejected"
+        );
+
+        {
+            let mut ledger = store.ledger.lock().await;
+            ledger.barrier_orders[0].status = "armed".to_owned();
+            ledger.barrier_orders[0].order_kind = "stop-limit".to_owned();
+        }
+        let request = trigger_request(
+            "stop-limit",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        let (actual, _) = post_trigger_adjustment(store, &barrier.id, request).await;
+        assert_eq!(actual, StatusCode::CONFLICT);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_limit_keeps_existing_idempotency_records() {
+        let mut barrier = stop_market_barrier("stop-cap", TradeSide::Sell);
+        let prior = TriggerAdjustmentRecord {
+            request_id: "cap-replay".to_owned(),
+            adjusted_at_ms: 1,
+            barrier_id: barrier.id.clone(),
+            symbol: "BTC-USDT".to_owned(),
+            side: TradeSide::Sell,
+            quantity: 1.0,
+            parent_order_id: Some("parent-1".to_owned()),
+            lifecycle_trade_id: Some("trade-1".to_owned()),
+            profile_id: "profile-1".to_owned(),
+            profile_version: 3,
+            policy_source: "validated_profile".to_owned(),
+            reason: TriggerAdjustmentReason::TrailingStop,
+            target_net_return_percent: 0.25,
+            expected_trigger_price: 89.0,
+            new_trigger_price: 90.0,
+        };
+        barrier.trigger_adjustments.push(prior.clone());
+        for index in 1..MAX_TRIGGER_ADJUSTMENTS_PER_BARRIER {
+            barrier.trigger_adjustments.push(TriggerAdjustmentRecord {
+                request_id: format!("request-{index}"),
+                ..prior.clone()
+            });
+        }
+        let path = trigger_test_path("cap");
+        let store = trigger_test_store(barrier.clone(), path.clone());
+
+        let replay = trigger_request(
+            "cap-replay",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            89.0,
+            90.0,
+        );
+        let (replay_status, replay_body) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, replay).await;
+        assert_eq!(replay_status, StatusCode::OK);
+        assert_eq!(replay_body["idempotent_replay"], true);
+
+        let new_request = trigger_request(
+            "over-cap",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        let (status, _) =
+            post_trigger_adjustment(Arc::clone(&store), &barrier.id, new_request).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let ledger = store.ledger.lock().await;
+        assert_eq!(ledger.barrier_orders[0].trigger_price, 90.0);
+        assert_eq!(
+            ledger.barrier_orders[0].trigger_adjustments.len(),
+            MAX_TRIGGER_ADJUSTMENTS_PER_BARRIER
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn trigger_adjustment_rolls_back_memory_when_durable_write_fails() {
+        let barrier = stop_market_barrier("stop-rollback", TradeSide::Sell);
+        let parent = trigger_test_path("not-a-directory");
+        std::fs::write(&parent, b"block parent directory").unwrap();
+        let path = parent.join("ledger.sqlite");
+        let store = trigger_test_store(barrier.clone(), path);
+        let request = trigger_request(
+            "write-fails",
+            &barrier,
+            "BTC-USDT",
+            Some("parent-1"),
+            90.0,
+            95.0,
+        );
+        let (status, _) = post_trigger_adjustment(Arc::clone(&store), &barrier.id, request).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let ledger = store.ledger.lock().await;
+        assert_eq!(ledger.barrier_orders[0].trigger_price, 90.0);
+        assert!(ledger.barrier_orders[0].trigger_adjustments.is_empty());
+        let _ = std::fs::remove_file(parent);
     }
 }
 async fn get_barrier_orders(State(store): State<Arc<PositionStore>>) -> Json<Vec<BarrierOrder>> {
@@ -493,6 +1225,7 @@ async fn create_profit_barrier(
         parent_order_id: None,
         client_order_id: None,
         lifecycle: None,
+        trigger_adjustments: Vec::new(),
     };
     ledger.barrier_orders.push(barrier_order.clone());
     if let Err(error) = store.persist(&ledger).await {

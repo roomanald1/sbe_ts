@@ -541,6 +541,38 @@ pub(super) fn complete_parameter_specs(strategy: Strategy) -> Vec<StrategyParame
             "% net",
             -1.0,
         ),
+        // These profile fields are opt-in: zero keeps the compatibility
+        // behavior disabled until Learning supplies a validated candidate.
+        catalog_param(
+            StrategyParameterKey::TrailingActivationPercent,
+            "Trailing protection activation",
+            0.0,
+            0.0,
+            2.0,
+            0.05,
+            "% net",
+            1.0,
+        ),
+        catalog_param(
+            StrategyParameterKey::TrailingDistancePercent,
+            "Trailing protection distance",
+            0.0,
+            0.0,
+            1.0,
+            0.05,
+            "percentage points",
+            -1.0,
+        ),
+        catalog_param(
+            StrategyParameterKey::BreakevenActivationPercent,
+            "Breakeven protection activation",
+            0.0,
+            0.0,
+            2.0,
+            0.05,
+            "% net",
+            1.0,
+        ),
     ]);
     if strategy.is_live_insight() {
         specs.extend([

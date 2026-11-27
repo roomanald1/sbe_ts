@@ -678,8 +678,53 @@ impl SignalEngine {
         bid_levels: &[(f64, f64)],
         ask_levels: &[(f64, f64)],
     ) {
+        self.on_book_with_receive_time(
+            timestamp, timestamp, best_bid, best_ask, bid_sizes, ask_sizes, bid_levels, ask_levels,
+        );
+    }
+
+    pub fn on_book_with_receive_time(
+        &mut self,
+        timestamp: u64,
+        received_at_ms: u64,
+        best_bid: f64,
+        best_ask: f64,
+        bid_sizes: &[f64],
+        ask_sizes: &[f64],
+        bid_levels: &[(f64, f64)],
+        ask_levels: &[(f64, f64)],
+    ) {
+        self.book_input_provenance.received = self.book_input_provenance.received.saturating_add(1);
+        self.book_input_provenance.last_source_timestamp_ms = Some(timestamp);
+        self.book_input_provenance.last_received_at_ms = Some(received_at_ms);
         if best_bid.is_finite() && best_ask.is_finite() && best_bid > 0.0 && best_ask >= best_bid {
-            self.best_quote = Some((timestamp, best_bid, best_ask));
+            // Feed streams can deliver older book events after newer ticker or
+            // trade events. Keep observing source order for Scout completeness,
+            // but never let a late event regress the quote used by snapshots.
+            // No source sequence is available, so the first quote wins when
+            // timestamps are equal.
+            let current_timestamp = self
+                .best_quote
+                .map(|(current_timestamp, _, _)| current_timestamp);
+            let advances_current_quote =
+                current_timestamp.is_none_or(|current| timestamp > current);
+            if advances_current_quote {
+                self.best_quote = Some((timestamp, best_bid, best_ask));
+                self.book_input_provenance.accepted =
+                    self.book_input_provenance.accepted.saturating_add(1);
+                self.book_input_provenance.last_accepted_source_timestamp_ms = Some(timestamp);
+                self.book_input_provenance.last_accepted_at_ms = Some(received_at_ms);
+            } else if current_timestamp == Some(timestamp) {
+                self.book_input_provenance.equal_timestamp_rejected = self
+                    .book_input_provenance
+                    .equal_timestamp_rejected
+                    .saturating_add(1);
+            } else {
+                self.book_input_provenance.older_timestamp_rejected = self
+                    .book_input_provenance
+                    .older_timestamp_rejected
+                    .saturating_add(1);
+            }
             for pending in self.pending.iter_mut().filter(|pending| {
                 pending.sample_id.is_some()
                     && timestamp >= pending.timestamp
@@ -759,6 +804,14 @@ impl SignalEngine {
                 }
                 path.latest_sample = Some(sample);
             }
+            if !advances_current_quote {
+                return;
+            }
+        } else {
+            self.book_input_provenance.invalid_book_rejected = self
+                .book_input_provenance
+                .invalid_book_rejected
+                .saturating_add(1);
         }
         self.book_bid_levels.clear();
         self.book_bid_levels
@@ -847,6 +900,67 @@ mod scout_tests {
             .find(|feature| feature.window_seconds == 10)
             .and_then(|feature| feature.value);
         assert!(momentum.is_some());
+    }
+
+    #[test]
+    fn late_book_events_do_not_regress_the_current_quote_or_book_state() {
+        let mut engine = SignalEngine::default();
+        engine.on_book(
+            20_000,
+            100.0,
+            100.2,
+            &[3.0],
+            &[1.0],
+            &[(100.0, 3.0)],
+            &[(100.2, 1.0)],
+        );
+        engine.on_book(
+            20_000,
+            105.0,
+            105.2,
+            &[1.0],
+            &[3.0],
+            &[(105.0, 1.0)],
+            &[(105.2, 3.0)],
+        );
+        engine.on_book(
+            10_000,
+            90.0,
+            90.2,
+            &[1.0],
+            &[3.0],
+            &[(90.0, 1.0)],
+            &[(90.2, 3.0)],
+        );
+
+        assert_eq!(engine.best_quote, Some((20_000, 100.0, 100.2)));
+        assert_eq!(engine.book_imbalance, Some(0.5));
+        assert_eq!(engine.book_bid_levels, vec![(100.0, 3.0)]);
+        assert_eq!(engine.book_ask_levels, vec![(100.2, 1.0)]);
+        assert_eq!(
+            engine.book_history.back().map(|sample| sample.timestamp),
+            Some(20_000)
+        );
+        assert_eq!(engine.book_input_provenance.received, 3);
+        assert_eq!(engine.book_input_provenance.accepted, 1);
+        assert_eq!(engine.book_input_provenance.equal_timestamp_rejected, 1);
+        assert_eq!(engine.book_input_provenance.older_timestamp_rejected, 1);
+    }
+
+    #[test]
+    fn book_input_diagnostics_capture_source_time_receive_time_and_order_disposition() {
+        let mut engine = SignalEngine::default();
+        engine.on_book_with_receive_time(20_000, 30_000, 100.0, 100.2, &[1.0], &[1.0], &[], &[]);
+        engine.on_book_with_receive_time(10_000, 31_000, 90.0, 90.2, &[1.0], &[1.0], &[], &[]);
+
+        let diagnostic = engine.input_diagnostic(32_000);
+        assert!(diagnostic.contains("book_events_received=2"));
+        assert!(diagnostic.contains("book_quotes_accepted=1"));
+        assert!(diagnostic.contains("book_older_rejected=1"));
+        assert!(diagnostic.contains("book_last_source_timestamp_ms=Some(10000)"));
+        assert!(diagnostic.contains("book_last_received_at_ms=Some(31000)"));
+        assert!(diagnostic.contains("book_last_source_receive_delta_ms=Some(21000)"));
+        assert!(diagnostic.contains("book_last_accepted_source_timestamp_ms=Some(20000)"));
     }
 
     #[test]
@@ -1275,10 +1389,10 @@ mod scout_tests {
             .retain(|pending| pending.scout_observation_only && pending.horizon_seconds == 3_600);
 
         let before = crate::latency::snapshot();
-        let before_count = before["late_scout_observation_only_drops_by_horizon_seconds"]["3600"]
-            ["dropped"]
-            .as_u64()
-            .unwrap();
+        let before_count =
+            before["late_scout_observation_only_drops_by_horizon_seconds"]["3600"]["dropped"]
+                .as_u64()
+                .unwrap();
         let before_total_lateness = before["late_scout_observation_only_drops_by_horizon_seconds"]
             ["3600"]["total_lateness_ms"]
             .as_u64()
@@ -1380,9 +1494,11 @@ mod scout_tests {
         // fabricating three stale horizon measurements.
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].evaluation.horizon_seconds, 3_600);
-        assert!(observations
-            .iter()
-            .all(|outcome| outcome.scout_observation_only));
+        assert!(
+            observations
+                .iter()
+                .all(|outcome| outcome.scout_observation_only)
+        );
 
         let active = BTreeSet::from([("donchian-20-btc200".into(), "BTC-USDT".into())]);
         let enabled = BTreeSet::from(["donchian-20-btc200".into()]);
@@ -1507,9 +1623,11 @@ mod scout_tests {
             &[(100.2, 1.0)],
         );
         let horizon_observations = engine.on_price(half_day, 100.1, 0.0);
-        assert!(horizon_observations
-            .iter()
-            .all(|outcome| outcome.scout_observation_only));
+        assert!(
+            horizon_observations
+                .iter()
+                .all(|outcome| outcome.scout_observation_only)
+        );
         let one_day = 86_401_000;
         engine.on_book(
             one_day,

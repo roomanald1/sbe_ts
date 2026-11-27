@@ -5,8 +5,8 @@ import type {
   AutoTraderState,
   Strategy,
 } from '../models/AutoTraderModel';
-import { projectAutoTraderBudgetState } from '../models/AutoTraderSettingsModel';
 import { money, timestamp } from './AutoTraderOrderGrid';
+import { AutoTraderBootstrapFallbackSummary } from './AutoTraderGlobalControlsSummary';
 
 const finiteFixed = (value: unknown, digits: number) =>
   typeof value === 'number' && Number.isFinite(value)
@@ -96,15 +96,13 @@ export function AutoTraderParametersDialog({ state, onClose }: DialogProps) {
                   <dt>Exploration allocation</dt>
                   <dd>{state.explorationPercent}%</dd>
                 </div>
-                <div>
-                  <dt>Protective stop / target</dt>
-                  <dd>
-                    {finiteFixed(state.stopLossPercent, 2)}% /{' '}
-                    {finiteFixed(state.takeProfitPercent, 2)}%
-                  </dd>
-                </div>
               </dl>
             </section>
+            <AutoTraderBootstrapFallbackSummary
+              stopLossPercent={state.stopLossPercent}
+              takeProfitPercent={state.takeProfitPercent}
+              loading={state.loading}
+            />
             <section>
               <strong>Service decision parameters</strong>
               <dl>
@@ -171,14 +169,6 @@ export function AutoTraderSettingsDialog({
   model,
   onClose,
 }: SettingsDialogProps) {
-  const {
-    selectedIntradayStrategies,
-    selectedDailyStrategies,
-    selectedIntradayBudgetTotal,
-    selectedDailyBudgetTotal,
-    intradayBudgetOverallocated,
-    dailyBudgetOverallocated,
-  } = projectAutoTraderBudgetState(state);
   return createPortal(
     <div
       className="app-popup-backdrop auto-trader-popup-backdrop"
@@ -321,18 +311,16 @@ export function AutoTraderSettingsDialog({
               </label>
             ))}
             <small>
-              Intraday and daily strategies have editable per-strategy budget
-              caps and separate position-slot limits. Learning adjusts effective
-              strategy budgets and candidates with stronger measured net
-              outcomes are submitted first when history is sufficient. Orders
-              use shared account, exposure, and daily-loss limits; per-strategy
-              P&L is tracked separately. The 20-day BTC-gated breakout, A2, and
-              B use signal exits without fixed stops. A2 applies a 72-hour
-              minimum hold and 0.25 order-size multiplier. B rebalances open
-              paper positions toward capped inverse-volatility target weights
-              when drift exceeds 5% of target value, subject to shared limits
-              and book liquidity. Dated futures carry has its own paper size
-              cap.
+              Eligible opportunities share the account capital pool. Orders are
+              ranked using evidence and risk checks; allocation does not imply
+              profitability. Orders use shared account, exposure, and daily-loss
+              limits; per-strategy P&L is tracked separately. The 20-day
+              BTC-gated breakout, A2, and B use signal exits without fixed
+              stops. A2 applies a 72-hour minimum hold and 0.25 order-size
+              multiplier. B rebalances open paper positions toward capped
+              inverse-volatility target weights when drift exceeds 5% of target
+              value, subject to shared limits and book liquidity. Dated futures
+              carry has its own paper size cap.
             </small>
             {state.strategies.length === 0 &&
               state.scoutStrategies.length === 0 && (
@@ -421,7 +409,7 @@ export function AutoTraderSettingsDialog({
           </label>
           <label
             className="auto-trader-risk-slider"
-            title="Shifts strength and score floors and adjusts take-profit. Riskier settings lower entry floors and move take-profit toward a 0.05% net win after fees; safer settings raise floors and preserve larger targets."
+            title="Shifts strength and score floors. It adapts the bootstrap fallback target only when no profile-selected target applies; it does not replace a selected profile exit parameter. Hard capital and loss limits remain binding."
           >
             RISK APPETITE{' '}
             <span className="auto-trader-risk-value">
@@ -491,11 +479,8 @@ export function AutoTraderSettingsDialog({
               }
             />
           </label>
-          <fieldset
-            className="auto-trader-category-limits"
-            title="Intraday signal and daily strategy budgets are separate; the overall position and exposure caps still apply."
-          >
-            <legend>HORIZON BUDGETS</legend>
+          <fieldset className="auto-trader-category-limits">
+            <legend>HORIZON POSITION SAFETY CAPS</legend>
             <label>
               INTRADAY POSITIONS
               <input
@@ -526,181 +511,12 @@ export function AutoTraderSettingsDialog({
                 }
               />
             </label>
-            <label>
-              INTRADAY BUDGET (USD)
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={state.intradayNotionalLimit}
-                onChange={(event) =>
-                  model.setCategoryLimits({
-                    intradayNotionalLimit: event.target.value,
-                  })
-                }
-              />
-            </label>
-            <label>
-              DAILY BUDGET (USD)
-              <input
-                type="number"
-                min="0"
-                step="any"
-                value={state.dailyStrategyNotionalLimit}
-                onChange={(event) =>
-                  model.setCategoryLimits({
-                    dailyStrategyNotionalLimit: event.target.value,
-                  })
-                }
-              />
-            </label>
             <small>
-              Overall limits still apply. Each symbol can belong to one horizon
-              at a time.
+              These position-count caps are safety overrides. Capital is
+              allocated dynamically across eligible strategies, symbols and
+              horizons; each symbol can belong to one horizon at a time.
             </small>
           </fieldset>
-          {selectedIntradayStrategies.length > 0 && (
-            <details className="auto-trader-strategy-budgets">
-              <summary
-                className={intradayBudgetOverallocated ? 'has-error' : ''}
-              >
-                <strong>INTRADAY STRATEGY BUDGETS</strong>
-                <span>
-                  {money.format(selectedIntradayBudgetTotal)} /{' '}
-                  {money.format(Number(state.intradayNotionalLimit))} USD ·{' '}
-                  {selectedIntradayStrategies.length} strategies
-                  {intradayBudgetOverallocated ? ' · fix allocations' : ''}
-                </span>
-              </summary>
-              <div className="auto-trader-strategy-budget-grid">
-                {selectedIntradayStrategies.map(({ strategy, label }) => {
-                  const learning = state.intradayStrategyLearning.find(
-                    (item) => item.strategy === strategy,
-                  );
-                  const outcome = state.closedStrategyOutcomes[strategy];
-                  const learnedSummary =
-                    'Learning ×' +
-                    finiteFixed(learning?.learning_multiplier ?? 1, 2) +
-                    ' · ' +
-                    (outcome
-                      ? outcome.trades +
-                        ' closed trades · ' +
-                        finiteFixed(outcome.winRate, 1) +
-                        '% wins · avg return ' +
-                        finiteFixed(outcome.averageReturn, 3) +
-                        '%'
-                      : 'no closed trades');
-                  return (
-                    <div
-                      className="auto-trader-strategy-budget-row"
-                      key={strategy}
-                    >
-                      <label>
-                        {label}
-                        <input
-                          aria-label={label + ' base budget in USD'}
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={state.intradayStrategyBudgets[strategy] ?? '0'}
-                          onChange={(event) =>
-                            model.setIntradayStrategyBudget(
-                              strategy,
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <small>
-                        {learnedSummary} · effective cap{' '}
-                        {money.format(
-                          learning?.effective_budget ??
-                            Number(
-                              state.intradayStrategyBudgets[strategy] ?? 0,
-                            ),
-                        )}{' '}
-                        · used {money.format(learning?.used_notional ?? 0)}
-                      </small>
-                    </div>
-                  );
-                })}
-                <small>
-                  Learning scales the effective cap. Closed trade counts, win
-                  rates, and average returns match the completed positions
-                  table.
-                </small>
-              </div>
-            </details>
-          )}
-          {selectedDailyStrategies.length > 0 && (
-            <details className="auto-trader-strategy-budgets">
-              <summary className={dailyBudgetOverallocated ? 'has-error' : ''}>
-                <strong>DAILY STRATEGY BUDGETS</strong>
-                <span>
-                  {money.format(selectedDailyBudgetTotal)} /{' '}
-                  {money.format(Number(state.dailyStrategyNotionalLimit))} USD ·{' '}
-                  {selectedDailyStrategies.length} strategies
-                  {dailyBudgetOverallocated ? ' · fix allocations' : ''}
-                </span>
-              </summary>
-              <div className="auto-trader-strategy-budget-grid">
-                {selectedDailyStrategies.map(({ strategy, label }) => {
-                  const learning = state.dailyStrategyLearning.find(
-                    (item) => item.strategy === strategy,
-                  );
-                  const outcome = state.closedStrategyOutcomes[strategy];
-                  const learnedSummary =
-                    'Learning ×' +
-                    finiteFixed(learning?.learning_multiplier ?? 1, 2) +
-                    ' · ' +
-                    (outcome
-                      ? outcome.trades +
-                        ' closed trades · ' +
-                        finiteFixed(outcome.winRate, 1) +
-                        '% wins · avg return ' +
-                        finiteFixed(outcome.averageReturn, 3) +
-                        '%'
-                      : 'no closed trades');
-                  return (
-                    <div
-                      className="auto-trader-strategy-budget-row"
-                      key={strategy}
-                    >
-                      <label>
-                        {label}
-                        <input
-                          aria-label={label + ' base budget in USD'}
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={state.dailyStrategyBudgets[strategy] ?? '0'}
-                          onChange={(event) =>
-                            model.setDailyStrategyBudget(
-                              strategy,
-                              event.target.value,
-                            )
-                          }
-                        />
-                      </label>
-                      <small>
-                        {learnedSummary} · effective cap{' '}
-                        {money.format(
-                          learning?.effective_budget ??
-                            Number(state.dailyStrategyBudgets[strategy] ?? 0),
-                        )}{' '}
-                        · used {money.format(learning?.used_notional ?? 0)}
-                      </small>
-                    </div>
-                  );
-                })}
-                <small>
-                  Learning scales the effective cap. Closed trade counts, win
-                  rates, and average returns match the completed positions
-                  table.
-                </small>
-              </div>
-            </details>
-          )}
           <label title="Maximum number of entries Auto Trader can make while a position remains open, including the initial entry.">
             ENTRIES PER POSITION
             <input
@@ -821,9 +637,7 @@ export function AutoTraderSettingsDialog({
               state.busy ||
               state.loading ||
               (state.strategies.length === 0 &&
-                state.scoutStrategies.length === 0) ||
-              dailyBudgetOverallocated ||
-              intradayBudgetOverallocated
+                state.scoutStrategies.length === 0)
             }
             onClick={() => void model.saveLimits()}
           >

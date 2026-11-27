@@ -472,6 +472,9 @@ fn trim_autotrader_snapshot(
     snapshot
         .exit_protection_policies
         .retain(|policy| strategy::is_autotrader_symbol_allowed(&policy.symbol));
+    snapshot
+        .exit_policy_assessments
+        .retain(|assessment| strategy::is_autotrader_symbol_allowed(&assessment.symbol));
     trim_autotrader_variant_snapshot(snapshot);
 }
 
@@ -517,6 +520,10 @@ fn snapshot_section_sizes(snapshot: &strategy::LearnedProfileSnapshot) -> String
             "exit_protection_policies",
             serde_json::to_vec(&snapshot.exit_protection_policies).map_or(0, |v| v.len()),
         ),
+        (
+            "exit_policy_assessments",
+            serde_json::to_vec(&snapshot.exit_policy_assessments).map_or(0, |v| v.len()),
+        ),
     ];
     sizes
         .into_iter()
@@ -552,9 +559,19 @@ fn merge_profile_snapshots(
             );
         }
     }
+    let latest_policy_state = |key: &str| {
+        incoming
+            .get(key)
+            .filter(|value| value.is_array())
+            .or_else(|| previous.and_then(|snapshot| snapshot.get(key)))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]))
+    };
     serde_json::json!({
         "profiles": profiles.into_values().collect::<Vec<_>>(),
         "scout_parameter_variants": variants.into_values().collect::<Vec<_>>(),
+        "exit_protection_policies": latest_policy_state("exit_protection_policies"),
+        "exit_policy_assessments": latest_policy_state("exit_policy_assessments"),
     })
 }
 
@@ -1054,8 +1071,8 @@ impl ScoutCoordinator {
                             direction
                         ),
                         None => format!(
-                        "{}|{}|profile:{}|regime:{}|horizon:{}",
-                        profile.symbol, profile.strategy, profile.profile_id, regime, horizon
+                            "{}|{}|profile:{}|regime:{}|horizon:{}",
+                            profile.symbol, profile.strategy, profile.profile_id, regime, horizon
                         ),
                     };
                     let freshness = priority_snapshot
@@ -1071,13 +1088,13 @@ impl ScoutCoordinator {
                         None
                     };
                     let evidence_key = crate::evidence_request_key_with_direction(
-                            &profile.symbol,
-                            &profile.strategy,
-                            &profile.profile_id,
-                            regime,
-                            &horizon,
+                        &profile.symbol,
+                        &profile.strategy,
+                        &profile.profile_id,
+                        regime,
+                        &horizon,
                         direction_scope,
-                        );
+                    );
                     let should_schedule_evidence = evidence_permit.is_some()
                         && evidence_requests_scheduled < MAX_EVIDENCE_REQUESTS_PER_BATCH;
                     let should_reconcile_fresh_evidence = freshness == "fresh";
@@ -3026,8 +3043,8 @@ fn aggregate_outcomes(
             ] {
                 summaries[group][key] = serde_json::json!(
                     summaries[group][key]
-                    .as_u64()
-                    .unwrap_or_default()
+                        .as_u64()
+                        .unwrap_or_default()
                         .saturating_add(body["summary"][group][key].as_u64().unwrap_or_default())
                 );
             }
@@ -3222,7 +3239,7 @@ fn candidates_for_profile(
             Strategy::LiveVwapDislocation => vec![components["mispricing_vs_vwap_bps"].as_f64()],
             Strategy::LiveAbsorptionPressure => vec![
                 components["pressure_without_price_move"]
-                .as_f64()
+                    .as_f64()
                     .map(|value| -value),
             ],
             _ => Vec::new(),
@@ -4232,6 +4249,50 @@ mod tests {
             execution_learning: BTreeMap::new(),
             scout_parameter_variants: Vec::new(),
             exit_protection_policies: Vec::new(),
+            exit_policy_assessments: vec![
+                strategy::LearnedExitPolicyAssessment {
+                    symbol: "BTC-USDT".into(),
+                    strategy: "example".into(),
+                    profile_id: Some("btc-profile-v1".into()),
+                    profile_version: Some(1),
+                    stop_loss_percent: Some(0.5),
+                    take_profit_percent: Some(0.8),
+                    activation_percent: Some(0.2),
+                    giveback_percent: Some(0.1),
+                    minimum_lock_percent: Some(0.05),
+                    maximum_holding_duration_ms: None,
+                    trailing_activation_percent: None,
+                    trailing_distance_percent: None,
+                    breakeven_activation_percent: None,
+                    sample_count: 40,
+                    training_count: 30,
+                    validation_count: 10,
+                    as_of_ms: 10,
+                    status: "metrics_blocked".into(),
+                    metrics: Default::default(),
+                },
+                strategy::LearnedExitPolicyAssessment {
+                    symbol: "XMSTR-USDT".into(),
+                    strategy: "example".into(),
+                    profile_id: Some("excluded-profile".into()),
+                    profile_version: Some(1),
+                    stop_loss_percent: Some(0.5),
+                    take_profit_percent: Some(0.8),
+                    activation_percent: Some(0.2),
+                    giveback_percent: Some(0.1),
+                    minimum_lock_percent: Some(0.05),
+                    maximum_holding_duration_ms: None,
+                    trailing_activation_percent: None,
+                    trailing_distance_percent: None,
+                    breakeven_activation_percent: None,
+                    sample_count: 40,
+                    training_count: 30,
+                    validation_count: 10,
+                    as_of_ms: 10,
+                    status: "metrics_blocked".into(),
+                    metrics: Default::default(),
+                },
+            ],
         };
 
         trim_autotrader_snapshot(&mut snapshot, &[allowed_id.clone()].into());
@@ -4240,6 +4301,10 @@ mod tests {
         assert_eq!(snapshot.registered_profile_ids, [allowed_id.clone()].into());
         assert_eq!(snapshot.walk_forward_evidence.len(), 1);
         assert_eq!(snapshot.recent_profile_context_returns.len(), 1);
+        assert_eq!(snapshot.exit_policy_assessments.len(), 1);
+        assert_eq!(snapshot.exit_policy_assessments[0].symbol, "BTC-USDT");
+        let sizes = snapshot_section_sizes(&snapshot);
+        assert!(sizes.contains("exit_policy_assessments="));
     }
 
     #[test]
@@ -4506,8 +4571,8 @@ mod tests {
         );
         assert!(
             response.assignments[0]
-            .candidate
-            .get("components")
+                .candidate
+                .get("components")
                 .is_none()
         );
     }
@@ -4592,7 +4657,9 @@ mod tests {
             strategy,
             ScoutDataUpdate::Profiles(serde_json::json!({
                 "profiles":[{"symbol":"BTC-USDT","strategy":"live-momentum","profile_id":"btc-v1"}],
-                "scout_parameter_variants":[]
+                "scout_parameter_variants":[],
+                "exit_protection_policies":[{"symbol":"BTC-USDT"}],
+                "exit_policy_assessments":[{"symbol":"BTC-USDT","status":"metrics_blocked"}]
             })),
         );
         hub.publish(
@@ -4600,6 +4667,37 @@ mod tests {
             ScoutDataUpdate::Profiles(serde_json::json!({
                 "profiles":[{"symbol":"ETH-USDT","strategy":"live-momentum","profile_id":"eth-v1"}],
                 "scout_parameter_variants":[]
+            })),
+        );
+        let preserved = hub.snapshot(strategy);
+        let preserved_profiles = preserved
+            .iter()
+            .find_map(|update| match &update.update {
+                ScoutDataUpdate::Profiles(value) => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            preserved_profiles["exit_protection_policies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            preserved_profiles["exit_policy_assessments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        hub.publish(
+            strategy,
+            ScoutDataUpdate::Profiles(serde_json::json!({
+                "profiles":[{"symbol":"ETH-USDT","strategy":"live-momentum","profile_id":"eth-v1"}],
+                "scout_parameter_variants":[],
+                "exit_protection_policies":[],
+                "exit_policy_assessments":[]
             })),
         );
         let assignment = ScoutWorkAssignment {
@@ -4617,6 +4715,10 @@ mod tests {
         assert!(snapshot.iter().any(|update| matches!(
             &update.update,
             ScoutDataUpdate::Profiles(value) if value["profiles"].as_array().is_some_and(|profiles| profiles.len() == 2)
+        )));
+        assert!(snapshot.iter().any(|update| matches!(
+            &update.update,
+            ScoutDataUpdate::Profiles(value) if value["exit_protection_policies"].as_array().is_some_and(|rows| rows.is_empty()) && value["exit_policy_assessments"].as_array().is_some_and(|rows| rows.is_empty())
         )));
         assert!(snapshot.iter().any(|update| matches!(
             &update.update,

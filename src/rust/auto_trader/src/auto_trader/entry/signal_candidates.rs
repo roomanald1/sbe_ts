@@ -885,6 +885,68 @@ mod parallel_daily_candidate_tests {
         }
     }
 
+    fn breakout_probe(
+        strategy: &str,
+        direction: &str,
+        btc_gate_passed: Option<bool>,
+        secondary_passed: Option<bool>,
+    ) -> Signal {
+        let mut candidate = signal(strategy, direction);
+        candidate.strategy_decision = Some(serde_json::json!({
+            "primary_passed": false,
+            "primary_distance_percent": -1.0,
+            "scout_parameter_probe": true,
+            "scout_parameter_key": "breakout_entry_distance_percent",
+            "scout_parameter_value": 1.0,
+            "scout_parameter_profile_symbol": "ETH-USDT",
+            "strategy_parameters": {"breakout_entry_distance_percent": 1.0},
+            "btc_gate_required": matches!(strategy, "donchian-55-btc200" | "donchian-20-btc200"),
+            "btc_gate_passed": btc_gate_passed,
+            "secondary_passed": secondary_passed
+        }));
+        candidate
+    }
+
+    #[test]
+    fn btc_regime_donchian_probe_requires_explicit_gate_for_both_directions() {
+        for direction in ["bullish", "bearish"] {
+            let allowed = breakout_probe("donchian-55-btc200", direction, Some(true), None);
+            assert!(daily_signal_candidate(&allowed));
+
+            for unavailable_or_failed in [Some(false), None] {
+                let blocked =
+                    breakout_probe("donchian-55-btc200", direction, unavailable_or_failed, None);
+                assert!(!daily_signal_candidate(&blocked));
+            }
+        }
+    }
+
+    #[test]
+    fn own_sma_donchian_probe_uses_secondary_gate_not_btc_fields() {
+        for direction in ["bullish", "bearish"] {
+            let allowed = breakout_probe("donchian-20-sma200", direction, Some(false), Some(true));
+            assert!(daily_signal_candidate(&allowed));
+
+            for unavailable_or_failed in [Some(false), None] {
+                let blocked = breakout_probe(
+                    "donchian-20-sma200",
+                    direction,
+                    Some(true),
+                    unavailable_or_failed,
+                );
+                assert!(!daily_signal_candidate(&blocked));
+            }
+        }
+    }
+
+    #[test]
+    fn donchian_20_btc_exploratory_probe_remains_unclassified() {
+        for direction in ["bullish", "bearish"] {
+            let candidate = breakout_probe("donchian-20-btc200", direction, Some(true), None);
+            assert!(!donchian_breakout_parameter_probe(&candidate));
+            assert!(!is_daily_parameter_exploration_probe(&candidate));
+        }
+    }
 
     #[test]
     fn failed_rsi_daily_candidate_cannot_fall_back_to_strict_selection() {

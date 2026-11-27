@@ -101,6 +101,73 @@ async fn get_activity(State(state): State<AutoTraderState>) -> axum::response::R
     response
 }
 
+fn matching_activity_protective_barrier(
+    position: &OpenStrategyPosition,
+    barriers: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let profile_id = position.exit_profile_id.as_deref();
+    let profile_version = position.exit_profile_version;
+    let trade_id = position
+        .lifecycle
+        .as_ref()
+        .and_then(|identity| identity["trade_id"].as_str());
+    let barrier = barriers.iter().find(|barrier| {
+        let id_matches = barrier["id"].as_str().is_some_and(|id| {
+            position.protective_barrier_ids.iter().any(|expected| expected == id)
+        }) || trade_id.is_some_and(|trade_id| {
+            barrier["lifecycle"]["trade_id"].as_str() == Some(trade_id)
+        });
+        let market_matches = barrier["symbol"].as_str() == Some(position.symbol.as_str());
+        let barrier_profile_id = barrier["lifecycle"]["profile_id"].as_str().or_else(|| {
+            barrier["trigger_adjustments"].as_array()?.last()?["profile_id"].as_str()
+        });
+        let barrier_profile_version = barrier["lifecycle"]["profile_version"]
+            .as_u64()
+            .or_else(|| {
+                barrier["trigger_adjustments"].as_array()?.last()?["profile_version"].as_u64()
+            });
+        let profile_matches = match (profile_id, profile_version) {
+            (Some(id), Some(version)) => {
+                barrier_profile_id == Some(id) && barrier_profile_version == Some(version)
+            }
+            (None, None) => barrier_profile_id.is_none() && barrier_profile_version.is_none(),
+            _ => false,
+        };
+        id_matches && market_matches && profile_matches
+    })?;
+    let adjustments = barrier["trigger_adjustments"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    Some(serde_json::json!({
+        "id": barrier["id"],
+        "status": barrier["status"],
+        "profile_id": barrier["lifecycle"]["profile_id"].as_str().or_else(|| barrier["trigger_adjustments"].as_array().and_then(|rows| rows.last()).and_then(|row| row["profile_id"].as_str())),
+        "profile_version": barrier["lifecycle"]["profile_version"].as_u64().or_else(|| barrier["trigger_adjustments"].as_array().and_then(|rows| rows.last()).and_then(|row| row["profile_version"].as_u64())),
+        "trigger_price": barrier["trigger_price"],
+        "trigger_adjustments": adjustments,
+    }))
+}
+
+fn activity_barrier_rows(response: &serde_json::Value) -> Option<&[serde_json::Value]> {
+    response
+        .as_array()
+        .or_else(|| response["barriers"].as_array())
+        .map(Vec::as_slice)
+}
+
+async fn attach_activity_protective_barriers(positions: &mut [OpenStrategyPosition]) {
+    let Ok(response) = crate::service_rpc::position_get("/positions/barriers").await else {
+        return;
+    };
+    let Some(barriers) = activity_barrier_rows(&response) else {
+        return;
+    };
+    for position in positions {
+        position.protective_barrier = matching_activity_protective_barrier(position, barriers);
+    }
+}
+
 async fn build_activity_response(
     state: &AutoTraderState,
 ) -> Result<ActivityResponse, String> {
@@ -116,6 +183,7 @@ async fn build_activity_response(
         let settings = state.settings.lock().await;
         snapshot_activity_positions(&settings, today_start)
     };
+    attach_activity_protective_barriers(&mut strategy_positions).await;
     let carry_positions = state.dated_carry.lock().await.positions.clone();
     strategy_positions.extend(
         carry_positions
@@ -126,6 +194,7 @@ async fn build_activity_response(
                 symbol: position.future_symbol.clone(),
                 strategy: "dated-futures-carry".into(),
                 decision_id: Some(format!("dated-carry:{}", position.future_symbol)),
+                lifecycle: None,
                 quantity: position.quantity,
                 average_entry_price: position.spot_entry_price,
                 entry_fees: -position.entry_fees.abs(),
@@ -134,9 +203,26 @@ async fn build_activity_response(
                 entry_order_types: vec!["dated-carry".into()],
                 stop_loss_percent: None,
                 take_profit_percent: None,
+                effective_stop_loss_percent: None,
+                effective_take_profit_percent: None,
+                selected_stop_loss_percent: None,
+                selected_take_profit_percent: None,
+                stop_loss_source: "not_applicable".into(),
+                take_profit_source: "not_applicable".into(),
+                fallback_stop_loss_percent: None,
+                fallback_take_profit_percent: None,
+                exit_profile_id: None,
+                exit_profile_version: None,
+                exit_policy_as_of_ms: None,
+                exit_parameter_provenance: None,
+                protective_barrier: None,
+                protective_barrier_ids: Vec::new(),
+                initial_risk_reference: None,
+                initial_risk_evidence_status: "unavailable".into(),
                 horizon_take_profit_percent: None,
                 stop_loss_active: false,
                 take_profit_active: false,
+                exit_control_mode: "not_applicable".into(),
                 carry_details: Some(position),
             }),
     );
@@ -297,4 +383,84 @@ async fn build_activity_response(
         cycle_lock_scope_ms,
         settings_persistence_ms,
     })
+}
+
+#[cfg(test)]
+mod activity_barrier_contract_tests {
+    use super::*;
+
+    fn position() -> OpenStrategyPosition {
+        OpenStrategyPosition {
+            symbol: "BTC-USDT".into(),
+            strategy: "momentum".into(),
+            decision_id: None,
+            lifecycle: Some(serde_json::json!({"trade_id":"trade-a"})),
+            quantity: 1.0,
+            average_entry_price: 100.0,
+            entry_fees: 0.0,
+            entry_timestamp_ms: 1,
+            entry_order_type: "market".into(),
+            entry_order_types: vec![],
+            stop_loss_percent: Some(0.5),
+            take_profit_percent: Some(0.8),
+            effective_stop_loss_percent: Some(0.5),
+            effective_take_profit_percent: Some(0.8),
+            selected_stop_loss_percent: Some(0.5),
+            selected_take_profit_percent: Some(0.8),
+            stop_loss_source: "profile".into(),
+            take_profit_source: "profile".into(),
+            fallback_stop_loss_percent: None,
+            fallback_take_profit_percent: None,
+            exit_profile_id: Some("profile-a".into()),
+            exit_profile_version: Some(3),
+            exit_policy_as_of_ms: None,
+            exit_parameter_provenance: None,
+            protective_barrier: None,
+            protective_barrier_ids: vec!["barrier-1".into()],
+            initial_risk_reference: None,
+            initial_risk_evidence_status: "unavailable".into(),
+            horizon_take_profit_percent: None,
+            stop_loss_active: true,
+            take_profit_active: true,
+            exit_control_mode: "protective_stop_and_target".into(),
+            carry_details: None,
+        }
+    }
+
+    #[test]
+    fn activity_barrier_requires_recorded_id_symbol_and_exact_profile_version() {
+        let position_row = position();
+        let barrier = serde_json::json!({
+            "id":"barrier-1", "symbol":"BTC-USDT", "status":"armed", "trigger_price":99.5,
+            "lifecycle":{"trade_id":"trade-a", "profile_id":"profile-a", "profile_version":3},
+            "trigger_adjustments":[{"request_id":"r1", "reason":"breakeven-protection", "expected_trigger_price":99.5, "new_trigger_price":100.1, "policy_source":"validated_profile", "adjusted_at_ms":2, "profile_id":"profile-a", "profile_version":3}]
+        });
+        let summary = matching_activity_protective_barrier(&position_row, std::slice::from_ref(&barrier))
+            .expect("matching barrier should be exposed");
+        assert_eq!(summary["trigger_price"], 99.5);
+        assert_eq!(summary["trigger_adjustments"][0]["new_trigger_price"], 100.1);
+
+        let mut without_saved_barrier_id = position();
+        without_saved_barrier_id.protective_barrier_ids.clear();
+        assert!(matching_activity_protective_barrier(&without_saved_barrier_id, std::slice::from_ref(&barrier)).is_some());
+
+        let mismatched = serde_json::json!({
+            "id":"barrier-1", "symbol":"BTC-USDT", "status":"armed", "trigger_price":99.5,
+            "lifecycle":{"trade_id":"trade-a", "profile_id":"profile-a", "profile_version":2}
+        });
+        assert!(matching_activity_protective_barrier(&position_row, &[mismatched]).is_none());
+        let wrong_id = serde_json::json!({
+            "id":"barrier-other", "symbol":"BTC-USDT", "status":"armed", "trigger_price":99.5,
+            "lifecycle":{"trade_id":"trade-other", "profile_id":"profile-a", "profile_version":3}
+        });
+        assert!(matching_activity_protective_barrier(&position_row, &[wrong_id]).is_none());
+    }
+
+    #[test]
+    fn activity_barrier_response_accepts_authoritative_array_and_wrapped_contract() {
+        let rows = vec![serde_json::json!({"id":"barrier-1"})];
+        assert_eq!(activity_barrier_rows(&serde_json::json!(rows)), Some(&[serde_json::json!({"id":"barrier-1"})][..]));
+        let wrapped = serde_json::json!({"barriers":[{"id":"barrier-2"}]});
+        assert_eq!(activity_barrier_rows(&wrapped).unwrap()[0]["id"], "barrier-2");
+    }
 }

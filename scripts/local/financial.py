@@ -1,6 +1,7 @@
 import argparse
 import json
 import hashlib
+import re
 from pathlib import Path
 import math
 from collections import defaultdict
@@ -14,6 +15,9 @@ ZERO = Decimal("0")
 EXECUTION_RECONCILIATION_TOLERANCE = Decimal("0.00000001")
 PORTFOLIO_INTERVAL_RECONCILIATION_TOLERANCE = Decimal("0.00000001")
 PORTFOLIO_FX_MAX_AGE_MS = 120_000
+# Match the existing bounded collector limit for the complete multi-page
+# independent evidence bundle. Each page is still separately bounded.
+MAX_RECONCILIATION_SOURCE_BYTES = 64_000_000
 
 def dec(value):
     if isinstance(value, bool) or not isinstance(
@@ -23,6 +27,143 @@ def dec(value):
     result = Decimal(str(value))
     if not result.is_finite():
         raise ValueError("Non-finite financial value")
+    return result
+
+
+def validate_pm_durable_ledger_epoch(coverage, position_trades):
+    """Validate PM's durable fill allocator epoch against its public fill rows.
+
+    The PM evidence epoch and the independently sourced Paper Exchange epoch
+    identify different ledgers. This check only binds the PM epoch to PM fill
+    identities and the PM snapshot's own coverage counts.
+    """
+    result = {
+        "status": "BLOCKED",
+        "durable_epoch_usable": False,
+        "ledger_evidence_epoch": None,
+        "ledger_evidence_epoch_status": None,
+        "trade_rows": None,
+        "fills_in_evidence_epoch": None,
+        "fill_ids_checked": 0,
+        "blockers": [],
+    }
+    if not isinstance(coverage, dict):
+        result["blockers"].append("Position Management ledger coverage is unavailable")
+        return result
+
+    epoch = coverage.get("ledger_evidence_epoch")
+    status = coverage.get("ledger_evidence_epoch_status")
+    result["ledger_evidence_epoch"] = epoch
+    result["ledger_evidence_epoch_status"] = status
+    allocator_epoch = None
+    if isinstance(epoch, str):
+        match = re.fullmatch(r"pm-ledger-evidence:v1:([A-Za-z0-9._-]+)", epoch)
+        if match:
+            allocator_epoch = match.group(1)
+    if allocator_epoch is None:
+        result["blockers"].append(
+            "Position Management durable ledger epoch is missing or malformed"
+        )
+    known_statuses = {
+        "clean_slate",
+        "initialized_empty",
+        "uninitialized_empty",
+        "legacy_or_unknown",
+        "mixed_legacy_and_current",
+    }
+    if not isinstance(status, str) or status not in known_statuses:
+        result["blockers"].append(
+            "Position Management durable ledger epoch status is missing or unrecognized"
+        )
+    elif status == "mixed_legacy_and_current":
+        result["blockers"].append(
+            "Position Management fill history is mixed across durable epochs"
+        )
+    elif status == "legacy_or_unknown":
+        result["blockers"].append(
+            "Position Management fill history has legacy or unknown identities"
+        )
+    elif status == "uninitialized_empty":
+        result["blockers"].append(
+            "Position Management fill allocator epoch is uninitialized"
+        )
+
+    count_fields = (
+        "trade_rows",
+        "fills_in_evidence_epoch",
+        "rows_without_fill_identity",
+        "rows_with_fill_identity_outside_evidence_epoch",
+    )
+    counts_valid = True
+    for field in count_fields:
+        value = coverage.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            counts_valid = False
+    if not counts_valid:
+        result["blockers"].append(
+            "Position Management durable epoch coverage counts are missing or invalid"
+        )
+    else:
+        trade_rows = coverage["trade_rows"]
+        fills_in_epoch = coverage["fills_in_evidence_epoch"]
+        result["trade_rows"] = trade_rows
+        result["fills_in_evidence_epoch"] = fills_in_epoch
+        if (
+            coverage["rows_without_fill_identity"] != 0
+            or coverage["rows_with_fill_identity_outside_evidence_epoch"] != 0
+            or fills_in_epoch != trade_rows
+        ):
+            result["blockers"].append(
+                "Position Management durable epoch coverage counts are inconsistent"
+            )
+        if status == "clean_slate" and trade_rows == 0:
+            result["blockers"].append(
+                "Position Management clean-slate status conflicts with empty fill coverage"
+            )
+        if status == "initialized_empty" and trade_rows != 0:
+            result["blockers"].append(
+                "Position Management initialized-empty status conflicts with fill coverage"
+            )
+
+    if not isinstance(position_trades, list):
+        result["blockers"].append("Position Management fill rows are unavailable for epoch validation")
+    elif counts_valid:
+        if len(position_trades) != coverage["trade_rows"]:
+            result["blockers"].append(
+                "Position Management durable epoch row count differs from returned fill rows"
+            )
+        else:
+            seen_sequences = set()
+            fill_ids_match = allocator_epoch is not None
+            expected_prefix = (
+                f"pm-fill:v1:{allocator_epoch}:" if allocator_epoch is not None else None
+            )
+            for trade in position_trades:
+                result["fill_ids_checked"] += 1
+                fill_id = trade.get("fill_id") if isinstance(trade, dict) else None
+                if not isinstance(fill_id, str) or expected_prefix is None or not fill_id.startswith(expected_prefix):
+                    fill_ids_match = False
+                    continue
+                suffix = fill_id[len(expected_prefix):]
+                if not suffix.isdigit() or int(suffix) <= 0 or int(suffix) in seen_sequences:
+                    fill_ids_match = False
+                    continue
+                seen_sequences.add(int(suffix))
+            if not fill_ids_match or len(seen_sequences) != coverage["fills_in_evidence_epoch"]:
+                result["blockers"].append(
+                    "Position Management fill IDs do not match the advertised allocator epoch"
+                )
+
+    acceptable_status = (
+        (status == "clean_slate" and counts_valid and coverage.get("trade_rows", 0) > 0)
+        or (status == "initialized_empty" and counts_valid and coverage.get("trade_rows", 0) == 0)
+    )
+    result["durable_epoch_usable"] = (
+        allocator_epoch is not None
+        and acceptable_status
+        and not result["blockers"]
+    )
+    result["status"] = "VALID" if result["durable_epoch_usable"] else "BLOCKED"
     return result
 
 def rounded(value, places=8):
@@ -1876,7 +2017,7 @@ def load_execution_reconciliation_inputs(sources, cache):
         if (
             path.parent != cache
             or not path.name.startswith(contract[0])
-            or path.stat().st_size > 32_000_000
+            or path.stat().st_size > MAX_RECONCILIATION_SOURCE_BYTES
         ):
             return None
         raw = path.read_bytes()
@@ -2329,6 +2470,12 @@ def reconciliation():
     snapshot = SNAPSHOT_MANIFEST or {}
     coverage = snapshot.get("ledger_coverage") or {}
     reconciliation_inputs = snapshot.get("execution_reconciliation_inputs")
+    pm_epoch_validation = validate_pm_durable_ledger_epoch(
+        coverage,
+        reconciliation_inputs.get("position_trades")
+        if isinstance(reconciliation_inputs, dict)
+        else None,
+    )
     if reconciliation_inputs is None:
         execution_reconciliation = reconcile_independent_execution_fills(None, None)
         match_evidence_comparison = compare_paper_exchange_match_evidence(None, None)
@@ -2358,8 +2505,8 @@ def reconciliation():
         blockers.append("Ledger snapshot consistency not guaranteed")
     if snapshot.get("execution_mode") != "paper" or not snapshot.get("snapshot_id"):
         blockers.append("Execution mode or snapshot identity not exposed")
-    else:
-        blockers.append("Durable ledger epoch across restarts is not exposed")
+    if not pm_epoch_validation["durable_epoch_usable"]:
+        blockers.extend(pm_epoch_validation["blockers"])
     if (
         a.get("fees_complete") is not True
         or coverage.get("unknown_fee_fills", 0) > 0
@@ -2394,6 +2541,7 @@ def reconciliation():
         "fx_rates_updated_at_by_currency": snapshot.get("fx_rates_updated_at_by_currency"),
         "market_marks_consistency": snapshot.get("market_marks_consistency"),
         "ledger_coverage": coverage,
+        "position_management_epoch_validation": pm_epoch_validation,
         "independent_execution_reconciliation": execution_reconciliation,
         "paper_exchange_match_evidence_comparison": match_evidence_comparison,
         "independent_portfolio_interval_reconciliation": portfolio_interval_reconciliation,

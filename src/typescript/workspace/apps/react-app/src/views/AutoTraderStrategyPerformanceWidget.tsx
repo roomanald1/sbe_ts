@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import {
   ClientSideRowModelModule,
@@ -15,6 +15,11 @@ import {
   type StrictEntryGateSummary,
 } from '../models/AutoTraderOutcomesModel';
 import { autoTraderScoutModel } from '../models/AutoTraderScoutModel';
+import {
+  AutoTraderStrategyPerformanceModel,
+  STRATEGY_PERFORMANCE_COLUMN_GROUPS,
+  summarizeStrategyOutcomeEvidence,
+} from '../models/AutoTraderStrategyPerformanceModel';
 import {
   sharedAutoTraderSettingsModel,
   type AutoTraderStrategyProfile,
@@ -156,27 +161,16 @@ type StrategyWinRateRow = {
   runReason: string;
   runReasonAt?: number;
   trades: number;
-  wins: number;
-  losses: number;
-  flat: number;
-  feesUsd?: number;
-  netPnlUsd?: number;
+  strictTrades: number;
+  exploratoryTrades: number;
+  scoutTrades: number;
+  paperCarryTrades: number;
+  unknownSourceTrades: number;
   todayRealizedUsd?: number;
-  todayWinRate?: number;
-  todayAverageReturn?: number;
-  winRate?: number;
-  averageReturn?: number;
-  averageNetWinUsd?: number;
-  averageNetWinPercent?: number;
-  averageNetLossUsd?: number;
-  averageNetLossPercent?: number;
-  profitFactor?: number;
   medianHoldingMs?: number;
   averageHoldingMs?: number;
   periodStart: number;
   periodEnd: number;
-  averageEntrySizeUsd?: number;
-  lowSample: boolean;
   learningSamples?: number;
   learningPositiveRate?: number;
   learningAverageNet?: number;
@@ -249,63 +243,21 @@ const colorStrategyColumns = (
       .join(' '),
     cellStyle: { backgroundColor: strategyCellTints[group] },
   }));
-const HIDE_DISABLED_STRATEGIES_KEY = 'autotrader-hide-disabled-strategies-v1';
-const STRATEGY_COLUMN_GROUPS = [
-  {
-    id: 'performance',
-    label: 'Performance',
-    children: ['todayRealizedUsd', 'todayWinRate', 'todayAverageReturn'],
-  },
-  {
-    id: 'entryEvidence',
-    label: 'Entry evidence',
-    children: [
-      'entryAverageNetReturn',
-      'entryPositiveRate',
-      'entrySampleCount',
-      'entryRiskMultiplier',
-      'entryWhyNoEntry',
-    ],
-  },
-  {
-    id: 'sample',
-    label: 'Fully closed trades',
-    children: ['trades', 'wins', 'losses'],
-  },
-  {
-    id: 'status',
-    label: 'Strategy status',
-    children: ['enabled', 'scoutEnabled'],
-  },
-  {
-    id: 'profile',
-    label: 'Trade profile',
-    children: ['medianHoldingMs', 'averageEntrySizeUsd'],
-  },
-  {
-    id: 'learning',
-    label: 'Learning',
-    children: [
-      'learningAverageNet',
-      'learningSamples',
-      'feedbackMultiplier',
-      'effectiveSizeMultiplier',
-      'scoutOutcomeAverageNet',
-      'pairedScoutAverageLift',
-      'pairedScoutSamples',
-    ],
-  },
-];
-const STRATEGY_COLUMN_GROUPS_KEY = 'autotrader-strategy-column-groups-v1';
-const STRATEGY_GRID_STATE_KEY = 'autotrader-strategy-grid-state-v1';
-const readStrategyColumnGroups = (): Record<string, boolean> => {
-  try {
-    const stored = localStorage.getItem(STRATEGY_COLUMN_GROUPS_KEY);
-    return stored ? JSON.parse(stored) : {};
-  } catch {
-    return {};
-  }
-};
+const STRATEGY_COLUMN_GROUPS = STRATEGY_PERFORMANCE_COLUMN_GROUPS.map(
+  (group) => ({
+    ...group,
+    label: (
+      {
+        performance: 'Performance',
+        entryEvidence: 'Entry evidence',
+        sample: 'Fully closed trades',
+        status: 'Strategy status',
+        profile: 'Trade profile',
+        learning: 'Learning',
+      } as const
+    )[group.id],
+  }),
+);
 function scrollPageFromStrategyGrid(event: globalThis.WheelEvent) {
   if (!event.deltaY) return;
   let pageScroller: HTMLElement | null = (event.currentTarget as HTMLElement)
@@ -325,36 +277,49 @@ function scrollPageFromStrategyGrid(event: globalThis.WheelEvent) {
   target.scrollTop += event.deltaY;
 }
 
-export function AutoTraderStrategyPerformanceWidget() {
-  const model = useMemo(() => sharedOutcomesModel, []);
-  const state = useBehaviorSnapshot(model.state$);
-  const settingsModel = useMemo(() => sharedAutoTraderSettingsModel, []);
-  const settings = useBehaviorSnapshot(settingsModel.state$);
-  const scoutState = useBehaviorSnapshot(autoTraderScoutModel.state$);
+export function AutoTraderStrategyPerformanceWidget({
+  widgetId = 'auto-trader-strategy-performance',
+}: {
+  widgetId?: string;
+}) {
+  const model = useMemo(
+    () =>
+      new AutoTraderStrategyPerformanceModel(
+        {
+          outcomes: {
+            state$: sharedOutcomesModel.state$,
+            start: () => sharedOutcomesModel.start(),
+            stop: () => sharedOutcomesModel.stop(),
+          },
+          settings: sharedAutoTraderSettingsModel,
+          scout: autoTraderScoutModel,
+          refresh: async () => {
+            await Promise.all([
+              sharedOutcomesModel.refreshNow(),
+              sharedAutoTraderSettingsModel.refresh(),
+            ]);
+            autoTraderScoutModel.retry();
+          },
+        },
+        widgetId,
+      ),
+    [widgetId],
+  );
+  const viewState = useBehaviorSnapshot(model.state$);
+  const state = viewState.outcomes;
+  const settings = viewState.settings;
+  const scoutState = viewState.scout;
+  const expandedEntryStrategies = viewState.expandedEntryStrategies;
+  const settingsModel = sharedAutoTraderSettingsModel;
   const strategyGridApi = useRef<GridApi<StrategyWinRateRow> | null>(null);
   const saveStrategyGridState = (api: GridApi<StrategyWinRateRow>) => {
-    try {
-      localStorage.setItem(
-        STRATEGY_GRID_STATE_KEY,
-        JSON.stringify(api.getColumnState()),
-      );
-    } catch {
-      // Keep the grid usable when browser storage is unavailable.
-    }
+    model.saveGridColumnState(JSON.stringify(api.getColumnState()));
   };
   const strategyGridWrapper = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    void model.start();
+    model.start();
     return () => model.stop();
   }, [model]);
-  useEffect(() => {
-    settingsModel.start();
-    return () => settingsModel.stop();
-  }, [settingsModel]);
-  useEffect(() => {
-    autoTraderScoutModel.start();
-    return () => autoTraderScoutModel.stop();
-  }, []);
   useEffect(() => {
     const wrapper = strategyGridWrapper.current;
     if (!wrapper) return;
@@ -364,36 +329,17 @@ export function AutoTraderStrategyPerformanceWidget() {
     return () =>
       wrapper.removeEventListener('wheel', scrollPageFromStrategyGrid);
   }, []);
-  const [hideDisabledStrategies, setHideDisabledStrategies] = useState(() => {
-    try {
-      return localStorage.getItem(HIDE_DISABLED_STRATEGIES_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [visibleColumnGroups, setVisibleColumnGroups] = useState(() => {
-    const stored = readStrategyColumnGroups();
-    return Object.fromEntries(
-      STRATEGY_COLUMN_GROUPS.map(({ id }) => [id, stored[id] !== false]),
-    ) as Record<(typeof STRATEGY_COLUMN_GROUPS)[number]['id'], boolean>;
-  });
+  const hideDisabledStrategies = viewState.hideDisabledStrategies;
+  const visibleColumnGroups = viewState.visibleColumnGroups;
   const updateColumnGroupVisibility = (
     id: (typeof STRATEGY_COLUMN_GROUPS)[number]['id'],
     visible: boolean,
   ) => {
-    setVisibleColumnGroups((previous) => {
-      const next = { ...previous, [id]: visible };
-      try {
-        localStorage.setItem(STRATEGY_COLUMN_GROUPS_KEY, JSON.stringify(next));
-      } catch {
-        /* The grid still updates if browser storage is unavailable. */
-      }
-      strategyGridApi.current?.setColumnsVisible(
-        STRATEGY_COLUMN_GROUPS.find((group) => group.id === id)?.children ?? [],
-        visible,
-      );
-      return next;
-    });
+    model.setColumnGroupVisible(id, visible);
+    strategyGridApi.current?.setColumnsVisible(
+      STRATEGY_COLUMN_GROUPS.find((group) => group.id === id)?.children ?? [],
+      visible,
+    );
   };
   useEffect(() => {
     const api = strategyGridApi.current;
@@ -403,17 +349,16 @@ export function AutoTraderStrategyPerformanceWidget() {
     }
   }, [visibleColumnGroups]);
   const updateHideDisabledStrategies = (value: boolean) => {
-    setHideDisabledStrategies(value);
-    try {
-      localStorage.setItem(HIDE_DISABLED_STRATEGIES_KEY, String(value));
-    } catch {
-      /* The filter still works if browser storage is unavailable. */
-    }
+    model.setHideDisabledStrategies(value);
   };
   const rows = state.rows;
   const closedRows = useMemo(
     () => rows.filter((row) => row.status === 'Closed'),
     [rows],
+  );
+  const evidenceSummary = useMemo(
+    () => summarizeStrategyOutcomeEvidence(closedRows),
+    [closedRows],
   );
   const openRows = useMemo(
     () => rows.filter((row) => row.status === 'Open'),
@@ -460,19 +405,6 @@ export function AutoTraderStrategyPerformanceWidget() {
     return strategyNames
       .map((strategy) => {
         const trades = grouped.get(strategy) ?? [];
-        const now = new Date();
-        const todayStart = new Date(
-          now.getFullYear(),
-          now.getMonth(),
-          now.getDate(),
-        ).getTime();
-        const todayEnd = todayStart + 24 * 60 * 60 * 1000;
-        const todayTrades = trades.filter(
-          (trade) =>
-            typeof trade.closedAt === 'number' &&
-            trade.closedAt >= todayStart &&
-            trade.closedAt < todayEnd,
-        );
         const enabled = settings.loading
           ? undefined
           : settings.strategies.includes(strategy as Strategy);
@@ -553,124 +485,39 @@ export function AutoTraderStrategyPerformanceWidget() {
           ? latestBlocker.symbol + ' · ' + latestBlocker.reason
           : '';
         const runReasonAt = latestBlocker?.timestamp_ms;
-        const fees = trades.map((row) => row.feesUsd);
-        const netValues = trades.map((row) => row.netPnlUsd);
-        const grossValues = trades.map((row) =>
-          typeof row.quoteUsdRate === 'number' &&
-          Number.isFinite(row.quoteUsdRate) &&
-          typeof row.feesUsd === 'number' &&
-          Number.isFinite(row.feesUsd)
-            ? row.pnl * row.quoteUsdRate + row.feesUsd
-            : undefined,
-        );
-        const netComplete =
-          trades.length > 0 &&
-          netValues.every(
-            (value): value is number =>
-              typeof value === 'number' && Number.isFinite(value),
-          );
-        const grossComplete =
-          trades.length > 0 &&
-          grossValues.every(
-            (value): value is number =>
-              typeof value === 'number' && Number.isFinite(value),
-          );
-        const outcomes = netComplete ? netValues : trades.map((row) => row.pnl);
-        const wins = outcomes.filter((value) => value > 0).length;
-        const losses = outcomes.filter((value) => value < 0).length;
-        const netSamples = netComplete
-          ? trades.flatMap((trade, index) => {
-              const value = netValues[index];
-              const capital =
-                trade.entryNotionalUsd ??
-                trade.quantity * trade.entryPrice * (trade.quoteUsdRate ?? 1);
-              return typeof value === 'number' &&
-                Number.isFinite(capital) &&
-                capital > 0
-                ? [{ value, returnPercent: (value / capital) * 100 }]
-                : [];
-            })
-          : [];
-        const netWins = netSamples.filter((sample) => sample.value > 0);
-        const netLosses = netSamples.filter((sample) => sample.value < 0);
-        const profitTotal = grossComplete
-          ? grossValues
-              .filter((value) => value > 0)
-              .reduce((sum, value) => sum + value, 0)
-          : undefined;
-        const lossTotal = grossComplete
-          ? Math.abs(
-              grossValues
-                .filter((value) => value < 0)
-                .reduce((sum, value) => sum + value, 0),
-            )
-          : undefined;
+        const sourceCounts = {
+          strict: 0,
+          exploratory: 0,
+          scout: 0,
+          paperCarry: 0,
+          unknown: 0,
+        };
+        for (const trade of trades) {
+          if (trade.source === 'strict') sourceCounts.strict += 1;
+          else if (trade.source === 'exploratory')
+            sourceCounts.exploratory += 1;
+          else if (trade.source === 'scout') sourceCounts.scout += 1;
+          else if (trade.source === 'paper-carry') sourceCounts.paperCarry += 1;
+          else sourceCounts.unknown += 1;
+        }
         const holdingTimes = trades
           .map((row) => (row.closedAt ?? 0) - row.openedAt)
           .filter((value) => Number.isFinite(value) && value >= 0);
-        const entrySizes = trades.map((row) =>
-          typeof row.quoteUsdRate === 'number' &&
-          Number.isFinite(row.quoteUsdRate)
-            ? Math.abs(row.quantity * row.entryPrice * row.quoteUsdRate)
-            : undefined,
-        );
-        const validEntrySizes = entrySizes.filter(
-          (value): value is number =>
-            typeof value === 'number' && Number.isFinite(value),
-        );
-        const averageReturn = trades.length
-          ? netComplete
-            ? netSamples.reduce(
-                (sum, sample) => sum + sample.returnPercent,
-                0,
-              ) / trades.length
-            : trades.reduce(
-                (sum, row) =>
-                  sum + (row.pnl / (row.quantity * row.entryPrice)) * 100,
-                0,
-              ) / trades.length
-          : undefined;
-        const todayWins = todayTrades.filter((trade) => {
-          const value =
-            typeof trade.netPnlUsd === 'number' &&
-            Number.isFinite(trade.netPnlUsd)
-              ? trade.netPnlUsd
-              : trade.pnl;
-          return value > 0;
-        }).length;
-        const todayAverageReturn = todayTrades.length
-          ? todayTrades.reduce((sum, trade) => {
-              const value =
-                typeof trade.netPnlUsd === 'number' &&
-                Number.isFinite(trade.netPnlUsd)
-                  ? trade.netPnlUsd
-                  : trade.pnl * (trade.quoteUsdRate ?? 1);
-              const capital =
-                trade.entryNotionalUsd ??
-                trade.quantity * trade.entryPrice * (trade.quoteUsdRate ?? 1);
-              return sum + (capital > 0 ? (value / capital) * 100 : 0);
-            }, 0) / todayTrades.length
-          : undefined;
         const closedTimes = trades
           .map((row) => row.closedAt ?? row.openedAt)
           .filter((value) => value > 0 && Number.isFinite(value));
         const firstClosed = closedTimes.length ? Math.min(...closedTimes) : 0;
         const lastClosed = closedTimes.length ? Math.max(...closedTimes) : 0;
-        const totalNet = netComplete
-          ? netValues.reduce((sum, value) => sum + value, 0)
-          : undefined;
-        const mean = (values: number[]) =>
-          values.length
-            ? values.reduce((sum, value) => sum + value, 0) / values.length
-            : undefined;
         const learning = state.learningSummary[strategy];
         return {
           rowId: `strategy:${strategy}`,
           strategy,
           trades: trades.length,
-          wins,
-          losses,
-          flat: trades.length - wins - losses,
+          strictTrades: sourceCounts.strict,
+          exploratoryTrades: sourceCounts.exploratory,
+          scoutTrades: sourceCounts.scout,
+          paperCarryTrades: sourceCounts.paperCarry,
+          unknownSourceTrades: sourceCounts.unknown,
           enabled,
           runStatus,
           runReason,
@@ -678,52 +525,18 @@ export function AutoTraderStrategyPerformanceWidget() {
           todayRealizedUsd:
             state.todayStrategyRealizedUsd?.[strategy] ??
             (state.todayStrategyRealizedUsd ? 0 : undefined),
-          todayWinRate: todayTrades.length
-            ? (todayWins / todayTrades.length) * 100
-            : undefined,
-          todayAverageReturn,
-          feesUsd:
-            trades.length > 0 &&
-            fees.every(
-              (value): value is number =>
-                typeof value === 'number' && Number.isFinite(value),
-            )
-              ? fees.reduce((sum, value) => sum + value, 0)
-              : undefined,
-          netPnlUsd: totalNet,
-          winRate: trades.length ? (wins / trades.length) * 100 : undefined,
-          averageReturn,
-          averageNetWinUsd: netComplete
-            ? mean(netWins.map((sample) => sample.value))
-            : undefined,
-          averageNetWinPercent: netComplete
-            ? mean(netWins.map((sample) => sample.returnPercent))
-            : undefined,
-          averageNetLossUsd: netComplete
-            ? mean(netLosses.map((sample) => sample.value))
-            : undefined,
-          averageNetLossPercent: netComplete
-            ? mean(netLosses.map((sample) => sample.returnPercent))
-            : undefined,
-          profitFactor:
-            profitTotal !== undefined && lossTotal !== undefined
-              ? lossTotal > 0
-                ? profitTotal / lossTotal
-                : profitTotal > 0
-                  ? Number.POSITIVE_INFINITY
-                  : undefined
-              : undefined,
+          // The current outcomes contract does not expose independent
+          // reconciliation or canonical strategy-level performance aggregates.
+          // Do not derive profitability, returns, win rates, or cost ratios here.
           medianHoldingMs: holdingTimes.length
             ? median(holdingTimes)
             : undefined,
-          averageHoldingMs: mean(holdingTimes),
+          averageHoldingMs: holdingTimes.length
+            ? holdingTimes.reduce((sum, value) => sum + value, 0) /
+              holdingTimes.length
+            : undefined,
           periodStart: firstClosed,
           periodEnd: lastClosed,
-          averageEntrySizeUsd:
-            validEntrySizes.length === trades.length
-              ? mean(validEntrySizes)
-              : undefined,
-          lowSample: trades.length > 0 && trades.length < 30,
           learningSamples: learning?.learning_samples,
           learningPositiveRate: learning?.positive_rate,
           learningAverageNet: learning?.average_net_return_percent,
@@ -854,9 +667,6 @@ export function AutoTraderStrategyPerformanceWidget() {
     }
     return latest;
   }, [state.rows, state.closedLedgerRows]);
-  const [expandedEntryStrategies, setExpandedEntryStrategies] = useState<
-    Set<string>
-  >(() => new Set());
   // Keep column definitions stable across live settings and evidence updates.
   // AG Grid can otherwise reapply definition widths and visibly resize columns.
   const settingsRef = useRef(settings);
@@ -1172,7 +982,7 @@ export function AutoTraderStrategyPerformanceWidget() {
         flex: 0,
       },
       {
-        headerName: 'Performance',
+        headerName: 'Source-reported today P&L',
         headerClass: 'strategy-group-performance',
         children: colorStrategyColumns(
           [
@@ -1191,36 +1001,13 @@ export function AutoTraderStrategyPerformanceWidget() {
               maxWidth: 86,
               flex: 0,
             },
-            {
-              field: 'todayWinRate',
-              headerName: 'Today Win%',
-              headerTooltip: 'Win rate for fully closed trades closed today.',
-              valueFormatter: ({ value }) =>
-                typeof value === 'number' ? value.toFixed(1) + '%' : '—',
-              width: 55,
-              minWidth: 55,
-              maxWidth: 62,
-              flex: 0,
-            },
-            {
-              field: 'todayAverageReturn',
-              headerName: 'Today Ret%',
-              headerTooltip:
-                'Average net return for fully closed trades closed today.',
-              cellClassRules: signed,
-              valueFormatter: ({ value }) => pct(value),
-              width: 58,
-              minWidth: 58,
-              maxWidth: 65,
-              flex: 0,
-            },
           ],
           'performance',
         ),
       },
       entryEvidenceGroup,
       {
-        headerName: 'Fully closed trades',
+        headerName: 'Closed audit outcome rows by source',
         headerClass: 'strategy-group-sample',
         children: colorStrategyColumns(
           [
@@ -1228,28 +1015,29 @@ export function AutoTraderStrategyPerformanceWidget() {
               field: 'trades',
               headerName: 'Trades',
               headerTooltip:
-                'Counts only fully closed, audited trades. Partial exits from positions that remain open do not count.',
+                'Raw count of fully closed outcomes in the AutoTrader audit-derived outcomes model. These rows are not independently reconciled performance samples.',
               width: 58,
               minWidth: 58,
               maxWidth: 64,
               flex: 0,
             },
-            {
-              field: 'wins',
-              headerName: 'Wins',
-              width: 46,
-              minWidth: 46,
-              maxWidth: 52,
+            ...(
+              [
+                ['strictTrades', 'Strict'],
+                ['exploratoryTrades', 'Exploratory'],
+                ['scoutTrades', 'Scout'],
+                ['paperCarryTrades', 'Carry'],
+                ['unknownSourceTrades', 'Unknown'],
+              ] as const
+            ).map(([field, headerName]) => ({
+              field,
+              headerName,
+              headerTooltip: `Raw closed outcome rows classified as ${headerName.toLowerCase()} by the existing outcomes source contract.`,
+              width: 76,
+              minWidth: 68,
+              maxWidth: 84,
               flex: 0,
-            },
-            {
-              field: 'losses',
-              headerName: 'Losses',
-              width: 50,
-              minWidth: 50,
-              maxWidth: 56,
-              flex: 0,
-            },
+            })),
           ],
           'sample',
         ),
@@ -1357,26 +1145,12 @@ export function AutoTraderStrategyPerformanceWidget() {
               maxWidth: 92,
               flex: 0,
             },
-            {
-              field: 'averageEntrySizeUsd',
-              headerName: 'Entry USD',
-              headerTooltip:
-                'Mean USD notional at entry for fully closed trades; uses entry price and the latest quote currency conversion rate.',
-              valueFormatter: ({ value }) =>
-                typeof value === 'number' && Number.isFinite(value)
-                  ? usd.format(value)
-                  : '—',
-              width: 72,
-              minWidth: 72,
-              maxWidth: 82,
-              flex: 0,
-            },
           ],
           'profile',
         ),
       },
       {
-        headerName: 'Learning · all symbols · recent',
+        headerName: 'Learning evidence · separate from paper outcomes',
         headerClass: 'strategy-group-learning',
         children: colorStrategyColumns(
           [
@@ -1481,12 +1255,12 @@ export function AutoTraderStrategyPerformanceWidget() {
   );
   return (
     <section
-      className="feed-section auto-trader-outcomes-embedded"
+      className="feed-section auto-trader-outcomes-embedded v35-operator-card"
       aria-label="Strategy performance"
     >
       <div className="auto-trader-strategy-winrate-heading">
         <strong className="auto-trader-strategy-winrate-title">
-          Strategy performance and today’s realized P&amp;L
+          Strategy performance evidence
         </strong>
         <label>
           <input
@@ -1516,11 +1290,32 @@ export function AutoTraderStrategyPerformanceWidget() {
           </label>
         ))}
       </div>
+      <div
+        className="auto-trader-strategy-winrate-note"
+        role="status"
+        aria-label="Strategy performance evidence status"
+      >
+        <strong>
+          {state.loading
+            ? 'Loading audit outcome evidence.'
+            : evidenceSummary.auditClosedRows === 0
+              ? 'No fully closed audit outcomes are available.'
+              : `${evidenceSummary.auditClosedRows} fully closed audit outcome row${evidenceSummary.auditClosedRows === 1 ? '' : 's'} available.`}
+        </strong>{' '}
+        Source rows: strict {evidenceSummary.strictRows}, exploratory{' '}
+        {evidenceSummary.exploratoryRows}, Scout {evidenceSummary.scoutRows},
+        carry {evidenceSummary.paperCarryRows}, unknown{' '}
+        {evidenceSummary.unknownSourceRows}. Independent financial
+        reconciliation is not exposed by the current outcomes contract, so no
+        validated profitability, expectancy, effective sample size, or strategy
+        ranking is reported here. Learning and Scout evidence below remain
+        separate from actual paper-trade outcome rows.
+      </div>
       <p className="auto-trader-strategy-winrate-note">
-        Today P&amp;L includes all realized exits today, including partial exits
-        on positions still open. Wins, losses, and Closed net use fully closed
-        audited trades only. Unrealized P&amp;L is shown with open positions and
-        is not included in Today P&amp;L.
+        “Today P&amp;L” is the source-reported AutoTrader realized-P&amp;L
+        field; it is not an independently reconciled figure. Raw closed counts
+        include only closed audit-derived outcomes. Strict, exploratory, Scout,
+        carry, and unknown source classifications are shown separately.
       </p>
       <div
         ref={strategyGridWrapper}
@@ -1533,12 +1328,7 @@ export function AutoTraderStrategyPerformanceWidget() {
             if (!data || data.rowType === 'symbol') return;
             if (!entryReturnProfilesByStrategy.get(data.strategy)?.length)
               return;
-            setExpandedEntryStrategies((previous) => {
-              const next = new Set(previous);
-              if (next.has(data.strategy)) next.delete(data.strategy);
-              else next.add(data.strategy);
-              return next;
-            });
+            model.toggleExpandedEntryStrategy(data.strategy);
           }}
           postSortRows={({ nodes }) => {
             const symbolRowsByStrategy = new Map<string, typeof nodes>();
@@ -1569,7 +1359,7 @@ export function AutoTraderStrategyPerformanceWidget() {
           onGridReady={({ api }) => {
             strategyGridApi.current = api;
             try {
-              const saved = localStorage.getItem(STRATEGY_GRID_STATE_KEY);
+              const saved = viewState.gridColumnStateJson;
               if (saved) {
                 const parsed = JSON.parse(saved);
                 if (Array.isArray(parsed))

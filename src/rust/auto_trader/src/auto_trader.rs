@@ -2,37 +2,37 @@
 //! These include fragments share this module so private state and helpers keep
 //! their existing visibility and behavior.
 
-use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-pub use strategy::benchmark_strategy_evaluation;
-pub(crate) use strategy::daily::{parse_scout_combination, StrategyDiagnostic};
-#[cfg(test)]
-pub(crate) use strategy::scout_parameter_specs;
 use strategy::StrategyDecision;
 #[cfg(test)]
 pub(crate) use strategy::StrategyParameterScoutVariant;
-pub(crate) use strategy::{
-    confident_win_rate_edge, effective_parameter_values, legacy_strategy_parameter_name,
-    signal_strategy_parameters, strategy_parameter_key, strategy_parameter_value,
-    strategy_profile_value, validate_strategy_parameter_overrides, DatedCarryCandidate,
-    DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
-    StrategyParameterProfile, StrategyParameterValue, StrategySignal,
-};
+pub use strategy::benchmark_strategy_evaluation;
+pub(crate) use strategy::daily::{StrategyDiagnostic, parse_scout_combination};
+#[cfg(test)]
+pub(crate) use strategy::scout_parameter_specs;
 #[cfg(test)]
 use strategy::{AbsorptionPressureValue, DepthSignalValue, WindowedSignalValue};
+pub(crate) use strategy::{
+    DatedCarryCandidate, DatedCarrySettlementSource, FeedbackEvent, Strategy, StrategyParameterKey,
+    StrategyParameterProfile, StrategyParameterValue, StrategySignal, confident_win_rate_edge,
+    effective_parameter_values, legacy_strategy_parameter_name, signal_strategy_parameters,
+    strategy_parameter_key, strategy_parameter_value, strategy_profile_value,
+    validate_strategy_parameter_overrides,
+};
 use tokio::{
-    sync::{broadcast, Mutex, Notify},
+    sync::{Mutex, Notify, broadcast},
     task::JoinSet,
-    time::{interval, Duration},
+    time::{Duration, interval},
 };
 
 include!("auto_trader/constants.rs");
@@ -142,6 +142,7 @@ mod strategy_cleanup_integration_tests {
             settings_persist_timings_ms: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             latest_missed_opportunity_bands: Arc::new(Mutex::new(Arc::new(Vec::new()))),
             latest_execution_parameters: Arc::new(Mutex::new(None)),
+            capital_allocation_snapshot: Arc::new(Mutex::new(CapitalAllocationSnapshot::default())),
             cycle_lock: Arc::new(Mutex::new(())),
             pending_daily_signals: Arc::new(Mutex::new(BTreeMap::new())),
             daily_signal_notify: Arc::new(Notify::new()),
@@ -206,7 +207,7 @@ mod strategy_cleanup_integration_tests {
             symbol: symbol.into(),
             strategy: strategy.as_str().into(),
             profile_id: profile_id.clone(),
-            parameters,
+            parameters: parameters.clone(),
             baseline_parameters: BTreeMap::new(),
             comparison: strategy::ScoutComparisonMetadata::Independent,
             specs,
@@ -237,7 +238,7 @@ mod strategy_cleanup_integration_tests {
             .await
             .unwrap();
         assert_eq!(snapshot_response.status(), axum::http::StatusCode::OK);
-        let snapshot = serde_json::from_slice::<strategy::LearnedProfileSnapshot>(
+        let mut snapshot = serde_json::from_slice::<strategy::LearnedProfileSnapshot>(
             &snapshot_response
                 .into_body()
                 .collect()
@@ -255,6 +256,73 @@ mod strategy_cleanup_integration_tests {
             snapshot.walk_forward_evidence[&exact_regime_key].sample_count,
             1
         );
+        let selected_profile_id = profile_id.clone();
+        let selected_profile_version = 1;
+        snapshot.profiles.push(strategy::StrategyProfile {
+            profile_id: selected_profile_id.clone(),
+            version: selected_profile_version,
+            symbol: symbol.to_owned(),
+            strategy: strategy.as_str().to_owned(),
+            parameters,
+            learning_samples: 1,
+            positive_samples: 1,
+            realized_pnl: 0.25,
+        });
+        snapshot
+            .exit_policy_assessments
+            .push(strategy::LearnedExitPolicyAssessment {
+                symbol: symbol.to_owned(),
+                strategy: strategy.as_str().to_owned(),
+                profile_id: Some(selected_profile_id.clone()),
+                profile_version: Some(selected_profile_version),
+                stop_loss_percent: Some(0.42),
+                take_profit_percent: Some(0.71),
+                activation_percent: None,
+                giveback_percent: None,
+                minimum_lock_percent: None,
+                maximum_holding_duration_ms: Some(3 * 86_400_000),
+                trailing_activation_percent: Some(0.45),
+                trailing_distance_percent: Some(0.20),
+                breakeven_activation_percent: Some(0.30),
+                sample_count: 40,
+                training_count: 30,
+                validation_count: 10,
+                as_of_ms: current_time_ms(),
+                status: "metrics_blocked".to_owned(),
+                metrics: strategy::ExitPolicyMetricReport {
+                    promotion_eligible: false,
+                    promotion_blockers: vec!["independent_reconciliation_unavailable".to_owned()],
+                    ..strategy::ExitPolicyMetricReport::default()
+                },
+            });
+        snapshot
+            .exit_protection_policies
+            .push(strategy::LearnedExitProtectionPolicy {
+                symbol: symbol.to_owned(),
+                strategy: strategy.as_str().to_owned(),
+                profile_id: Some(selected_profile_id.clone()),
+                profile_version: Some(selected_profile_version),
+                stop_loss_percent: Some(0.42),
+                take_profit_percent: Some(0.71),
+                maximum_holding_duration_ms: None,
+                trailing_activation_percent: Some(0.45),
+                trailing_distance_percent: Some(0.20),
+                breakeven_activation_percent: Some(0.30),
+                activation_percent: 0.2,
+                giveback_percent: 0.1,
+                minimum_lock_percent: 0.05,
+                sample_count: 40,
+                training_count: 30,
+                validation_count: 10,
+                baseline_validation_mean_percent: 0.10,
+                selected_validation_mean_percent: 0.15,
+                validation_gain_percent: 0.05,
+                validation_positive_rate: 0.7,
+                validation_negative_difference_rate: 0.2,
+                validation_tenth_percentile_difference_percent: -0.10,
+                validation_worst_difference_percent: -0.25,
+                as_of_ms: current_time_ms(),
+            });
 
         let state = test_state(Settings::default());
         AutoTraderSocketApi {
@@ -263,22 +331,64 @@ mod strategy_cleanup_integration_tests {
         .apply_learning_snapshot(snapshot)
         .await;
         let Json(daily_scan) = get_daily_strategy_parameters(State(state.clone())).await;
-        assert!(daily_scan
-            .strategy_profiles
-            .iter()
-            .all(|profile| profile.strategy != strategy.as_str()));
-        assert!(state
-            .settings
-            .lock()
-            .await
-            .learned_walk_forward_evidence
-            .contains_key(&exact_regime_key));
+        assert!(
+            daily_scan
+                .strategy_profiles
+                .iter()
+                .all(|profile| profile.strategy != strategy.as_str())
+        );
+        assert!(
+            state
+                .settings
+                .lock()
+                .await
+                .learned_walk_forward_evidence
+                .contains_key(&exact_regime_key)
+        );
         let Json(response) = get_decision_parameters(State(state.clone())).await;
+        assert_eq!(response.exit_policy_assessments.len(), 1);
+        assert_eq!(response.exit_policy_assessments[0].symbol, symbol);
+        assert_eq!(
+            response.exit_policy_assessments[0].profile_id.as_deref(),
+            Some(selected_profile_id.as_str())
+        );
+        assert_eq!(
+            response.exit_policy_assessments[0].profile_version,
+            Some(selected_profile_version)
+        );
+        assert_eq!(
+            response.exit_policy_assessments[0].status,
+            "metrics_blocked"
+        );
+        assert_eq!(
+            response.exit_policy_assessments[0].maximum_holding_duration_ms,
+            Some(3 * 86_400_000)
+        );
+        assert_eq!(
+            response.exit_policy_assessments[0]
+                .metrics
+                .promotion_blockers,
+            ["independent_reconciliation_unavailable"]
+        );
+        let Json(compact_response) = get_compact_decision_parameters(State(state.clone())).await;
+        assert_eq!(compact_response.exit_policy_assessments.len(), 1);
+        assert_eq!(compact_response.exit_policy_assessments[0].symbol, symbol);
+        assert_eq!(response.exit_protection_policies.len(), 1);
+        assert_eq!(
+            response.exit_protection_policies[0].profile_id,
+            Some(selected_profile_id.clone())
+        );
+        assert_eq!(compact_response.exit_protection_policies.len(), 1);
         let profile = response
             .strategy_profiles
             .iter()
             .find(|profile| profile.symbol == symbol && profile.strategy == strategy.as_str())
             .expect("live parameter API includes the sampled live strategy");
+        assert_eq!(
+            profile.profile_id.as_deref(),
+            Some(selected_profile_id.as_str())
+        );
+        assert_eq!(profile.profile_version, Some(selected_profile_version));
         let api_profile = serde_json::to_value(profile).unwrap();
         assert_eq!(
             api_profile["walk_forward_evidence"]["sampleCount"],
@@ -496,14 +606,18 @@ mod strategy_cleanup_integration_tests {
             .expect("AutoTrader publishes a set for each live worker");
         assert!(profile_set.enabled);
         assert_eq!(profile_set.profiles.len(), 2);
-        assert!(profile_set
-            .profiles
-            .iter()
-            .any(|configured| configured.profile_id == profile.profile_id));
-        assert!(profile_set
-            .profiles
-            .iter()
-            .any(|configured| configured.profile_id == second_profile.profile_id));
+        assert!(
+            profile_set
+                .profiles
+                .iter()
+                .any(|configured| configured.profile_id == profile.profile_id)
+        );
+        assert!(
+            profile_set
+                .profiles
+                .iter()
+                .any(|configured| configured.profile_id == second_profile.profile_id)
+        );
 
         let timestamp = current_time_ms();
         let mut signal = strategy::StrategyMarketSignal::default();

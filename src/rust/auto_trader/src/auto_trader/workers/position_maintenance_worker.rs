@@ -33,6 +33,8 @@ struct PersistedEntryRecoveryContext {
     counterfactual_take_profit_percent: f64,
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
+    #[serde(default)]
+    exit_parameter_provenance: serde_json::Value,
     side: String,
     quantity: f64,
     notional: f64,
@@ -121,6 +123,7 @@ fn recovery_execution_from_order(
         counterfactual_take_profit_percent: context.counterfactual_take_profit_percent,
         effective_stop_loss_percent: context.effective_stop_loss_percent,
         effective_take_profit_percent: context.effective_take_profit_percent,
+        exit_parameter_provenance: context.exit_parameter_provenance,
         side: context.side,
         quantity: context.quantity,
         notional: context.notional,

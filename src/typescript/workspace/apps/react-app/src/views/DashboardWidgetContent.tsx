@@ -9,12 +9,16 @@ import { Positions } from './Positions';
 import { Fills } from './Fills';
 import { Pnl } from './Pnl';
 import { Account } from './Account';
+import { PortfolioReconciliationWidget } from './PortfolioReconciliationWidget';
+import { OrdersPositionsWidget } from './OrdersPositionsWidget';
 import { PortfolioRisk } from './PortfolioRisk';
 import { CloseInsights } from './CloseInsights';
 import { Hedging } from './Hedging';
 import { AutoTrader } from './AutoTrader';
 import { DatedCarry } from './DatedCarry';
 import { AutoTraderDiagnostics } from './AutoTraderDiagnostics';
+import { CapitalAllocationWidget } from './CapitalAllocationWidget';
+import { LearningEvidenceWidget } from './LearningEvidenceWidget';
 import { AutoTraderLearningWidget } from './AutoTraderLearningWidget';
 import { AutoTraderOutcomes } from './AutoTraderOutcomes';
 import { AutoTraderStrategyPerformanceWidget } from './AutoTraderStrategyPerformanceWidget';
@@ -116,6 +120,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <Pnl connection={connection} paused={paused} />;
     case 'account':
       return <Account />;
+    case 'portfolio-reconciliation':
+      return <PortfolioReconciliationWidget />;
     case 'risk':
       return <PortfolioRisk connection={connection} paused={paused} />;
     case 'close-insights':
@@ -134,6 +140,12 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
       return <DatedCarry />;
     case 'auto-trader-diagnostics':
       return <AutoTraderDiagnostics />;
+    case 'capital-allocation':
+      return <CapitalAllocationWidget widgetId={widget.id} />;
+    case 'orders-positions':
+      return <OrdersPositionsWidget />;
+    case 'learning-evidence':
+      return <LearningEvidenceWidget />;
     case 'auto-trader-learning-decisions':
       return <AutoTraderLearningWidget section="decisions" />;
     case 'auto-trader-learning-realized':
@@ -145,7 +157,7 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
     case 'auto-trader-outcomes':
       return <AutoTraderOutcomes ticks={prices.ticks} />;
     case 'auto-trader-strategy-performance':
-      return <AutoTraderStrategyPerformanceWidget />;
+      return <AutoTraderStrategyPerformanceWidget widgetId={widget.id} />;
     case 'auto-trader-execution-check':
       return <AutoTraderExecutionCheck />;
     case 'auto-trader-completed-positions':

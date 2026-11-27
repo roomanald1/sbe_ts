@@ -24,6 +24,21 @@ async fn submit_order_with_test_match(
     submit_order_inner(store, request, Some(prepared)).await
 }
 
+fn activate_resting_order_market_matching(store: &Arc<PositionStore>, symbol: &str) {
+    #[cfg(test)]
+    {
+        // Handler tests record activation without spawning the production
+        // Paper Exchange polling task or making a service request.
+        store
+            .market_mark_pollers
+            .lock()
+            .expect("market mark poller lock poisoned")
+            .insert(symbol.to_ascii_uppercase());
+    }
+    #[cfg(not(test))]
+    store.ensure_market_mark_polling(symbol);
+}
+
 async fn submit_order_inner(
     store: Arc<PositionStore>,
     mut request: NewOrder,
@@ -100,6 +115,15 @@ async fn submit_order_inner(
         Some(prepared) => prepared,
         None => prepare_market_match(&symbol, &request, &options).await?,
     };
+    // Keep the post-only acceptance invariant at the handler boundary too. The
+    // production preparation path already checks this before returning; this
+    // also makes deterministic matcher fixtures exercise the same rejection.
+    reject_crossing_post_only(
+        &request,
+        &options,
+        prepared.matched.best_bid,
+        prepared.matched.best_ask,
+    )?;
     let mut matched = prepared.matched;
     let matcher_requested_quantity = request.quantity;
     let decision_timestamp = prepared.decision_timestamp;
@@ -364,6 +388,9 @@ async fn submit_order_inner(
             client_order_id: request.client_order_id.clone(),
             lifecycle: request.lifecycle.clone(),
             reduce_only: request.reduce_only,
+            market_path: Vec::new(),
+            market_path_completeness: default_market_path_completeness(),
+            market_path_dropped_samples: 0,
         };
         ledger.orders.push(order.clone());
         Some(order)
@@ -418,6 +445,20 @@ async fn submit_order_inner(
                     format!("Unable to persist paper order: {error}"),
                 )
             })?;
+    } else if order.is_some() {
+        // A resting order must be durable before its market-mark matcher is
+        // activated. Otherwise a restart or an immediate mark can observe a
+        // poller without the corresponding committed order (or vice versa).
+        drop(ledger);
+        store
+            .persist_durable_snapshot(None)
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Unable to persist paper order: {error}"),
+                )
+            })?;
     } else if let Err(error) = store.persist(&ledger).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -433,6 +474,9 @@ async fn submit_order_inner(
         .to_owned(),
         persistence_started.elapsed().as_secs_f64() * 1_000.0,
     );
+    if let Some(resting_order) = order.as_ref() {
+        activate_resting_order_market_matching(&store, &resting_order.symbol);
+    }
     Ok(Json(OrderResponse {
         filled_quantity,
         estimated_fee,
@@ -460,7 +504,11 @@ fn existing_order_response(
     let barrier_order = ledger
         .barrier_orders
         .iter()
-        .find(|order| order.parent_order_id.as_deref() == Some(client_order_id))
+        .find(|order| {
+            order.parent_order_id.as_deref() == Some(client_order_id)
+                || (order.id == client_order_id
+                    && !matches!(order.status.as_str(), "armed" | "triggering"))
+        })
         .cloned();
     let fills = with_ledger_trade_index(store, ledger, |index| {
         index
@@ -636,6 +684,191 @@ mod order_ledger_contention_tests {
         }
     }
 
+    fn prepared_match(filled: f64, remaining: f64) -> PreparedMarketMatch {
+        PreparedMarketMatch {
+            matched: MatcherResponse {
+                schema_version: Some("paper_exchange_match:v1".into()),
+                capture_complete: Some(true),
+                order_id: Some("test-order".into()),
+                parent_order_id: None,
+                request_fingerprint: Some("sha256:test-request".into()),
+                recorded_at_utc_ms: Some(1),
+                source_cursor: Some(1),
+                source_cursor_kind: Some("match_request".into()),
+                source_epoch: Some("test-epoch".into()),
+                reference_price: Some(100.0),
+                best_bid: Some(99.0),
+                best_ask: Some(101.0),
+                worst_ask: Some(101.0),
+                book_updated_at_ms: 1,
+                fills: (filled > EPSILON)
+                    .then(|| {
+                        vec![MatcherFill {
+                            quantity: filled,
+                            price: 100.0,
+                            source_execution_id: Some("paper-exec:test-fill".into()),
+                            source_cursor: Some(2),
+                            source_cursor_kind: Some("match_fill".into()),
+                            recorded_at_utc_ms: Some(2),
+                            source_price: Some(100.0),
+                            source_quantity: Some(filled),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                remaining_quantity: remaining,
+                filled_quantity: filled,
+                average_execution_price: (filled > EPSILON).then_some(100.0),
+                source_reported_filled_quantity: Some(filled),
+            },
+            decision_timestamp: None,
+            decision_price: None,
+            decision_mid_price: None,
+            processing_timings_ms: BTreeMap::new(),
+        }
+    }
+
+    fn prepared_barrier_match(barrier_id: &str, quantity: f64) -> PreparedMarketMatch {
+        let mut prepared = prepared_match(quantity, 0.0);
+        prepared.matched.order_id =
+            Some(format!("{barrier_id}:barrier:{:016x}", quantity.to_bits()));
+        prepared.matched.parent_order_id = Some(barrier_id.to_owned());
+        prepared.matched.request_fingerprint = Some("sha256:barrier-attempt".to_owned());
+        prepared
+    }
+
+    fn short_position_ledger() -> Ledger {
+        let mut ledger = Ledger::default();
+        ledger.trades.push(
+            serde_json::from_value(serde_json::json!({
+                "id":"existing-short","symbol":"BTC-USDT","side":"sell",
+                "quantity":0.5,"execution_price":100.0,"timestamp":1,"source":"manual"
+            }))
+            .unwrap(),
+        );
+        ledger
+    }
+
+    fn triggering_barrier_ledger(barrier_id: &str) -> Ledger {
+        let mut ledger = short_position_ledger();
+        ledger.barrier_orders.push(BarrierOrder {
+            id: barrier_id.to_owned(),
+            symbol: "BTC-USDT".to_owned(),
+            side: TradeSide::Buy,
+            quantity: 0.5,
+            remaining_quantity: 0.5,
+            filled_quantity: 0.0,
+            trigger_price: 99.0,
+            trigger_direction: BarrierDirection::Below,
+            created_at: 2,
+            triggered_at: Some(3),
+            retry_after: None,
+            status: "triggering".to_owned(),
+            average_execution_price: None,
+            fee_paid: 0.0,
+            error: None,
+            order_kind: "stop-market".to_owned(),
+            execution_type: "market".to_owned(),
+            limit_price: None,
+            trailing_amount: None,
+            trailing_percent: None,
+            extreme_price: None,
+            source: "manual".to_owned(),
+            parent_order_id: Some("protective-parent".to_owned()),
+            client_order_id: Some("protective-parent".to_owned()),
+            lifecycle: None,
+            trigger_adjustments: Vec::new(),
+        });
+        ledger
+    }
+
+    fn order_request(order_type: &str, limit_price: Option<f64>, id: &str) -> NewOrder {
+        serde_json::from_value(serde_json::json!({
+            "symbol":"BTC-USDT","side":"buy","order_type":order_type,
+            "quantity":0.5,"limit_price":limit_price,"source":"manual",
+            "client_order_id":id,"reduce_only":true
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn accepted_resting_order_is_durable_before_matching_activation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "position-management-resting-activation-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let store = Arc::new(response_store(short_position_ledger(), path.clone()));
+        let response = submit_order_inner(
+            Arc::clone(&store),
+            order_request("post-only-limit", Some(98.0), "resting-activation"),
+            Some(prepared_match(0.0, 0.5)),
+        )
+        .await
+        .unwrap();
+
+        let resting = response.0.order.expect("accepted remainder is resting");
+        assert_eq!(resting.remaining_quantity, 0.5);
+        assert!(
+            load_sqlite_ledger(&path)
+                .unwrap()
+                .orders
+                .iter()
+                .any(|order| order.id == resting.id)
+        );
+        assert!(
+            store
+                .market_mark_pollers
+                .lock()
+                .unwrap()
+                .contains("BTC-USDT")
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn rejected_crossing_and_fully_filled_orders_do_not_activate_matching() {
+        let rejected_store = Arc::new(response_store(Ledger::default(), PathBuf::new()));
+        let rejected = submit_order_inner(
+            Arc::clone(&rejected_store),
+            order_request("post-only-limit", Some(102.0), "crossing-post-only"),
+            Some(prepared_match(0.0, 0.5)),
+        )
+        .await;
+        match rejected {
+            Err((status, _)) => assert_eq!(status, StatusCode::CONFLICT),
+            Ok(_) => panic!("crossing post-only request must be rejected"),
+        }
+        assert!(
+            rejected_store
+                .market_mark_pollers
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
+
+        let filled_store = Arc::new(response_store(short_position_ledger(), PathBuf::new()));
+        let mut fully_filled_request = order_request("market", None, "fully-filled-close");
+        fully_filled_request.client_order_id = None;
+        let response = submit_order_inner(
+            Arc::clone(&filled_store),
+            fully_filled_request,
+            Some(prepared_match(0.5, 0.0)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.remaining_quantity, 0.0);
+        assert!(response.0.order.is_none());
+        assert!(filled_store.market_mark_pollers.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn match_evidence_requires_exact_order_fill_and_unclipped_quantity_linkage() {
         let complete = complete_paper_match_fixture();
@@ -715,6 +948,146 @@ mod order_ledger_contention_tests {
         assert_eq!(clipped.fills[0].quantity, 0.25);
         assert_eq!(clipped.fills[0].source_quantity, Some(0.5));
         assert!(!source_match_is_complete(&clipped, Some("order-1"), 0.5));
+    }
+
+    #[test]
+    fn protective_barrier_attempt_identity_requires_exact_parent_and_quantity_linkage() {
+        let barrier_id = "barrier-1700-0";
+        let mut response = complete_paper_match_fixture();
+        response.order_id = Some(format!("{barrier_id}:barrier:{:016x}", 0.5_f64.to_bits()));
+        response.parent_order_id = Some(barrier_id.to_owned());
+        assert!(source_match_is_complete(&response, Some(barrier_id), 0.5));
+
+        let mut mismatched_parent = response.clone();
+        mismatched_parent.parent_order_id = Some("barrier-other-0".to_owned());
+        assert!(!source_match_is_complete(
+            &mismatched_parent,
+            Some(barrier_id),
+            0.5
+        ));
+        let mismatched_evidence =
+            paper_exchange_fill_evidence(&mismatched_parent, Some(barrier_id), 0.5);
+        assert_eq!(mismatched_evidence[0].complete, Some(false));
+        assert_eq!(mismatched_evidence[0].execution_id, None);
+
+        let mut mismatched_attempt = response;
+        mismatched_attempt.order_id =
+            Some(format!("{barrier_id}:barrier:{:016x}", 0.25_f64.to_bits()));
+        assert!(!source_match_is_complete(
+            &mismatched_attempt,
+            Some(barrier_id),
+            0.5
+        ));
+    }
+
+    #[tokio::test]
+    async fn protective_barrier_fill_lineage_survives_durable_restart_and_replay() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "position-management-barrier-fill-lineage-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let barrier_id = "barrier-1700-0";
+        let store = Arc::new(response_store(
+            triggering_barrier_ledger(barrier_id),
+            path.clone(),
+        ));
+        let first = submit_order_inner(
+            Arc::clone(&store),
+            order_request("market", None, barrier_id),
+            Some(prepared_barrier_match(barrier_id, 0.5)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first.filled_quantity, 0.5);
+        assert_eq!(first.fill_evidence.len(), 1);
+        let fill = &first.fill_evidence[0];
+        assert_eq!(fill.paper_exchange_source_complete, Some(true));
+        assert_eq!(
+            fill.paper_exchange_execution_id.as_deref(),
+            Some("paper-exec:test-fill")
+        );
+        assert_eq!(
+            fill.paper_exchange_source_epoch.as_deref(),
+            Some("test-epoch")
+        );
+        assert_eq!(fill.paper_exchange_source_cursor, Some(2));
+        assert_eq!(
+            fill.paper_exchange_request_fingerprint.as_deref(),
+            Some("sha256:barrier-attempt")
+        );
+        assert_eq!(fill.paper_exchange_source_quantity, Some(0.5));
+        assert_eq!(fill.paper_exchange_source_price, Some(100.0));
+
+        // The outer barrier loop persists the terminal barrier state after
+        // submit_order_inner returns. Model that commit before simulating a
+        // restart so replay sees the stable barrier ID and its completed fill.
+        {
+            let mut ledger = store.ledger.lock().await;
+            let barrier = ledger
+                .barrier_orders
+                .iter_mut()
+                .find(|barrier| barrier.id == barrier_id)
+                .unwrap();
+            barrier.filled_quantity = first.filled_quantity;
+            barrier.remaining_quantity = 0.0;
+            barrier.average_execution_price = first.average_execution_price;
+            barrier.fee_paid = first.estimated_fee;
+            barrier.status = "filled".to_owned();
+        }
+        store.persist_durable_snapshot(None).await.unwrap();
+
+        let restored = load_sqlite_ledger(&path).unwrap();
+        let restarted_store = Arc::new(response_store(restored.clone(), path.clone()));
+        let after_restart =
+            existing_order_response(&restarted_store, &restored, barrier_id).unwrap();
+        assert_eq!(after_restart.filled_quantity, 0.5);
+        assert_eq!(after_restart.fill_evidence.len(), 1);
+        assert_eq!(
+            after_restart.fill_evidence[0].paper_exchange_source_complete,
+            Some(true)
+        );
+        assert_eq!(
+            after_restart.fill_evidence[0]
+                .paper_exchange_execution_id
+                .as_deref(),
+            Some("paper-exec:test-fill")
+        );
+        assert_eq!(
+            after_restart.fill_evidence[0].paper_exchange_source_cursor,
+            Some(2)
+        );
+
+        let replay = submit_order_inner(
+            Arc::clone(&restarted_store),
+            order_request("market", None, barrier_id),
+            Some(prepared_match(0.0, 0.5)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(replay.filled_quantity, 0.5);
+        assert_eq!(
+            restarted_store
+                .ledger
+                .lock()
+                .await
+                .trades
+                .iter()
+                .filter(|trade| trade.parent_order_id.as_deref() == Some(barrier_id))
+                .count(),
+            1
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
     }
 
     #[test]

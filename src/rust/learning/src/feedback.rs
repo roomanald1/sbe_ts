@@ -1294,7 +1294,7 @@ fn record_evidence_gain_event(
         return false;
     }
     let record = EvidenceGainRecord {
-        schema_version: 1,
+        schema_version: 2,
         record_id: record_id.clone(),
         outcome_event_id,
         source_event_id,
@@ -1312,6 +1312,8 @@ fn record_evidence_gain_event(
         coverage_after_status: after.status,
         sample_count_before: before.sample_count,
         sample_count_after: after.sample_count,
+        effective_sample_size_before: before.effective_sample_size,
+        effective_sample_size_after: after.effective_sample_size,
         last_sample_before_ms: before.last_sample_timestamp_ms,
         last_sample_after_ms: after.last_sample_timestamp_ms,
         new_coverage_observed,
@@ -2309,6 +2311,13 @@ mod tests {
         assert!(record.new_coverage_observed);
         assert_eq!(record.sample_count_before, Some(0));
         assert_eq!(record.sample_count_after, Some(1));
+        assert_eq!(record.schema_version, 2);
+        assert!(record.effective_sample_size_before.is_some());
+        assert!(record.effective_sample_size_after.is_some());
+        assert!(
+            record.effective_sample_size_after.unwrap()
+                > record.effective_sample_size_before.unwrap()
+        );
         assert_eq!(record.eligibility_status, "blocked");
         assert_eq!(record.cost_status, "unknown");
         assert_eq!(record.reconciliation_status, "unknown");
@@ -2371,6 +2380,7 @@ mod tests {
         let before = EvidenceGainCoverageSnapshot {
             status: "missing".into(),
             sample_count: Some(0),
+            effective_sample_size: Some(0.0),
             last_sample_timestamp_ms: None,
         };
         for (event_id, source_event_id, trade_id) in [
@@ -2424,6 +2434,7 @@ mod tests {
             EvidenceGainCoverageSnapshot {
                 status: "unknown".into(),
                 sample_count: None,
+                effective_sample_size: None,
                 last_sample_timestamp_ms: None,
             },
             now
@@ -2454,6 +2465,7 @@ mod tests {
             EvidenceGainCoverageSnapshot {
                 status: "stale".into(),
                 sample_count: Some(1),
+                effective_sample_size: Some(0.7),
                 last_sample_timestamp_ms: Some(now - 100_000),
             },
             now

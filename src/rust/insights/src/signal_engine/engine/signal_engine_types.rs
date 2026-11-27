@@ -7,6 +7,19 @@ struct BookHistorySample {
     ask_levels: [(f64, f64); 7],
 }
 
+#[derive(Clone, Default)]
+struct BookInputProvenance {
+    received: u64,
+    accepted: u64,
+    older_timestamp_rejected: u64,
+    equal_timestamp_rejected: u64,
+    invalid_book_rejected: u64,
+    last_source_timestamp_ms: Option<u64>,
+    last_received_at_ms: Option<u64>,
+    last_accepted_source_timestamp_ms: Option<u64>,
+    last_accepted_at_ms: Option<u64>,
+}
+
 const BOOK_HISTORY_SAMPLE_INTERVAL_MS: u64 = 100;
 const BOOK_HISTORY_SAMPLE_LIMIT: usize = 601;
 
@@ -109,6 +122,7 @@ pub struct SignalEngine {
     absorption_trades: VecDeque<AbsorptionTrade>,
     book_imbalance: Option<f64>,
     best_quote: Option<(u64, f64, f64)>,
+    book_input_provenance: BookInputProvenance,
     book_bid_levels: Vec<(f64, f64)>,
     book_ask_levels: Vec<(f64, f64)>,
     book_history: VecDeque<BookHistorySample>,

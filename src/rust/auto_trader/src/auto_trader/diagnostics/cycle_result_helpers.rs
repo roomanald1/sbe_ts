@@ -54,6 +54,12 @@ mod cycle_result_helper_tests {
                 candidate_decision_ids: vec!["decision-1".into()],
                 gate_counts: vec![],
                 candidate_gate_counts: vec![],
+                candidate_coverage: CandidateDiagnosticCoverage {
+                    state: CandidateDiagnosticCoverageState::Unavailable,
+                    retained: 0,
+                    observed: None,
+                    truncated: false,
+                },
                 candidate_details: vec![],
                 outcome: EntryCycleOutcome::CandidatesRejected,
                 raw_signal_count: 5,

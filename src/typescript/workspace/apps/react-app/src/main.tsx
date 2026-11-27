@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@workspace/ui-platform/styles/theme.css';
 import '@workspace/ui-platform/styles/dashboard_widgets.css';
+import '@workspace/ui-platform/styles/operator_dashboard.css';
 import './index.css';
 import App from './App.tsx';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';

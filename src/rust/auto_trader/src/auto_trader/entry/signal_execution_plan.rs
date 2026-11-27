@@ -136,14 +136,16 @@ fn strategy_learning_stats_across_symbols(
         })
 }
 
-fn daily_strategy_effective_budget(settings: &Settings, strategy: &str) -> f64 {
-    let base_budget = daily_strategy_budget(settings, strategy);
+fn daily_shared_pool_ceiling(settings: &Settings, strategy: &str) -> f64 {
     let Some(kind) = Strategy::from_name(strategy)
         .filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
     else {
         return 0.0;
     };
-    base_budget
+    if !settings.strategies.contains(&kind) {
+        return 0.0;
+    }
+    settings.daily_notional_limit
         * settings
             .learned_strategy_size_multipliers
             .get(kind.as_str())
@@ -403,6 +405,43 @@ fn risk_bounded_order_cap(settings: &Settings, initial_cap: f64) -> f64 {
         .min(settings.max_order_notional * risk_fraction(settings))
 }
 
+/// Bound notional against the risk allowance established before a profile exit
+/// overlay is selected. Fees are included in both the reference allowance and
+/// selected-stop cost, while the caller's notional remains a hard upper bound.
+fn stop_risk_bounded_notional(
+    notional_cap: f64,
+    reference_stop_percent: f64,
+    selected_stop_percent: f64,
+    round_trip_cost_bps: f64,
+) -> f64 {
+    if !notional_cap.is_finite()
+        || notional_cap <= 0.0
+        || !reference_stop_percent.is_finite()
+        || reference_stop_percent <= 0.0
+        || !selected_stop_percent.is_finite()
+        || selected_stop_percent <= 0.0
+        || !round_trip_cost_bps.is_finite()
+        || round_trip_cost_bps < 0.0
+    {
+        return 0.0;
+    }
+
+    let round_trip_cost_percent = round_trip_cost_bps / 100.0;
+    let reference_loss_per_notional = reference_stop_percent + round_trip_cost_percent;
+    let selected_loss_per_notional = selected_stop_percent + round_trip_cost_percent;
+    if !reference_loss_per_notional.is_finite()
+        || !selected_loss_per_notional.is_finite()
+        || selected_loss_per_notional <= 0.0
+    {
+        return 0.0;
+    }
+
+    let allowed_loss = notional_cap * reference_loss_per_notional / 100.0;
+    (allowed_loss * 100.0 / selected_loss_per_notional)
+        .min(notional_cap)
+        .max(0.0)
+}
+
 fn minimum_book_order_for_entry(exploratory: bool, notional: f64) -> f64 {
     if exploratory {
         notional.min(MIN_DEEP_BOOK_ORDER_NOTIONAL)
@@ -447,56 +486,87 @@ fn signal_weighted_strategy_budget(
     category: StrategyCategory,
     now_ms: u64,
 ) -> f64 {
-    let (enabled, pool, configured) = match category {
-        StrategyCategory::Daily => (
-            settings
-                .strategies
-                .iter()
-                .copied()
-                .filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
-                .collect::<Vec<_>>(),
-            settings.daily_strategy_notional_limit,
-            !settings.daily_strategy_budgets.is_empty(),
-        ),
-        StrategyCategory::Intraday => (
-            settings
-                .strategies
-                .iter()
-                .copied()
-                .filter(|kind| kind.is_live_insight() && !kind.is_legacy_composite())
-                .collect::<Vec<_>>(),
-            settings.intraday_notional_limit,
-            !settings.intraday_strategy_budgets.is_empty(),
-        ),
-    };
-    let enabled = enabled
-        .into_iter()
-        .filter(|kind| match category {
-            StrategyCategory::Daily => settings
-                .learned_strategy_size_multipliers
-                .get(kind.as_str())
-                .is_none_or(|multiplier| multiplier.is_finite() && *multiplier > 0.0),
-            StrategyCategory::Intraday => {
+    let _ = category;
+    shared_candidate_allocations(settings, dashboard, now_ms, None)
+        .iter()
+        .filter(|(key, _)| key.0 == strategy.as_str())
+        .map(|(_, allocation)| allocation.effective_allocation)
+        .sum()
+}
+
+fn allocation_horizon(strategy: Strategy) -> &'static str {
+    match strategy_category(Some(strategy.as_str())) {
+        StrategyCategory::Daily => "daily",
+        StrategyCategory::Intraday => "intraday",
+    }
+}
+
+fn signal_candidate_budget(
+    state: &AutoTraderState,
+    settings: &Settings,
+    dashboard: &Dashboard,
+    strategy: Strategy,
+    signal: &Signal,
+    exploratory_authorized: bool,
+    now_ms: u64,
+) -> f64 {
+    let candidates = shared_candidate_allocations(
+        settings,
+        dashboard,
+        now_ms,
+        Some((signal, exploratory_authorized)),
+    );
+    if let Ok(mut snapshot) = state.capital_allocation_snapshot.try_lock() {
+        snapshot.as_of_ms = now_ms;
+        snapshot.pool_limit = settings.daily_notional_limit;
+        snapshot.candidates = candidates.clone();
+    }
+    candidates
+        .get(&(
+            strategy.as_str().to_owned(),
+            signal.symbol.clone(),
+            allocation_horizon(strategy).to_owned(),
+        ))
+        .map(|snapshot| snapshot.effective_allocation)
+        .unwrap_or(0.0)
+}
+
+fn shared_candidate_allocations(
+    settings: &Settings,
+    dashboard: &Dashboard,
+    now_ms: u64,
+    selected_candidate: Option<(&Signal, bool)>,
+) -> BTreeMap<(String, String, String), CapitalAllocationCandidateSnapshot> {
+    const GUARANTEED_SHARE: f64 = 0.5;
+    const MAX_CANDIDATES: usize = 256;
+    let available = (settings.daily_notional_limit - allocated_notional(settings)).max(0.0);
+    if available <= 0.0 {
+        return BTreeMap::new();
+    }
+    let enabled = settings
+        .strategies
+        .iter()
+        .copied()
+        .filter(|kind| !kind.is_legacy_composite() && !kind.is_dated_carry())
+        .filter(|kind| {
+            if kind.is_live_insight() {
                 intraday_strategy_size_multiplier(settings, *kind, now_ms) > 0.0
+            } else {
+                settings
+                    .learned_strategy_size_multipliers
+                    .get(kind.as_str())
+                    .is_none_or(|multiplier| multiplier.is_finite() && *multiplier > 0.0)
             }
         })
         .collect::<Vec<_>>();
-    if configured || enabled.is_empty() || !enabled.contains(&strategy) {
-        return match category {
-            StrategyCategory::Daily => daily_strategy_effective_budget(settings, strategy.as_str()),
-            StrategyCategory::Intraday => {
-                intraday_strategy_effective_budget(settings, strategy.as_str(), now_ms)
-            }
-        };
+    let mut weights = BTreeMap::<(String, String, String), (f64, bool)>::new();
+    let mut signals = dashboard.best.iter().collect::<Vec<_>>();
+    if let Some((selected, _)) = selected_candidate {
+        // Keep the selected clone because it carries the authoritative current
+        // strict/exploratory selection mode; the dashboard copy may be older.
+        signals.push(selected);
     }
-
-    // Recycle the equal opportunity floor of strategies without a fresh
-    // directional candidate. Active candidates split that floor; only positive
-    // confidence/learning weights participate in the variable share.
-    const GUARANTEED_SHARE: f64 = 0.5;
-    let mut active = BTreeMap::<String, ()>::new();
-    let mut weights = BTreeMap::<String, f64>::new();
-    for signal in dashboard.best.iter().filter(|signal| {
+    for signal in signals.into_iter().filter(|signal| {
         signal.strategy_candidate
             && !signal.stale
             && matches!(signal.direction.as_str(), "bullish" | "bearish")
@@ -511,62 +581,105 @@ fn signal_weighted_strategy_budget(
         else {
             continue;
         };
-        active.insert(kind.as_str().to_owned(), ());
-        let Ok(edge_lower_bound) = validated_strategy_entry_edge_at(signal, kind, now_ms) else {
-            continue;
-        };
-        if !edge_lower_bound.is_finite() || edge_lower_bound <= 0.0 {
+        let key = (
+            kind.as_str().to_owned(),
+            signal.symbol.clone(),
+            allocation_horizon(kind).to_owned(),
+        );
+        let edge = validated_strategy_entry_edge_at(signal, kind, now_ms)
+            .ok()
+            .filter(|edge| edge.is_finite() && *edge > 0.0);
+        let selected_exploratory = selected_candidate.is_some_and(|(selected, allowed)| {
+            allowed && selected.symbol == signal.symbol && selected.strategy == signal.strategy
+        });
+        let selected_current = selected_candidate.is_some_and(|(selected, _)| {
+            selected.symbol == signal.symbol && selected.strategy == signal.strategy
+        });
+        let entry_gate_mode = signal
+            .entry_gate
+            .as_ref()
+            .and_then(|gate| gate.get("selection_mode"))
+            .and_then(serde_json::Value::as_str);
+        let strict_eligible = edge.is_some()
+            && ((selected_current && !selected_exploratory) || entry_gate_mode == Some("strict"));
+        let exploratory_eligible =
+            !strict_eligible && (selected_exploratory || entry_gate_mode == Some("exploratory"));
+        if !strict_eligible && !exploratory_eligible {
             continue;
         }
-        let learning = match category {
-            StrategyCategory::Daily => settings
+        let learning = if kind.is_live_insight() {
+            intraday_strategy_size_multiplier(settings, kind, now_ms)
+        } else {
+            settings
                 .learned_strategy_size_multipliers
                 .get(kind.as_str())
                 .copied()
-                .unwrap_or(1.0),
-            StrategyCategory::Intraday => intraday_strategy_size_multiplier(settings, kind, now_ms),
+                .unwrap_or(1.0)
         };
-        let confidence = directional_budget_confidence(signal);
-        let normalized_edge = edge_lower_bound / (1.0 + edge_lower_bound);
-        let bounded_learning = if learning.is_finite() {
-            learning.clamp(0.0, MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER)
+        let weight = edge
+            .filter(|_| strict_eligible)
+            .map(|edge| {
+                edge / (1.0 + edge)
+                    * directional_budget_confidence(signal)
+                    * learning.clamp(0.0, MAX_LEARNED_STRATEGY_SIZE_MULTIPLIER)
+            })
+            .filter(|weight| weight.is_finite() && *weight > 0.0)
+            .unwrap_or(0.0);
+        if weight > 0.0 {
+            weights
+                .entry(key)
+                .and_modify(|existing| existing.0 = existing.0.max(weight))
+                .or_insert((weight, true));
+        } else {
+            weights.entry(key).or_insert((0.0, false));
+        }
+    }
+    let active_count = weights.len().min(MAX_CANDIDATES);
+    if active_count == 0 {
+        return BTreeMap::new();
+    }
+    let mut result = BTreeMap::new();
+    let floor = available * GUARANTEED_SHARE / active_count as f64;
+    let total_weight = weights.values().map(|(weight, _)| *weight).sum::<f64>();
+    let variable_pool = (available - floor * active_count as f64).max(0.0);
+    for (key, (weight, strict_eligible)) in weights.into_iter().take(MAX_CANDIDATES) {
+        let variable = if total_weight.is_finite() && total_weight > 0.0 {
+            variable_pool * weight / total_weight
         } else {
             0.0
         };
-        let weight = normalized_edge * confidence * bounded_learning;
-        if weight.is_finite() && weight > 0.0 {
-            weights
-                .entry(kind.as_str().to_owned())
-                .and_modify(|existing| *existing = (*existing).max(weight))
-                .or_insert(weight);
-        }
+        let committed = allocated_notional_for_candidate(settings, &key.0, &key.1);
+        result.insert(
+            key,
+            CapitalAllocationCandidateSnapshot {
+                effective_allocation: committed + floor + variable,
+                evidence_eligible: Some(strict_eligible),
+                state: if strict_eligible {
+                    "strict".to_owned()
+                } else {
+                    "exploratory".to_owned()
+                },
+                reason: if strict_eligible {
+                    "Validated positive edge; receives evidence-weighted shared-pool allocation"
+                        .to_owned()
+                } else {
+                    "Strict evidence is unavailable; selected under existing exploration eligibility and receives only the bounded exploratory allocation floor"
+                        .to_owned()
+                },
+            },
+        );
     }
-    let active_count = active.len();
-    if active_count == 0 {
-        return 0.0;
-    }
-    let floor = pool * GUARANTEED_SHARE / active_count as f64;
-    let total_weight = weights.values().sum::<f64>();
-    let variable = if total_weight.is_finite() && total_weight > 0.0 {
-        (pool - floor * active_count as f64)
-            * weights.get(strategy.as_str()).copied().unwrap_or(0.0)
-            / total_weight
-    } else {
-        0.0
-    };
-    if active.contains_key(strategy.as_str()) {
-        (floor + variable).max(0.0)
-    } else {
-        0.0
-    }
+    result
 }
 
-fn intraday_strategy_effective_budget(settings: &Settings, strategy: &str, now_ms: u64) -> f64 {
-    let base_budget = intraday_strategy_budget(settings, strategy);
+fn intraday_shared_pool_ceiling(settings: &Settings, strategy: &str, now_ms: u64) -> f64 {
     let Some(kind) = Strategy::from_name(strategy).filter(|kind| kind.is_live_insight()) else {
         return 0.0;
     };
-    base_budget * intraday_strategy_size_multiplier(settings, kind, now_ms)
+    if !settings.strategies.contains(&kind) {
+        return 0.0;
+    }
+    settings.daily_notional_limit * intraday_strategy_size_multiplier(settings, kind, now_ms)
 }
 
 fn signal_strategy_order_size_multiplier(
@@ -613,8 +726,10 @@ fn signal_agreement_size_multiplier(
 }
 
 struct SignalExecutionPlan {
+    exploratory: bool,
     effective_stop_loss_percent: f64,
     effective_take_profit_percent: f64,
+    exit_parameter_provenance: serde_json::Value,
     horizon_take_profit_percent: Option<f64>,
     notional: f64,
     minimum_book_order: f64,
@@ -629,6 +744,232 @@ struct SignalExecutionPlan {
     execution_learning_ms: f64,
     imported_execution_learning: bool,
     exploration_risk_adjustment: ExplorationRiskAdjustment,
+}
+
+fn exit_parameter_source(
+    settings: &Settings,
+    signal: &Signal,
+    strategy_profile: Option<&StrategyParameterProfile>,
+    strategy: Option<Strategy>,
+    parameter_key: &str,
+    validated_policy_supplies_value: bool,
+) -> &'static str {
+    let Some(profile) = strategy_profile else {
+        return "global_fallback";
+    };
+    let Some(parameter) = profile
+        .parameters
+        .iter()
+        .find(|parameter| parameter.key == parameter_key)
+    else {
+        return "global_fallback";
+    };
+    if parameter.configured_value.is_some() {
+        return "configured_profile_override";
+    }
+    if validated_policy_supplies_value {
+        return "validated_exit_policy";
+    }
+    let profile_has_learned_value = strategy.is_some_and(|strategy| {
+        settings
+            .learned_profiles
+            .get(&format!("{}:{}", signal.symbol, strategy.as_str()))
+            .is_some_and(|profile| {
+                profile.learning_samples > 0 && profile.parameters.contains_key(parameter_key)
+            })
+    });
+    if profile_has_learned_value {
+        "learned_strategy_profile"
+    } else {
+        "strategy_default_profile"
+    }
+}
+
+fn exit_parameter_provenance(
+    settings: &Settings,
+    signal: &Signal,
+    strategy_profile: Option<&StrategyParameterProfile>,
+    strategy: Option<Strategy>,
+    active_policy: Option<&strategy::LearnedExitProtectionPolicy>,
+    contextual_stop_percent: Option<f64>,
+    selected_stop_loss_percent: f64,
+    effective_stop_loss_percent: f64,
+    selected_take_profit_percent: f64,
+    effective_take_profit_percent: f64,
+) -> serde_json::Value {
+    let stop_key = StrategyParameterKey::StopLossPercent.as_str();
+    let target_key = StrategyParameterKey::TakeProfitPercent.as_str();
+    let profile_values = strategy_profile
+        .map(|profile| {
+            profile
+                .parameters
+                .iter()
+                .map(|parameter| (parameter.key.clone(), parameter.value))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let selected_parameter_profile_id = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("learning_profile_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let selected_parameter_profile_version = signal
+        .strategy_decision
+        .as_ref()
+        .and_then(|decision| decision.get("learning_profile_version"))
+        .and_then(serde_json::Value::as_u64);
+    let profile_id = selected_parameter_profile_id
+        .clone()
+        .or_else(|| strategy_profile.and_then(|profile| profile.profile_id.clone()))
+        .or_else(|| {
+            strategy.map(|strategy| {
+                strategy::profile_id(&signal.symbol, strategy.as_str(), &profile_values)
+            })
+        });
+    let profile_version = selected_parameter_profile_version
+        .or_else(|| strategy_profile.and_then(|profile| profile.profile_version));
+    let stop_source = if contextual_stop_percent.is_some() {
+        "contextual_stop_overlay"
+    } else {
+        exit_parameter_source(
+            settings,
+            signal,
+            strategy_profile,
+            strategy,
+            stop_key,
+            active_policy.is_some_and(|policy| policy.stop_loss_percent.is_some()),
+        )
+    };
+    let parameter_support = |key: &str| profile_values.contains_key(key);
+    serde_json::json!({
+        "schema_version": 1,
+        "selected_at_ms": current_time_ms(),
+        "profile_id": profile_id,
+        "profile_version": profile_version,
+        "source_profile_id": strategy_profile.and_then(|profile| profile.profile_id.as_deref()),
+        "source_profile_version": strategy_profile.and_then(|profile| profile.profile_version),
+        "selected_parameter_profile_id": selected_parameter_profile_id,
+        "selected_parameter_profile_version": selected_parameter_profile_version,
+        "exit_policy_profile_id": active_policy.and_then(|policy| policy.profile_id.as_deref()),
+        "exit_policy_profile_version": active_policy.and_then(|policy| policy.profile_version),
+        "exit_policy_as_of_ms": active_policy.map(|policy| policy.as_of_ms),
+        "maximum_holding_duration": {
+            "source": if active_policy.is_some_and(|policy| policy.maximum_holding_duration_ms.is_some()) {
+                "validated_exit_policy"
+            } else if profile_values.contains_key(StrategyParameterKey::MaximumHoldDays.as_str()) {
+                "strategy_profile"
+            } else {
+                "strategy_default_or_unavailable"
+            },
+            "selected_days": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::MaximumHoldDays.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "selected_ms": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::MaximumHoldDays.as_str()))
+                .and_then(serde_json::Value::as_f64)
+                .map(|days| (days * 86_400_000.0).ceil() as u64),
+        },
+        "profile_parameters": profile_values,
+        "profile_parameter_support": {
+            "maximum_hold_days": parameter_support(StrategyParameterKey::MaximumHoldDays.as_str()),
+            "minimum_hold_days": parameter_support(StrategyParameterKey::MinimumHoldDays.as_str()),
+            "profit_protection_activation_percent": parameter_support(StrategyParameterKey::ProfitProtectionActivationPercent.as_str()),
+            "profit_protection_giveback_percent": parameter_support(StrategyParameterKey::ProfitProtectionGivebackPercent.as_str()),
+            "profit_protection_minimum_lock_percent": parameter_support(StrategyParameterKey::ProfitProtectionMinimumLockPercent.as_str()),
+            "trailing_activation_percent": parameter_support(StrategyParameterKey::TrailingActivationPercent.as_str()),
+            "trailing_distance_percent": parameter_support(StrategyParameterKey::TrailingDistancePercent.as_str()),
+            "breakeven_activation_percent": parameter_support(StrategyParameterKey::BreakevenActivationPercent.as_str()),
+        },
+        "unsupported_profile_exit_parameters": ["server_side_trailing_barrier_amendment", "server_side_breakeven_barrier"],
+        "volatility_stop_adjustment": {
+            "applied": (effective_stop_loss_percent - selected_stop_loss_percent).abs() > 1e-12,
+            "volatility_1m_percent": signal.components.volatility_1m_percent,
+            "selected_percent": selected_stop_loss_percent,
+            "effective_percent": effective_stop_loss_percent,
+            "source": match (
+                strategy.is_some(),
+                (effective_stop_loss_percent - selected_stop_loss_percent).abs() > 1e-12,
+            ) {
+                (true, true) => "volatility_adjusted_strategy_profile",
+                (true, false) => "strategy_profile_unmodified",
+                (false, true) => "volatility_adjusted_global_fallback",
+                (false, false) => "global_fallback_unmodified",
+            },
+        },
+        "stop_loss": {
+            "source": stop_source,
+            "selected_percent": selected_stop_loss_percent,
+            "effective_percent": effective_stop_loss_percent,
+            "profile_percent": profile_values.get(stop_key),
+            "contextual_stop_percent": contextual_stop_percent,
+            "global_fallback_percent": settings.stop_loss_percent,
+        },
+        "take_profit": {
+            "source": exit_parameter_source(
+                settings, signal, strategy_profile, strategy, target_key,
+                active_policy.is_some_and(|policy| policy.take_profit_percent.is_some()),
+            ),
+            "selected_percent": selected_take_profit_percent,
+            "effective_percent": effective_take_profit_percent,
+            "profile_percent": profile_values.get(target_key),
+            "global_fallback_percent": settings.take_profit_percent,
+            "confidence_or_policy_adjustment_applied":
+                (effective_take_profit_percent - selected_take_profit_percent).abs() > 1e-12,
+        },
+        "trailing_protection": {
+            "source": exit_parameter_source(
+                settings, signal, strategy_profile, strategy,
+                StrategyParameterKey::TrailingActivationPercent.as_str(),
+                active_policy.is_some_and(|policy| policy.trailing_activation_percent.is_some()),
+            ),
+            "activation_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::TrailingActivationPercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "distance_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::TrailingDistancePercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "runtime_action": "AutoTrader_monitor_ioc_exit",
+            "server_side_barrier": "initial_static_stop_remains_armed",
+        },
+        "profit_protection": {
+            "source": exit_parameter_source(
+                settings, signal, strategy_profile, strategy,
+                StrategyParameterKey::ProfitProtectionActivationPercent.as_str(),
+                active_policy.is_some(),
+            ),
+            "activation_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::ProfitProtectionActivationPercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "giveback_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::ProfitProtectionGivebackPercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "minimum_lock_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::ProfitProtectionMinimumLockPercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+        },
+        "breakeven_protection": {
+            "source": exit_parameter_source(
+                settings, signal, strategy_profile, strategy,
+                StrategyParameterKey::BreakevenActivationPercent.as_str(),
+                active_policy.is_some_and(|policy| policy.breakeven_activation_percent.is_some()),
+            ),
+            "activation_percent": signal.strategy_decision.as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(|parameters| parameters.get(StrategyParameterKey::BreakevenActivationPercent.as_str()))
+                .and_then(serde_json::Value::as_f64),
+            "runtime_action": "AutoTrader_monitor_ioc_exit_at_net_flat",
+            "server_side_barrier": "initial_static_stop_remains_armed",
+        },
+        "risk_appetite_at_selection": settings.risk_appetite,
+    })
 }
 
 fn execution_learning_decision(
@@ -732,16 +1073,6 @@ async fn prepare_signal_execution_plan(
     let strategy_profile = strategy
         .map(|strategy| learned_strategy_parameter_profile(&settings, &signal.symbol, strategy));
     let is_portfolio_rebalance = is_portfolio_rebalance_signal(signal, strategy);
-    if let Some(kind) = strategy.filter(|kind| !kind.is_live_insight() && !kind.is_dated_carry()) {
-        if !is_portfolio_rebalance
-            && daily_strategy_effective_budget(&settings, kind.as_str()) <= 0.0
-        {
-            return Err(format!(
-                "Daily strategy has no allocated notional budget: {}",
-                kind.as_str()
-            ));
-        }
-    }
     // An explicitly selected exploratory entry is bounded by the exploration
     // notional cap and its own evidence/context checks below. Do not let a
     // learned-pause walk-forward freshness check veto that capped probe after
@@ -784,9 +1115,36 @@ async fn prepare_signal_execution_plan(
     // defaults, with Learning-owned post-exit feedback applied below.
     let configured_stop = baseline_stop;
     let configured_target = baseline_target;
-    let learned_exit_policy = strategy.is_some_and(|kind| {
-        active_exit_protection_policy(&settings, &signal.symbol, kind.as_str()).is_some()
+    let active_policy = strategy.and_then(|kind| {
+        let selected_profile_id = strategy_profile
+            .as_ref()
+            .and_then(|profile| profile.profile_id.as_deref())
+            .or_else(|| {
+                signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("learning_profile_id"))
+                    .and_then(serde_json::Value::as_str)
+            });
+        let selected_profile_version = strategy_profile
+            .as_ref()
+            .and_then(|profile| profile.profile_version)
+            .or_else(|| {
+                signal
+                    .strategy_decision
+                    .as_ref()
+                    .and_then(|decision| decision.get("learning_profile_version"))
+                    .and_then(serde_json::Value::as_u64)
+            });
+        active_exit_protection_policy(
+            &settings,
+            &signal.symbol,
+            kind.as_str(),
+            selected_profile_id,
+            selected_profile_version,
+        )
     });
+    let learned_exit_policy = active_policy.is_some();
     let contextual_stop = (!explicit_stop && !learned_exit_policy)
         .then(|| {
             let kind = strategy?;
@@ -805,10 +1163,10 @@ async fn prepare_signal_execution_plan(
                 })
         })
         .flatten();
-    let learned_or_configured_stop = contextual_stop.unwrap_or(configured_stop);
+    let selected_stop_loss_percent = contextual_stop.unwrap_or(configured_stop);
     let effective_stop_loss_percent = effective_entry_stop(
         strategy,
-        learned_or_configured_stop,
+        selected_stop_loss_percent,
         signal.components.volatility_1m_percent,
     );
     let baseline_type = if force_ioc_fallback {
@@ -893,9 +1251,7 @@ async fn prepare_signal_execution_plan(
     } else {
         1.0
     };
-    let category = strategy_category(signal.strategy.as_deref());
     let total_allocated = allocated_notional(&settings);
-    let category_allocated = allocated_notional_for_category(&settings, Some(category));
     let strategy_remaining_budget = if rebalance_delta.is_some() {
         f64::INFINITY
     } else {
@@ -903,26 +1259,20 @@ async fn prepare_signal_execution_plan(
             .strategy
             .as_deref()
             .and_then(Strategy::from_name)
-            .map(|kind| match strategy_category(Some(kind.as_str())) {
-                StrategyCategory::Daily if !kind.is_live_insight() && !kind.is_dated_carry() => {
-                    signal_weighted_strategy_budget(
+            .map(|kind| {
+                if kind.is_dated_carry() {
+                    f64::INFINITY
+                } else {
+                    signal_candidate_budget(
+                        state,
                         &settings,
                         dashboard,
                         kind,
-                        StrategyCategory::Daily,
+                        &signal,
+                        exploratory,
                         now_ms,
-                    ) - allocated_notional_for_strategy(&settings, kind.as_str())
+                    ) - allocated_notional_for_candidate(&settings, kind.as_str(), &signal.symbol)
                 }
-                StrategyCategory::Intraday if kind.is_live_insight() => {
-                    signal_weighted_strategy_budget(
-                        &settings,
-                        dashboard,
-                        kind,
-                        StrategyCategory::Intraday,
-                        now_ms,
-                    ) - allocated_notional_for_strategy(&settings, kind.as_str())
-                }
-                _ => f64::INFINITY,
             })
             .unwrap_or(f64::INFINITY)
     };
@@ -930,15 +1280,26 @@ async fn prepare_signal_execution_plan(
         f64::INFINITY
     } else {
         (settings.daily_notional_limit - total_allocated)
-            .min(category_notional_limit(&settings, category) - category_allocated)
             .min(strategy_remaining_budget)
             .max(0.0)
     };
     let mut notional = risk_order_cap.min(remaining_budget / stop_headroom_multiplier);
-    // Size against the unlearned stop so a wider validated stop does not
-    // silently increase the dollar risk of the position.
+    // The pre-overlay stop establishes the per-entry monetary-risk allowance.
+    // A selected profile can widen its stop without increasing that allowance;
+    // a tighter stop never raises notional above the existing capital/risk cap.
     if strategy.is_some_and(|kind| kind.uses_protective_stops()) {
-        notional *= volatility_size_scale(baseline_stop, effective_stop_loss_percent);
+        let round_trip_cost_bps = 2.0 * configured_taker_fee_rate() * 10_000.0
+            + signal
+                .components
+                .aggressor_cost_bps
+                .filter(|cost| cost.is_finite() && *cost > 0.0)
+                .unwrap_or(0.0);
+        notional = stop_risk_bounded_notional(
+            notional,
+            counterfactual_stop_loss_percent,
+            effective_stop_loss_percent,
+            round_trip_cost_bps,
+        );
     }
     if notional <= 0.0 {
         return Err("Strategy category or total notional capacity is fully allocated".into());
@@ -987,6 +1348,18 @@ async fn prepare_signal_execution_plan(
             effective_stop_loss_percent,
         )
     };
+    let exit_parameter_provenance = exit_parameter_provenance(
+        &settings,
+        signal,
+        strategy_profile.as_ref(),
+        strategy,
+        active_policy,
+        contextual_stop,
+        selected_stop_loss_percent,
+        effective_stop_loss_percent,
+        configured_target,
+        effective_take_profit_percent,
+    );
     let context = market_context(&signal);
     let execution_learning_started = Instant::now();
     let execution_learning = execution_learning_decision(
@@ -1075,8 +1448,10 @@ async fn prepare_signal_execution_plan(
         "sell"
     };
     Ok(SignalExecutionPlan {
+        exploratory,
         effective_stop_loss_percent,
         effective_take_profit_percent,
+        exit_parameter_provenance,
         horizon_take_profit_percent,
         notional,
         minimum_book_order,
@@ -1253,6 +1628,57 @@ mod signal_execution_budget_tests {
         assert_eq!(minimum_book_order_for_entry(false, small_probe), 10.0);
     }
 
+    #[test]
+    fn selected_stop_preserves_pre_overlay_monetary_risk_and_existing_caps() {
+        let base_notional = 400.0;
+        let reference_stop = 0.50;
+        let round_trip_fee_and_cost_bps = 20.0;
+        let reference_risk = base_notional * (reference_stop + 0.20) / 100.0;
+
+        let wider_stop_notional = stop_risk_bounded_notional(
+            base_notional,
+            reference_stop,
+            1.00,
+            round_trip_fee_and_cost_bps,
+        );
+        assert!((wider_stop_notional - 400.0 * 0.70 / 1.20).abs() < 1e-9);
+        assert!((wider_stop_notional * (1.00 + 0.20) / 100.0 - reference_risk).abs() < 1e-9);
+
+        // A narrower profile may reduce risk, but cannot increase the existing
+        // order/capital cap to spend the unused allowance.
+        let tighter_notional = stop_risk_bounded_notional(
+            base_notional,
+            reference_stop,
+            0.25,
+            round_trip_fee_and_cost_bps,
+        );
+        assert_eq!(tighter_notional, base_notional);
+        assert!(tighter_notional * (0.25 + 0.20) / 100.0 < reference_risk);
+
+        // The actual available-capital reservation remains a separate hard
+        // cap before stop sizing, and the helper cannot exceed it.
+        let available_capital = 75.0;
+        let capital_capped = stop_risk_bounded_notional(
+            base_notional.min(available_capital),
+            reference_stop,
+            1.00,
+            round_trip_fee_and_cost_bps,
+        );
+        assert!(capital_capped <= available_capital);
+        assert!(capital_capped < available_capital);
+
+        assert_eq!(
+            stop_risk_bounded_notional(base_notional, reference_stop, 0.0, 20.0),
+            0.0,
+            "a missing or invalid selected protective stop must fail closed"
+        );
+        assert_eq!(
+            stop_risk_bounded_notional(base_notional, reference_stop, 1.0, f64::NAN),
+            0.0,
+            "invalid cost evidence must fail closed"
+        );
+    }
+
     fn signal(strategy: &str, strength: f64, timestamp: u64) -> Signal {
         Signal {
             range_location: None,
@@ -1270,7 +1696,7 @@ mod signal_execution_budget_tests {
             market_regime: None,
             market_state: None,
             news_attribution: None,
-            entry_gate: None,
+            entry_gate: Some(serde_json::json!({"selection_mode":"exploratory"})),
         }
     }
 
@@ -1289,6 +1715,7 @@ mod signal_execution_budget_tests {
             }
         });
         if let Some(lower_bound) = lower_bound_percent {
+            signal.entry_gate = Some(serde_json::json!({"selection_mode":"strict"}));
             decision["strategy_walk_forward"] = serde_json::json!({
                 "sampleCount": 3,
                 "effectiveSampleSize": 3.0,
@@ -1639,7 +2066,10 @@ mod signal_execution_budget_tests {
                 now_ms + 1,
             ),
         ];
-        for candidate in unproven {
+        for mut candidate in unproven {
+            // These candidates have no validated strict edge. They receive
+            // only the exploration floor when explicitly selected as probes.
+            candidate.entry_gate = Some(serde_json::json!({"selection_mode":"exploratory"}));
             let candidates = dashboard(vec![proven.clone(), candidate]);
             let first_budget = signal_weighted_strategy_budget(
                 &settings,
@@ -1780,12 +2210,16 @@ mod signal_execution_budget_tests {
     }
 
     #[test]
-    fn configured_budgets_bypass_signal_weighting_and_order_multipliers_validate_contracts() {
+    fn legacy_budget_maps_do_not_override_the_shared_candidate_split() {
         let mut settings = Settings::default();
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
         settings
             .daily_strategy_budgets
-            .insert("donchian-20-btc200".into(), 200.0);
+            .insert("donchian-20-btc200".into(), 0.0);
+        settings
+            .daily_strategy_budgets
+            .insert("donchian-55-btc200".into(), 900.0);
+        settings.daily_strategy_notional_limit = 0.0;
         let signals = dashboard(vec![signal("donchian-55-btc200", 1.0, 100_000)]);
         assert_eq!(
             signal_weighted_strategy_budget(
@@ -1795,14 +2229,11 @@ mod signal_execution_budget_tests {
                 StrategyCategory::Daily,
                 100_000
             ),
-            200.0
-        );
-        assert_eq!(
-            daily_strategy_effective_budget(&settings, "live-momentum"),
             0.0
         );
+        assert_eq!(daily_shared_pool_ceiling(&settings, "live-momentum"), 0.0);
         assert_eq!(
-            intraday_strategy_effective_budget(&settings, "donchian-20-btc200", 0),
+            intraday_shared_pool_ceiling(&settings, "donchian-20-btc200", 0),
             0.0
         );
 
@@ -1845,6 +2276,104 @@ mod signal_execution_budget_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_allocations_do_not_partition_global_pool_across_symbols_and_horizons() {
+        let now_ms = 100_000;
+        let daily_a = Strategy::Donchian20Btc200;
+        let daily_b = Strategy::Donchian55Btc200;
+        let intraday = Strategy::LiveMomentum;
+        let mut settings = Settings::default();
+        settings.strategies = vec![daily_a, daily_b, intraday];
+        settings.daily_notional_limit = 600.0;
+        settings.daily_strategy_notional_limit = 0.0;
+        settings.intraday_notional_limit = 0.0;
+        let mut first = signal_with_edge(
+            daily_a.as_str(),
+            1.0,
+            now_ms,
+            Some(serde_json::json!(0.5)),
+            now_ms - 1_000,
+        );
+        first.entry_gate = Some(serde_json::json!({"selection_mode":"strict"}));
+        let mut second = signal(daily_b.as_str(), 0.5, now_ms);
+        second.symbol = "BTC-USDT".to_owned();
+        let mut third = signal(intraday.as_str(), 0.5, now_ms);
+        third.symbol = "SOL-USDT".to_owned();
+        let dashboard = dashboard(vec![first, second, third]);
+        let baseline = shared_candidate_allocations(&settings, &dashboard, now_ms, None);
+        let baseline_total = baseline
+            .values()
+            .map(|allocation| allocation.effective_allocation)
+            .sum::<f64>();
+        assert_eq!(baseline.len(), 3);
+        assert!((baseline_total - 600.0).abs() < 1e-9);
+        assert!(baseline.contains_key(&(
+            daily_a.as_str().to_owned(),
+            "ETH-USDT".to_owned(),
+            "daily".to_owned()
+        )));
+        assert!(baseline.contains_key(&(
+            intraday.as_str().to_owned(),
+            "SOL-USDT".to_owned(),
+            "intraday".to_owned()
+        )));
+
+        settings
+            .daily_strategy_budgets
+            .insert(daily_a.as_str().to_owned(), 0.0);
+        settings
+            .daily_strategy_budgets
+            .insert(daily_b.as_str().to_owned(), 900.0);
+        settings
+            .intraday_strategy_budgets
+            .insert(intraday.as_str().to_owned(), 0.0);
+        settings.daily_strategy_notional_limit = 1.0;
+        settings.intraday_notional_limit = 1.0;
+        let with_legacy = shared_candidate_allocations(&settings, &dashboard, now_ms, None);
+        assert_eq!(
+            with_legacy
+                .values()
+                .map(|allocation| allocation.effective_allocation)
+                .sum::<f64>(),
+            baseline_total
+        );
+        assert!(
+            with_legacy
+                .values()
+                .all(|allocation| allocation.effective_allocation > 0.0)
+        );
+    }
+
+    #[test]
+    fn strict_candidate_without_validated_edge_requires_explicit_exploration_authorization() {
+        let now_ms = 100_000;
+        let strategy = Strategy::Donchian20Btc200;
+        let mut settings = Settings::default();
+        settings.strategies = vec![strategy];
+        settings.daily_notional_limit = 500.0;
+        let mut candidate = signal(strategy.as_str(), 0.8, now_ms);
+        candidate.entry_gate = Some(serde_json::json!({"selection_mode":"strict"}));
+        let dashboard = dashboard(vec![candidate.clone()]);
+        assert!(shared_candidate_allocations(&settings, &dashboard, now_ms, None).is_empty());
+        assert!(
+            shared_candidate_allocations(&settings, &dashboard, now_ms, Some((&candidate, false)),)
+                .is_empty()
+        );
+
+        let authorized =
+            shared_candidate_allocations(&settings, &dashboard, now_ms, Some((&candidate, true)));
+        let allocation = authorized
+            .get(&(
+                strategy.as_str().to_owned(),
+                candidate.symbol.clone(),
+                "daily".to_owned(),
+            ))
+            .expect("explicitly exploratory selection receives a bounded pool floor");
+        assert_eq!(allocation.evidence_eligible, Some(false));
+        assert_eq!(allocation.state, "exploratory");
+        assert_eq!(allocation.effective_allocation, 250.0);
     }
 
     #[test]

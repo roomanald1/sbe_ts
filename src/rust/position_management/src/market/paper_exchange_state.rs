@@ -192,6 +192,12 @@ struct Ledger {
     /// rematching after a timeout or restart while limiting ledger growth.
     #[serde(default)]
     no_fill_order_responses: Vec<NoFillOrderResponse>,
+    /// Bounded terminal passive-order records retain the exact observations
+    /// used by the matcher after active reservations leave `orders`.
+    #[serde(default)]
+    execution_path_history: Vec<ExecutionPathTerminalRecord>,
+    #[serde(default)]
+    execution_path_history_truncated: bool,
 }
 
 fn allocate_fill_id(ledger: &mut Ledger, timestamp_ms: u64) -> String {

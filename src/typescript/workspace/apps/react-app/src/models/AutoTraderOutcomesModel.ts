@@ -19,10 +19,221 @@ import { paperExchangeFetch } from '../paper_exchange_api';
 import { autoTraderRpc } from '../auto_trader_rsocket';
 
 type LedgerLifecycleIdentity = {
+  schema_version?: number | null;
   opportunity_id?: string | null;
   episode_id?: string | null;
   trade_id?: string | null;
+  profile_id?: string | null;
+  profile_hash?: string | null;
+  profile_version?: number | null;
+  execution_mode?: string | null;
+  entry_policy?: string | null;
+  source?: string | null;
 };
+type LedgerLifecycleProvenance = {
+  opportunityId?: string | null;
+  episodeId?: string | null;
+  tradeId?: string | null;
+  profileId?: string | null;
+  profileHash?: string | null;
+  profileVersion?: number | null;
+  executionMode?: string | null;
+  entryPolicy?: string | null;
+  source?: string | null;
+};
+
+type ExitParameterSelection = {
+  source?: string | null;
+  selected_percent?: number | null;
+  profile_percent?: number | null;
+  global_fallback_percent?: number | null;
+};
+
+type RawInitialRiskReference = {
+  schema_version?: number;
+  quote_currency?: string | null;
+  stop_loss_percent?: number | null;
+  quote_amount?: number | null;
+  fill_ids?: string[];
+  status?: string | null;
+};
+
+type RawPricePathEvidence = {
+  initial_risk_reference?: RawInitialRiskReference | null;
+  initial_risk_complete?: boolean;
+  initial_risk_evidence_status?: string | null;
+  complete?: boolean;
+  gross_executable_mfe_percent?: number | null;
+  gross_executable_mae_percent?: number | null;
+  retained_sample_count?: number | null;
+  total_sample_count?: number | null;
+  source_fresh_sample_count?: number | null;
+  missing_coverage?: string[];
+};
+
+export type ExitParameterProvenance = {
+  schema_version?: number;
+  selected_at_ms?: number;
+  profile_id?: string | null;
+  profile_version?: number | null;
+  exit_policy_as_of_ms?: number | null;
+  risk_appetite_at_selection?: number | null;
+  stop_loss?: ExitParameterSelection | null;
+  take_profit?: ExitParameterSelection | null;
+  maximum_holding_duration?: {
+    source?: string | null;
+    selected_ms?: number | null;
+    selected_days?: number | null;
+  } | null;
+  trailing_protection?: {
+    source?: string | null;
+    activation_percent?: number | null;
+    distance_percent?: number | null;
+  } | null;
+  breakeven_protection?: {
+    source?: string | null;
+    activation_percent?: number | null;
+  } | null;
+  profit_protection?: {
+    source?: string | null;
+    activation_percent?: number | null;
+    giveback_percent?: number | null;
+    minimum_lock_percent?: number | null;
+  } | null;
+  protection_adjustments?: ExitProtectionAdjustment[];
+  protection_adjustments_dropped?: number;
+};
+
+export type ExitProtectionAdjustment = {
+  reason?: string | null;
+  previous_trigger_price?: number | null;
+  trigger_price?: number | null;
+  policy_source?: string | null;
+  updated_at_ms?: number | null;
+  request_id?: string | null;
+  barrier_id?: string | null;
+};
+
+export type PmTriggerAdjustment = {
+  reason?: string | null;
+  expected_trigger_price?: number | null;
+  new_trigger_price?: number | null;
+  policy_source?: string | null;
+  adjusted_at_ms?: number | null;
+  request_id?: string | null;
+  barrier_id?: string | null;
+  profile_id?: string | null;
+  profile_version?: number | null;
+};
+
+export type PmProtectiveBarrier = {
+  id?: string | null;
+  status?: string | null;
+  trigger_price?: number | null;
+  profile_id?: string | null;
+  profile_version?: number | null;
+  trigger_adjustments?: PmTriggerAdjustment[];
+};
+
+export type InitialRiskEvidence = {
+  eligibilityStatus: string;
+  referenceStatus?: string;
+  eligibleForRMultiple: boolean;
+  quoteCurrency?: string;
+  quoteAmount?: number;
+  stopLossPercent?: number;
+  fillIdCount?: number;
+  source?: string;
+};
+
+export type ExecutablePricePathEvidence = {
+  complete?: boolean;
+  grossExecutableMfePercent?: number;
+  grossExecutableMaePercent?: number;
+  retainedSampleCount?: number;
+  totalSampleCount?: number;
+  freshSampleCount?: number;
+  missingCoverage?: string[];
+};
+
+export function projectInitialRiskEvidence(
+  reference: RawInitialRiskReference | null | undefined,
+  eligibilityStatus: string | null | undefined,
+  source = 'activity.initial_risk_reference',
+): InitialRiskEvidence {
+  const fillIdCount = Array.isArray(reference?.fill_ids)
+    ? reference.fill_ids.filter(
+        (fillId) => typeof fillId === 'string' && fillId.length > 0,
+      ).length
+    : 0;
+  const quoteAmount = reference?.quote_amount;
+  const quoteCurrency = reference?.quote_currency?.trim();
+  const stopLossPercent = reference?.stop_loss_percent;
+  const eligibleForRMultiple =
+    eligibilityStatus === 'eligible_for_r_multiple' &&
+    reference?.schema_version === 1 &&
+    reference.status === 'complete' &&
+    typeof quoteAmount === 'number' &&
+    Number.isFinite(quoteAmount) &&
+    quoteAmount > 0 &&
+    Boolean(quoteCurrency) &&
+    fillIdCount > 0;
+  return {
+    eligibilityStatus: eligibilityStatus ?? 'unavailable',
+    referenceStatus: reference?.status ?? undefined,
+    eligibleForRMultiple,
+    ...(eligibleForRMultiple
+      ? {
+          quoteCurrency,
+          quoteAmount,
+          ...(typeof stopLossPercent === 'number' &&
+          Number.isFinite(stopLossPercent)
+            ? { stopLossPercent }
+            : {}),
+          fillIdCount,
+        }
+      : {}),
+    source: reference ? source : undefined,
+  };
+}
+
+export function projectOpenPositionLifecycleIdentity<
+  T extends AutoTraderOutcome,
+>(row: T, lifecycle: LedgerLifecycleIdentity | null | undefined): T {
+  if (!lifecycle) return row;
+  return {
+    ...row,
+    ...(typeof lifecycle.opportunity_id === 'string' && lifecycle.opportunity_id
+      ? { opportunityId: lifecycle.opportunity_id }
+      : {}),
+    ...(typeof lifecycle.episode_id === 'string' && lifecycle.episode_id
+      ? { episodeId: lifecycle.episode_id }
+      : {}),
+    ...(typeof lifecycle.trade_id === 'string' && lifecycle.trade_id
+      ? { tradeId: lifecycle.trade_id }
+      : {}),
+    ...(typeof lifecycle.profile_id === 'string' && lifecycle.profile_id
+      ? { entryProfileId: lifecycle.profile_id }
+      : {}),
+    ...(typeof lifecycle.profile_hash === 'string' && lifecycle.profile_hash
+      ? { entryProfileHash: lifecycle.profile_hash }
+      : {}),
+    ...(typeof lifecycle.profile_version === 'number' &&
+    Number.isSafeInteger(lifecycle.profile_version) &&
+    lifecycle.profile_version >= 0
+      ? { entryProfileVersion: lifecycle.profile_version }
+      : {}),
+    ...(typeof lifecycle.execution_mode === 'string' && lifecycle.execution_mode
+      ? { executionMode: lifecycle.execution_mode }
+      : {}),
+    ...(typeof lifecycle.entry_policy === 'string' && lifecycle.entry_policy
+      ? { entryPolicy: lifecycle.entry_policy }
+      : {}),
+    ...(typeof lifecycle.source === 'string' && lifecycle.source
+      ? { lifecycleSource: lifecycle.source }
+      : {}),
+  };
+}
 
 export type AutoTraderOutcome = {
   rowId: string;
@@ -49,15 +260,42 @@ export type AutoTraderOutcome = {
   ledgerOrderType?: string;
   manuallyClosed?: boolean;
   ledgerTrade?: PositionTrade & { lifecycle?: LedgerLifecycleIdentity | null };
+  provenance?: LedgerLifecycleProvenance | null;
   opportunityId?: string;
   episodeId?: string;
   tradeId?: string;
+  entryProfileId?: string;
+  entryProfileHash?: string;
+  entryProfileVersion?: number;
+  exitProfileId?: string;
+  exitProfileVersion?: number;
+  exitPolicyAsOfMs?: number;
+  executionMode?: string;
+  entryPolicy?: string;
+  lifecycleSource?: string;
+  exitParameterProvenance?: ExitParameterProvenance;
+  currentPmBarrier?: PmProtectiveBarrier;
+  selectedStopLossPercent?: number;
+  selectedTakeProfitPercent?: number;
+  selectedStopLossSource?: string;
+  selectedTakeProfitSource?: string;
+  selectedStopLossEvidenceSource?: string;
+  selectedTakeProfitEvidenceSource?: string;
+  fallbackStopLossPercent?: number;
+  fallbackTakeProfitPercent?: number;
+  currentEffectiveStopLossPercent?: number;
+  currentEffectiveTakeProfitPercent?: number;
+  currentThresholdCompatibility?: boolean;
+  initialRiskEvidence?: InitialRiskEvidence;
+  executablePricePathEvidence?: ExecutablePricePathEvidence;
+  marketRegime?: string;
   entryNotionalUsd?: number;
   feePercent?: number;
   pnlQuoteCurrency: string;
   quoteUsdRate?: number;
   strategy: string;
   direction: string;
+  exitControlMode?: string;
   signalDirection?: string;
   strength: number | null;
   stopLossPercent?: number;
@@ -102,20 +340,75 @@ export type AutoTraderOutcome = {
 export function projectLedgerLifecycleIdentity<T extends AutoTraderOutcome>(
   row: T,
 ): T {
-  if (row.status !== 'Closed' || !row.rowId.startsWith('ledger-trade:'))
-    return row;
+  if (row.status !== 'Closed') return row;
   const lifecycle = row.ledgerTrade?.lifecycle;
-  if (!lifecycle) return row;
+  const provenance = row.provenance;
+  if (!lifecycle && !provenance) return row;
+  if (
+    !row.rowId.startsWith('ledger-trade:') &&
+    !row.rowId.startsWith('ledger-summary:')
+  )
+    return row;
   return {
     ...row,
-    ...(typeof lifecycle.opportunity_id === 'string' && lifecycle.opportunity_id
-      ? { opportunityId: lifecycle.opportunity_id }
+    ...(typeof (lifecycle?.opportunity_id ?? provenance?.opportunityId) ===
+      'string' &&
+    (lifecycle?.opportunity_id ?? provenance?.opportunityId)
+      ? {
+          opportunityId:
+            lifecycle?.opportunity_id ?? provenance?.opportunityId!,
+        }
       : {}),
-    ...(typeof lifecycle.episode_id === 'string' && lifecycle.episode_id
-      ? { episodeId: lifecycle.episode_id }
+    ...(typeof (lifecycle?.episode_id ?? provenance?.episodeId) === 'string' &&
+    (lifecycle?.episode_id ?? provenance?.episodeId)
+      ? { episodeId: lifecycle?.episode_id ?? provenance?.episodeId! }
       : {}),
-    ...(typeof lifecycle.trade_id === 'string' && lifecycle.trade_id
-      ? { tradeId: lifecycle.trade_id }
+    ...(typeof (lifecycle?.trade_id ?? provenance?.tradeId) === 'string' &&
+    (lifecycle?.trade_id ?? provenance?.tradeId)
+      ? { tradeId: lifecycle?.trade_id ?? provenance?.tradeId! }
+      : {}),
+    ...(typeof (lifecycle?.profile_id ?? provenance?.profileId) === 'string' &&
+    (lifecycle?.profile_id ?? provenance?.profileId)
+      ? {
+          entryProfileId: lifecycle?.profile_id ?? provenance?.profileId!,
+        }
+      : {}),
+    ...(typeof (lifecycle?.profile_hash ?? provenance?.profileHash) ===
+      'string' &&
+    (lifecycle?.profile_hash ?? provenance?.profileHash)
+      ? {
+          entryProfileHash: lifecycle?.profile_hash ?? provenance?.profileHash!,
+        }
+      : {}),
+    ...(Number.isSafeInteger(
+      lifecycle?.profile_version ?? provenance?.profileVersion,
+    ) && (lifecycle?.profile_version ?? provenance?.profileVersion)! >= 0
+      ? {
+          entryProfileVersion:
+            lifecycle?.profile_version ?? provenance?.profileVersion!,
+        }
+      : {}),
+    ...(typeof (lifecycle?.execution_mode ?? provenance?.executionMode) ===
+      'string' &&
+    (lifecycle?.execution_mode ?? provenance?.executionMode)
+      ? {
+          executionMode:
+            lifecycle?.execution_mode ?? provenance?.executionMode!,
+        }
+      : {}),
+    ...(typeof (lifecycle?.entry_policy ?? provenance?.entryPolicy) ===
+      'string' &&
+    (lifecycle?.entry_policy ?? provenance?.entryPolicy)
+      ? { entryPolicy: lifecycle?.entry_policy ?? provenance?.entryPolicy! }
+      : {}),
+    ...(typeof (lifecycle?.source ?? provenance?.source) === 'string' &&
+    (lifecycle?.source ?? provenance?.source)
+      ? { lifecycleSource: lifecycle?.source ?? provenance?.source! }
+      : {}),
+    ...(row.source === 'unknown' &&
+    (provenance?.entryPolicy === 'strict' ||
+      provenance?.entryPolicy === 'exploratory')
+      ? { source: provenance.entryPolicy }
       : {}),
   };
 }
@@ -204,10 +497,14 @@ type AuditRecord = {
   side?: string;
   direction?: string;
   strategy?: string;
+  market_regime?: string;
   exit_order_type?: string;
   reason?: string;
   effective_stop_loss_percent?: number;
   effective_take_profit_percent?: number;
+  initial_risk_evidence_status?: string | null;
+  price_path_evidence?: RawPricePathEvidence;
+  pre_exit_price_path_evidence?: RawPricePathEvidence;
   net_return_percent?: number;
   exit_rule_trace?: {
     reason?: string;
@@ -250,7 +547,6 @@ type AuditRecord = {
     weighted_net_return_percent?: number | null;
     regime_scoped?: boolean;
   };
-  market_regime?: string;
   strength?: number;
   score?: number;
   scout?: boolean;
@@ -283,6 +579,46 @@ function explorationRiskFromAudit(
     direction: entry.direction,
     marketRegime: entry.market_regime,
   };
+}
+
+function initialRiskFromAudit(audit?: AuditRecord): InitialRiskEvidence {
+  const pathEvidence =
+    audit?.price_path_evidence ?? audit?.pre_exit_price_path_evidence;
+  return projectInitialRiskEvidence(
+    pathEvidence?.initial_risk_reference,
+    audit?.initial_risk_evidence_status ??
+      pathEvidence?.initial_risk_evidence_status,
+    'exit_audit.price_path_evidence.initial_risk_reference',
+  );
+}
+
+function executablePathFromAudit(
+  audit?: AuditRecord,
+): ExecutablePricePathEvidence | undefined {
+  const evidence =
+    audit?.price_path_evidence ?? audit?.pre_exit_price_path_evidence;
+  if (!evidence) return undefined;
+  return {
+    complete: evidence.complete,
+    grossExecutableMfePercent: finiteAuditNumber(
+      evidence.gross_executable_mfe_percent,
+    ),
+    grossExecutableMaePercent: finiteAuditNumber(
+      evidence.gross_executable_mae_percent,
+    ),
+    retainedSampleCount: finiteAuditNumber(evidence.retained_sample_count),
+    totalSampleCount: finiteAuditNumber(evidence.total_sample_count),
+    freshSampleCount: finiteAuditNumber(evidence.source_fresh_sample_count),
+    missingCoverage: evidence.missing_coverage?.filter(
+      (reason): reason is string => typeof reason === 'string',
+    ),
+  };
+}
+
+function finiteAuditNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 type StrategyGateDecision = {
   strategy?: string;
@@ -610,6 +946,7 @@ type OpenStrategyPosition = {
   symbol: string;
   strategy: string;
   decision_id?: string | null;
+  lifecycle?: LedgerLifecycleIdentity | null;
   quantity: number;
   average_entry_price: number;
   entry_fees: number;
@@ -621,8 +958,89 @@ type OpenStrategyPosition = {
   horizon_take_profit_percent?: number | null;
   stop_loss_active?: boolean;
   take_profit_active?: boolean;
+  exit_control_mode?: string | null;
+  selected_stop_loss_percent?: number | null;
+  selected_take_profit_percent?: number | null;
+  stop_loss_source?: string | null;
+  take_profit_source?: string | null;
+  fallback_stop_loss_percent?: number | null;
+  fallback_take_profit_percent?: number | null;
+  exit_profile_id?: string | null;
+  exit_profile_version?: number | null;
+  exit_policy_as_of_ms?: number | null;
+  effective_stop_loss_percent?: number | null;
+  effective_take_profit_percent?: number | null;
+  exit_parameter_provenance?: ExitParameterProvenance | null;
+  protective_barrier?: PmProtectiveBarrier | null;
+  initial_risk_reference?: RawInitialRiskReference | null;
+  initial_risk_evidence_status?: string | null;
   carry_details?: DatedCarryPosition;
 };
+
+export function projectSelectedExitParameters(
+  position: Pick<
+    OpenStrategyPosition,
+    | 'selected_stop_loss_percent'
+    | 'selected_take_profit_percent'
+    | 'stop_loss_source'
+    | 'take_profit_source'
+    | 'exit_parameter_provenance'
+  >,
+  entryAudit?: Pick<
+    AuditRecord,
+    'effective_stop_loss_percent' | 'effective_take_profit_percent'
+  >,
+): Pick<
+  AutoTraderOutcome,
+  | 'selectedStopLossPercent'
+  | 'selectedTakeProfitPercent'
+  | 'selectedStopLossSource'
+  | 'selectedTakeProfitSource'
+  | 'selectedStopLossEvidenceSource'
+  | 'selectedTakeProfitEvidenceSource'
+> {
+  const stop = position.selected_stop_loss_percent;
+  const target = position.selected_take_profit_percent;
+  const entryStop = entryAudit?.effective_stop_loss_percent;
+  const entryTarget = entryAudit?.effective_take_profit_percent;
+  const selectedStop =
+    typeof stop === 'number' && Number.isFinite(stop)
+      ? stop
+      : typeof entryStop === 'number' && Number.isFinite(entryStop)
+        ? entryStop
+        : undefined;
+  const selectedTarget =
+    typeof target === 'number' && Number.isFinite(target)
+      ? target
+      : typeof entryTarget === 'number' && Number.isFinite(entryTarget)
+        ? entryTarget
+        : undefined;
+  return {
+    selectedStopLossPercent: selectedStop,
+    selectedTakeProfitPercent: selectedTarget,
+    selectedStopLossSource:
+      position.stop_loss_source ??
+      position.exit_parameter_provenance?.stop_loss?.source ??
+      undefined,
+    selectedTakeProfitSource:
+      position.take_profit_source ??
+      position.exit_parameter_provenance?.take_profit?.source ??
+      undefined,
+    selectedStopLossEvidenceSource:
+      typeof stop === 'number' && Number.isFinite(stop)
+        ? 'activity.strategy_positions.selected_stop_loss_percent'
+        : typeof entryStop === 'number' && Number.isFinite(entryStop)
+          ? 'entry audit effective_stop_loss_percent'
+          : undefined,
+    selectedTakeProfitEvidenceSource:
+      typeof target === 'number' && Number.isFinite(target)
+        ? 'activity.strategy_positions.selected_take_profit_percent'
+        : typeof entryTarget === 'number' && Number.isFinite(entryTarget)
+          ? 'entry audit effective_take_profit_percent'
+          : undefined,
+  };
+}
+
 type OpenPositionLot = {
   symbol: string;
   quantity: number;
@@ -631,13 +1049,30 @@ type OpenPositionLot = {
   estimated_exit_fee_rate: number;
   last_trade_timestamp: number;
   strategy?: string;
+  exit_control_mode?: string | null;
   decision_id?: string | null;
+  lifecycle?: LedgerLifecycleIdentity | null;
   entry_order_type?: string;
   entry_order_types?: string[];
   stop_loss_percent?: number | null;
   take_profit_percent?: number | null;
   stop_loss_active?: boolean;
   take_profit_active?: boolean;
+  selected_stop_loss_percent?: number | null;
+  selected_take_profit_percent?: number | null;
+  stop_loss_source?: string | null;
+  take_profit_source?: string | null;
+  fallback_stop_loss_percent?: number | null;
+  fallback_take_profit_percent?: number | null;
+  exit_profile_id?: string | null;
+  exit_profile_version?: number | null;
+  exit_policy_as_of_ms?: number | null;
+  effective_stop_loss_percent?: number | null;
+  effective_take_profit_percent?: number | null;
+  exit_parameter_provenance?: ExitParameterProvenance | null;
+  protective_barrier?: PmProtectiveBarrier | null;
+  initial_risk_reference?: OpenStrategyPosition['initial_risk_reference'];
+  initial_risk_evidence_status?: string | null;
   carry_details?: DatedCarryPosition;
 };
 type AutoTraderLearningResponse = {
@@ -666,6 +1101,7 @@ type ActivityResponse = {
     symbol: string;
     strategy?: string;
     decision_id?: string;
+    lifecycle?: LedgerLifecycleIdentity | null;
   }>;
   strategy_positions?: OpenStrategyPosition[];
   position_exit_policies?: Array<{
@@ -832,6 +1268,10 @@ export class AutoTraderOutcomesModel {
     this.stopAutoTraderStream = undefined;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
+  }
+  async refreshNow() {
+    if (this.consumers <= 0) return;
+    await this.refresh();
   }
   private scheduleRefresh(immediate = false) {
     if (this.refreshTimer) return;
@@ -1713,6 +2153,29 @@ export class AutoTraderOutcomesModel {
             components,
             signalDirection:
               entryAudit.strategy_decision?.direction ?? entryAudit.direction,
+            marketRegime: entryAudit.market_regime,
+            selectedStopLossPercent:
+              typeof entryAudit.effective_stop_loss_percent === 'number' &&
+              Number.isFinite(entryAudit.effective_stop_loss_percent)
+                ? entryAudit.effective_stop_loss_percent
+                : undefined,
+            selectedTakeProfitPercent:
+              typeof entryAudit.effective_take_profit_percent === 'number' &&
+              Number.isFinite(entryAudit.effective_take_profit_percent)
+                ? entryAudit.effective_take_profit_percent
+                : undefined,
+            selectedStopLossEvidenceSource:
+              typeof entryAudit.effective_stop_loss_percent === 'number' &&
+              Number.isFinite(entryAudit.effective_stop_loss_percent)
+                ? 'entry audit effective_stop_loss_percent'
+                : undefined,
+            selectedTakeProfitEvidenceSource:
+              typeof entryAudit.effective_take_profit_percent === 'number' &&
+              Number.isFinite(entryAudit.effective_take_profit_percent)
+                ? 'entry audit effective_take_profit_percent'
+                : undefined,
+            initialRiskEvidence: initialRiskFromAudit(latestExit),
+            executablePricePathEvidence: executablePathFromAudit(latestExit),
             entryStrategyDecision: entryAudit.strategy_decision,
             explorationRisk: explorationRiskFromAudit(entryAudit),
             latestStrategyEvaluation: latestStrategyEvaluation(
@@ -1771,27 +2234,47 @@ export class AutoTraderOutcomesModel {
         strategyLots.map((position) => position.symbol),
       );
       const openPositions: OpenPositionLot[] = [
-        ...strategyLots.map((position) => ({
-          symbol: position.symbol,
-          quantity: position.quantity,
-          average_entry_price: position.average_entry_price,
-          entry_fees: position.entry_fees,
-          estimated_exit_fee_rate:
-            aggregatePositions.get(position.symbol)?.estimated_exit_fee_rate ??
-            0,
-          last_trade_timestamp: position.entry_timestamp_ms,
-          strategy: position.strategy,
-          decision_id: position.decision_id,
-          entry_order_type: position.entry_order_type,
-          entry_order_types: position.entry_order_types,
-          stop_loss_percent: position.stop_loss_percent,
-          take_profit_percent:
-            position.take_profit_percent ??
-            position.horizon_take_profit_percent,
-          stop_loss_active: position.stop_loss_active,
-          take_profit_active: position.take_profit_active,
-          carry_details: position.carry_details,
-        })),
+        ...strategyLots.map((position) => {
+          return {
+            symbol: position.symbol,
+            quantity: position.quantity,
+            average_entry_price: position.average_entry_price,
+            entry_fees: position.entry_fees,
+            estimated_exit_fee_rate:
+              aggregatePositions.get(position.symbol)
+                ?.estimated_exit_fee_rate ?? 0,
+            last_trade_timestamp: position.entry_timestamp_ms,
+            strategy: position.strategy,
+            exit_control_mode: position.exit_control_mode,
+            decision_id: position.decision_id,
+            lifecycle: position.lifecycle,
+            entry_order_type: position.entry_order_type,
+            entry_order_types: position.entry_order_types,
+            stop_loss_percent: position.stop_loss_percent,
+            take_profit_percent:
+              position.take_profit_percent ??
+              position.horizon_take_profit_percent,
+            stop_loss_active: position.stop_loss_active,
+            take_profit_active: position.take_profit_active,
+            selected_stop_loss_percent: position.selected_stop_loss_percent,
+            selected_take_profit_percent: position.selected_take_profit_percent,
+            stop_loss_source: position.stop_loss_source,
+            take_profit_source: position.take_profit_source,
+            fallback_stop_loss_percent: position.fallback_stop_loss_percent,
+            fallback_take_profit_percent: position.fallback_take_profit_percent,
+            exit_profile_id: position.exit_profile_id,
+            exit_profile_version: position.exit_profile_version,
+            exit_policy_as_of_ms: position.exit_policy_as_of_ms,
+            effective_stop_loss_percent: position.effective_stop_loss_percent,
+            effective_take_profit_percent:
+              position.effective_take_profit_percent,
+            exit_parameter_provenance: position.exit_parameter_provenance,
+            protective_barrier: position.protective_barrier,
+            initial_risk_reference: position.initial_risk_reference,
+            initial_risk_evidence_status: position.initial_risk_evidence_status,
+            carry_details: position.carry_details,
+          };
+        }),
         ...(positionsData.positions ?? [])
           .filter(
             (position) =>
@@ -1883,10 +2366,40 @@ export class AutoTraderOutcomesModel {
           entryOrder?.strategy ??
           'unattributed';
         const exitPolicy = exitPolicies.get(symbol);
+        const selectedExitParameters = projectSelectedExitParameters(
+          position,
+          entry,
+        );
+        const positionTradeAudit = trades.get(decisionId);
+        const initialRiskAudit = positionTradeAudit?.exits
+          .filter((record) =>
+            Boolean(
+              record.price_path_evidence?.initial_risk_reference ??
+                record.pre_exit_price_path_evidence?.initial_risk_reference,
+            ),
+          )
+          .sort(
+            (left, right) => (right.timestamp ?? 0) - (left.timestamp ?? 0),
+          )[0];
+        const rawInitialRisk = projectInitialRiskEvidence(
+          position.initial_risk_reference ??
+            initialRiskAudit?.price_path_evidence?.initial_risk_reference ??
+            initialRiskAudit?.pre_exit_price_path_evidence
+              ?.initial_risk_reference,
+          position.initial_risk_evidence_status ??
+            initialRiskAudit?.initial_risk_evidence_status ??
+            initialRiskAudit?.price_path_evidence
+              ?.initial_risk_evidence_status ??
+            initialRiskAudit?.pre_exit_price_path_evidence
+              ?.initial_risk_evidence_status,
+          position.initial_risk_reference
+            ? 'activity.strategy_positions.initial_risk_reference'
+            : 'exit_audit.price_path_evidence.initial_risk_reference',
+        );
         const rowId = position.strategy
           ? 'open:' + symbol + ':' + position.strategy
           : 'open:' + symbol;
-        rows.push({
+        const openOutcome: AutoTraderOutcome = {
           rowId,
           status: 'Open',
           decisionId,
@@ -1924,11 +2437,13 @@ export class AutoTraderOutcomesModel {
               ? 1
               : usdRates[quoteCurrency(symbol)],
           strategy: strategyLabel,
+          exitControlMode: position.exit_control_mode ?? undefined,
           direction: carryDetails
             ? 'Spot long / future short'
             : (entry?.direction ?? (side === 'buy' ? 'bullish' : 'bearish')),
           signalDirection:
             entry?.strategy_decision?.direction ?? entry?.direction,
+          marketRegime: entry?.market_regime,
           stopLossPercent:
             position.stop_loss_active === false
               ? undefined
@@ -1938,6 +2453,74 @@ export class AutoTraderOutcomesModel {
               ? undefined
               : (position.take_profit_percent ??
                 exitPolicy?.take_profit_percent),
+          ...selectedExitParameters,
+          fallbackStopLossPercent:
+            typeof position.fallback_stop_loss_percent === 'number' &&
+            Number.isFinite(position.fallback_stop_loss_percent)
+              ? position.fallback_stop_loss_percent
+              : undefined,
+          fallbackTakeProfitPercent:
+            typeof position.fallback_take_profit_percent === 'number' &&
+            Number.isFinite(position.fallback_take_profit_percent)
+              ? position.fallback_take_profit_percent
+              : undefined,
+          currentEffectiveStopLossPercent:
+            typeof position.effective_stop_loss_percent === 'number' &&
+            Number.isFinite(position.effective_stop_loss_percent)
+              ? position.effective_stop_loss_percent
+              : typeof position.stop_loss_percent === 'number' &&
+                  Number.isFinite(position.stop_loss_percent)
+                ? position.stop_loss_percent
+                : typeof exitPolicy?.stop_loss_percent === 'number' &&
+                    Number.isFinite(exitPolicy.stop_loss_percent)
+                  ? exitPolicy.stop_loss_percent
+                  : undefined,
+          currentEffectiveTakeProfitPercent:
+            typeof position.effective_take_profit_percent === 'number' &&
+            Number.isFinite(position.effective_take_profit_percent)
+              ? position.effective_take_profit_percent
+              : typeof position.take_profit_percent === 'number' &&
+                  Number.isFinite(position.take_profit_percent)
+                ? position.take_profit_percent
+                : typeof exitPolicy?.take_profit_percent === 'number' &&
+                    Number.isFinite(exitPolicy.take_profit_percent)
+                  ? exitPolicy.take_profit_percent
+                  : undefined,
+          currentThresholdCompatibility:
+            position.effective_stop_loss_percent == null ||
+            position.effective_take_profit_percent == null,
+          exitProfileId:
+            position.exit_profile_id ??
+            position.exit_parameter_provenance?.profile_id ??
+            undefined,
+          exitProfileVersion:
+            typeof position.exit_profile_version === 'number' &&
+            Number.isSafeInteger(position.exit_profile_version)
+              ? position.exit_profile_version
+              : typeof position.exit_parameter_provenance?.profile_version ===
+                    'number' &&
+                  Number.isSafeInteger(
+                    position.exit_parameter_provenance.profile_version,
+                  )
+                ? position.exit_parameter_provenance.profile_version
+                : undefined,
+          exitPolicyAsOfMs:
+            typeof position.exit_policy_as_of_ms === 'number' &&
+            Number.isFinite(position.exit_policy_as_of_ms)
+              ? position.exit_policy_as_of_ms
+              : typeof position.exit_parameter_provenance
+                    ?.exit_policy_as_of_ms === 'number' &&
+                  Number.isFinite(
+                    position.exit_parameter_provenance.exit_policy_as_of_ms,
+                  )
+                ? position.exit_parameter_provenance.exit_policy_as_of_ms
+                : undefined,
+          exitParameterProvenance:
+            position.exit_parameter_provenance ?? undefined,
+          currentPmBarrier: position.protective_barrier ?? undefined,
+          initialRiskEvidence: rawInitialRisk,
+          executablePricePathEvidence:
+            executablePathFromAudit(initialRiskAudit),
           stopLossActive: position.stop_loss_active,
           takeProfitActive: position.take_profit_active,
           strength: entry?.strength ?? null,
@@ -1959,7 +2542,10 @@ export class AutoTraderOutcomesModel {
             strategyLabel,
             symbol,
           ),
-        });
+        };
+        rows.push(
+          projectOpenPositionLifecycleIdentity(openOutcome, position.lifecycle),
+        );
       }
       rows.sort((a, b) =>
         a.status === b.status

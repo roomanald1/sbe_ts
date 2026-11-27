@@ -26,8 +26,13 @@ enum TickerHeartbeatAction {
     Timeout,
 }
 
-fn ticker_heartbeat_action(now: u64, last_message: u64, ping_started: u64) -> TickerHeartbeatAction {
-    if ping_started != 0 && now.saturating_sub(ping_started) >= OKX_PONG_TIMEOUT.as_millis() as u64 {
+fn ticker_heartbeat_action(
+    now: u64,
+    last_message: u64,
+    ping_started: u64,
+) -> TickerHeartbeatAction {
+    if ping_started != 0 && now.saturating_sub(ping_started) >= OKX_PONG_TIMEOUT.as_millis() as u64
+    {
         TickerHeartbeatAction::Timeout
     } else if ping_started == 0
         && now.saturating_sub(last_message) >= OKX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64
@@ -38,10 +43,7 @@ fn ticker_heartbeat_action(now: u64, last_message: u64, ping_started: u64) -> Ti
     }
 }
 
-fn encode_ticker_updates(
-    text: &str,
-    instrument_lookup: &HashSet<Arc<str>>,
-) -> Result<Vec<Bytes>> {
+fn encode_ticker_updates(text: &str, instrument_lookup: &HashSet<Arc<str>>) -> Result<Vec<Bytes>> {
     let update = match serde_json::from_str::<TickerMessage<'_>>(text) {
         Ok(update) => update,
         Err(error) => {
@@ -76,6 +78,7 @@ fn encode_ticker_updates(
             .ts
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(now_ms);
+        crate::metrics::record_symbol_source_event(instrument, "price", timestamp_ms);
         encoded_updates.push(encode_symbol_price(instrument, price, timestamp_ms)?);
     }
     Ok(encoded_updates)
@@ -91,7 +94,10 @@ async fn subscribe_once(
         .await
         .map_err(|error| anyhow::anyhow!("failed to connect to OKX WebSocket: {error}"))?;
 
-    crate::service_log!("INFO", "OKX WebSocket handshake has been successfully completed");
+    crate::service_log!(
+        "INFO",
+        "OKX WebSocket handshake has been successfully completed"
+    );
     let (mut write, read) = incoming_ws.split();
     let last_message_at = Arc::new(AtomicU64::new(now_ms()));
     let ping_sent_at = Arc::new(AtomicU64::new(0));
@@ -113,7 +119,10 @@ async fn subscribe_once(
                 let text = match message.to_text() {
                     Ok(text) => text,
                     Err(error) => {
-                        crate::service_log!("ERROR", "Ignoring non-text OKX WebSocket message: {error}");
+                        crate::service_log!(
+                            "ERROR",
+                            "Ignoring non-text OKX WebSocket message: {error}"
+                        );
                         return Ok(());
                     }
                 };
@@ -214,27 +223,39 @@ mod connection_loop_tests {
             f64::from_le_bytes(encoded[0][40..48].try_into().unwrap()),
             65000.5
         );
-        assert!(encode_ticker_updates("not-json", &lookup)
-            .unwrap()
-            .is_empty());
-        assert!(encode_ticker_updates(
-            r#"{"event":"error","msg":"bad subscription"}"#,
-            &lookup,
-        )
-        .is_err());
-        assert!(encode_ticker_updates(
-            r#"{"event":"subscribe"}"#,
-            &lookup,
-        )
-        .unwrap()
-        .is_empty());
+        assert!(
+            encode_ticker_updates("not-json", &lookup)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            encode_ticker_updates(r#"{"event":"error","msg":"bad subscription"}"#, &lookup,)
+                .is_err()
+        );
+        assert!(
+            encode_ticker_updates(r#"{"event":"subscribe"}"#, &lookup,)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn selects_wait_ping_and_timeout_heartbeat_actions() {
-        assert_eq!(ticker_heartbeat_action(10_000, 9_000, 0), TickerHeartbeatAction::Wait);
-        assert_eq!(ticker_heartbeat_action(30_000, 9_000, 0), TickerHeartbeatAction::Ping);
-        assert_eq!(ticker_heartbeat_action(21_000, 0, 10_000), TickerHeartbeatAction::Timeout);
-        assert_eq!(ticker_heartbeat_action(10_000, 0, 9_000), TickerHeartbeatAction::Wait);
+        assert_eq!(
+            ticker_heartbeat_action(10_000, 9_000, 0),
+            TickerHeartbeatAction::Wait
+        );
+        assert_eq!(
+            ticker_heartbeat_action(30_000, 9_000, 0),
+            TickerHeartbeatAction::Ping
+        );
+        assert_eq!(
+            ticker_heartbeat_action(21_000, 0, 10_000),
+            TickerHeartbeatAction::Timeout
+        );
+        assert_eq!(
+            ticker_heartbeat_action(10_000, 0, 9_000),
+            TickerHeartbeatAction::Wait
+        );
     }
 }

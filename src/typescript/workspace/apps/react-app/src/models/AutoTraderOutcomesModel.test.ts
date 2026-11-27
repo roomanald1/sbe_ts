@@ -5,7 +5,10 @@ import {
   AutoTraderOutcomesModel,
   mergeLatestStrategyDecisions,
   parseLearningSummary,
+  projectInitialRiskEvidence,
+  projectOpenPositionLifecycleIdentity,
   projectLedgerLifecycleIdentity,
+  projectSelectedExitParameters,
   resolveLedgerOrder,
   strategyInstanceForClose,
 } from './AutoTraderOutcomesModel';
@@ -14,6 +17,134 @@ import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('uses selected thresholds and source from the explicit position contract', () => {
+    assert.deepEqual(
+      projectSelectedExitParameters(
+        {
+          selected_stop_loss_percent: 0.42,
+          selected_take_profit_percent: 0.9,
+          stop_loss_source: 'validated_exit_policy',
+          take_profit_source: 'strategy_default_profile',
+        },
+        {
+          effective_stop_loss_percent: 0.5,
+          effective_take_profit_percent: 0.8,
+        },
+      ),
+      {
+        selectedStopLossPercent: 0.42,
+        selectedTakeProfitPercent: 0.9,
+        selectedStopLossSource: 'validated_exit_policy',
+        selectedTakeProfitSource: 'strategy_default_profile',
+        selectedStopLossEvidenceSource:
+          'activity.strategy_positions.selected_stop_loss_percent',
+        selectedTakeProfitEvidenceSource:
+          'activity.strategy_positions.selected_take_profit_percent',
+      },
+    );
+  });
+
+  it('uses entry audit values only as selected-threshold values with audit provenance', () => {
+    assert.deepEqual(
+      projectSelectedExitParameters(
+        {},
+        {
+          effective_stop_loss_percent: 0.5,
+          effective_take_profit_percent: 0.8,
+        },
+      ),
+      {
+        selectedStopLossPercent: 0.5,
+        selectedTakeProfitPercent: 0.8,
+        selectedStopLossSource: undefined,
+        selectedTakeProfitSource: undefined,
+        selectedStopLossEvidenceSource:
+          'entry audit effective_stop_loss_percent',
+        selectedTakeProfitEvidenceSource:
+          'entry audit effective_take_profit_percent',
+      },
+    );
+  });
+
+  it('requires explicit eligibility and complete fill-linked evidence for initial risk', () => {
+    const reference = {
+      schema_version: 1,
+      quote_currency: 'USDT',
+      stop_loss_percent: 0.5,
+      quote_amount: 4.25,
+      fill_ids: ['pm-fill:v1:epoch:1'],
+      status: 'complete',
+    };
+    assert.deepEqual(
+      projectInitialRiskEvidence(reference, 'eligible_for_r_multiple'),
+      {
+        eligibilityStatus: 'eligible_for_r_multiple',
+        referenceStatus: 'complete',
+        eligibleForRMultiple: true,
+        quoteCurrency: 'USDT',
+        quoteAmount: 4.25,
+        stopLossPercent: 0.5,
+        fillIdCount: 1,
+        source: 'activity.initial_risk_reference',
+      },
+    );
+    const incomplete = projectInitialRiskEvidence(
+      { ...reference, status: 'incomplete' },
+      'eligible_for_r_multiple',
+    );
+    assert.equal(incomplete.eligibleForRMultiple, false);
+    assert.equal(incomplete.quoteAmount, undefined);
+    const missingEligibility = projectInitialRiskEvidence(reference, undefined);
+    assert.equal(missingEligibility.eligibleForRMultiple, false);
+    assert.equal(missingEligibility.quoteAmount, undefined);
+  });
+
+  it('projects explicit canonical identity onto open positions without inference', () => {
+    const row = {
+      rowId: 'open:DOGE-USDT:live-vwap-dislocation',
+      status: 'Open',
+      decisionId: 'decision-open',
+      symbol: 'DOGE-USDT',
+      side: 'sell',
+      openedAt: 200,
+      quantity: 2,
+      signedQuantity: -2,
+      entryPrice: 0.05,
+      pnl: 0,
+      entryFees: -0.001,
+      estimatedExitFeeRate: 0.0008,
+      estimatedExitSlippageBps: 0,
+      pnlQuoteCurrency: 'USDT',
+      strategy: 'live-vwap-dislocation',
+      direction: 'bearish',
+      strength: null,
+      scout: false,
+      source: 'exploratory',
+      components: {},
+    } as AutoTraderOutcome;
+    const projected = projectOpenPositionLifecycleIdentity(row, {
+      trade_id: 'trade-1',
+      opportunity_id: 'opportunity-1',
+      episode_id: 'episode-1',
+      profile_id: 'profile-1',
+      profile_hash: 'sha256:v1:profile',
+      profile_version: 3,
+      execution_mode: 'paper',
+      entry_policy: 'exploratory',
+      source: 'auto_trader_entry_reservation',
+    });
+    assert.equal(projected.tradeId, 'trade-1');
+    assert.equal(projected.opportunityId, 'opportunity-1');
+    assert.equal(projected.episodeId, 'episode-1');
+    assert.equal(projected.entryProfileId, 'profile-1');
+    assert.equal(projected.entryProfileHash, 'sha256:v1:profile');
+    assert.equal(projected.entryProfileVersion, 3);
+    assert.equal(projected.executionMode, 'paper');
+    assert.equal(projected.entryPolicy, 'exploratory');
+    assert.equal(projected.lifecycleSource, 'auto_trader_entry_reservation');
+    assert.equal(projectOpenPositionLifecycleIdentity(row, undefined), row);
+  });
+
   it('projects only explicit ledger lifecycle IDs onto the outcome row', () => {
     const legacy = {
       rowId: 'ledger-trade:legacy-fill',
@@ -64,6 +195,35 @@ describe('AutoTraderOutcomesModel', () => {
     assert.equal(projected.tradeId, 'trade-9');
     assert.equal(projected.rowId, legacy.rowId);
     assert.equal(projected.pnl, legacy.pnl);
+
+    const summary = {
+      ...legacy,
+      rowId: 'ledger-summary:decision-legacy:BTC-USDT',
+      provenance: {
+        opportunityId: 'opp-summary',
+        episodeId: 'episode-summary',
+        tradeId: 'trade-summary',
+        profileId: 'profile-v7',
+        profileHash: 'sha256:v1:profile',
+        profileVersion: 7,
+        executionMode: 'paper',
+        entryPolicy: 'exploratory',
+        source: 'auto_trader_entry_reservation',
+      },
+    } as AutoTraderOutcome;
+    const projectedSummary = projectLedgerLifecycleIdentity(summary);
+    assert.equal(projectedSummary.tradeId, 'trade-summary');
+    assert.equal(projectedSummary.opportunityId, 'opp-summary');
+    assert.equal(projectedSummary.episodeId, 'episode-summary');
+    assert.equal(projectedSummary.entryProfileId, 'profile-v7');
+    assert.equal(projectedSummary.entryProfileHash, 'sha256:v1:profile');
+    assert.equal(projectedSummary.entryProfileVersion, 7);
+    assert.equal(projectedSummary.executionMode, 'paper');
+    assert.equal(projectedSummary.entryPolicy, 'exploratory');
+    assert.equal(
+      projectedSummary.lifecycleSource,
+      'auto_trader_entry_reservation',
+    );
   });
 
   it('leaves missing lifecycle links absent without deriving historical IDs', () => {

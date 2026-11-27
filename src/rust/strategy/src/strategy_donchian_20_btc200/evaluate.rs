@@ -120,6 +120,49 @@ mod tests {
     }
 
     #[test]
+    fn failed_btc_regime_blocks_strict_and_scout_entries_for_either_direction() {
+        let parameters = BTreeMap::from([
+            ("breakout_entry_distance_percent".to_owned(), 0.0),
+            ("scout_breakout_buffer_percent".to_owned(), 10.0),
+        ]);
+        for direction in ["bullish", "bearish"] {
+            let mut strict = signal("donchian-20-btc200", true);
+            strict.symbol = "ETH-USDT".into();
+            strict.direction = direction.into();
+            let decision = strict.strategy_decision.as_mut().unwrap();
+            decision["btc_gate_required"] = serde_json::json!(true);
+            decision["btc_gate_passed"] = serde_json::json!(false);
+            decision["btc_close"] = serde_json::json!(90.0);
+            decision["btc_sma"] = serde_json::json!(100.0);
+            assert_eq!(
+                evaluate(&StrategySignal::entry(&strict, &parameters)).unwrap(),
+                StrategyDecision::Reject,
+                "strict {direction} candidate must retain the declared BTC gate"
+            );
+
+            let mut missing_regime = strict.clone();
+            let decision = missing_regime.strategy_decision.as_mut().unwrap();
+            decision["btc_close"] = serde_json::Value::Null;
+            decision["btc_sma"] = serde_json::Value::Null;
+            assert_eq!(
+                evaluate(&StrategySignal::entry(&missing_regime, &parameters)).unwrap(),
+                StrategyDecision::Reject,
+                "strict {direction} candidate must fail closed when its required regime is missing"
+            );
+
+            let mut scout = strict;
+            let decision = scout.strategy_decision.as_mut().unwrap();
+            decision["observed_close"] = serde_json::json!(99.0);
+            decision["primary_level"] = serde_json::json!(100.0);
+            assert_eq!(
+                evaluate(&StrategySignal::entry(&scout, &parameters)).unwrap(),
+                StrategyDecision::Reject,
+                "exploratory {direction} candidate must not bypass the declared BTC gate"
+            );
+        }
+    }
+
+    #[test]
     fn mature_profile_specific_forward_losses_reject_a_daily_entry() {
         let parameters = BTreeMap::from([
             ("breakout_entry_distance_percent".to_owned(), 0.0),

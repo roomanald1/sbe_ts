@@ -43,16 +43,20 @@ async fn arm_protective_stop(
     entry_price: f64,
     entry_fees: f64,
     stop_loss_override: Option<f64>,
+    profile_trigger_override: Option<ProfileTriggerOverride>,
 ) -> Result<(), (StatusCode, String)> {
     if quantity <= 0.0 || entry_price <= 0.0 {
         return Ok(());
     }
     let (stop_loss_percent, is_enabled, decision_id, lifecycle_identity) = {
         let settings = state.settings.lock().await;
-        let decision_id = settings.strategy_positions.get(symbol)
+        let decision_id = settings
+            .strategy_positions
+            .get(symbol)
             .and_then(|lots| lots.get(strategy))
             .and_then(|position| position.entry_decision_id.clone());
-        let lifecycle_identity = decision_id.as_deref()
+        let lifecycle_identity = decision_id
+            .as_deref()
             .and_then(|id| settings.canonical_lifecycle_links.get(id).cloned());
         (
             stop_loss_override.unwrap_or(settings.stop_loss_percent),
@@ -68,7 +72,15 @@ async fn arm_protective_stop(
     let side = if is_long { "sell" } else { "buy" };
     let fee_rate = configured_taker_fee_rate();
     let loss_fraction = stop_loss_percent / 100.0;
-    let trigger_price = if is_long {
+    let trigger_price = if let Some(profile_override) = profile_trigger_override.as_ref() {
+        if !profile_override.trigger_price.is_finite() || profile_override.trigger_price <= 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Profile protective trigger override is invalid".into(),
+            ));
+        }
+        profile_override.trigger_price
+    } else if is_long {
         (quantity * entry_price * (1.0 - loss_fraction) + entry_fees)
             / (quantity * (1.0 - fee_rate))
     } else {
@@ -92,11 +104,9 @@ async fn arm_protective_stop(
         client_order_id,
         lifecycle_identity.as_ref(),
     );
-    let response = crate::service_rpc::position_request(
-        "POST",
-        "/positions/orders",
-        Some(request),
-    ).await.map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let response = crate::service_rpc::position_request("POST", "/positions/orders", Some(request))
+        .await
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error.to_string()))?;
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let payload = response.body;
     if !status.is_success() {
@@ -133,13 +143,52 @@ async fn arm_protective_stop(
         position.quantity.abs() > 1e-12
             && position.quantity.signum() == if is_long { 1.0 } else { -1.0 }
     });
-    let lot_active = settings.strategy_positions.get(symbol).and_then(|lots| lots.get(strategy)).is_some_and(|position| {
-        position.quantity.abs() > 1e-12
-            && position.quantity.signum() == if is_long { 1.0 } else { -1.0 }
-    });
+    let lot_active = settings
+        .strategy_positions
+        .get(symbol)
+        .and_then(|lots| lots.get(strategy))
+        .is_some_and(|position| {
+            position.quantity.abs() > 1e-12
+                && position.quantity.signum() == if is_long { 1.0 } else { -1.0 }
+        });
     if aggregate_active && lot_active {
-        if let Some(position) = settings.positions.get_mut(symbol) { position.protective_stops.push(stop.clone()); }
-        if let Some(position) = settings.strategy_positions.get_mut(symbol).and_then(|lots| lots.get_mut(strategy)) { position.protective_stops.push(stop); }
+        if let Some(position) = settings.positions.get_mut(symbol) {
+            position.protective_stops.push(stop.clone());
+        }
+        if let Some(position) = settings
+            .strategy_positions
+            .get_mut(symbol)
+            .and_then(|lots| lots.get_mut(strategy))
+        {
+            position.protective_stops.push(stop);
+        }
+        if let (Some(profile_override), Some(position)) = (
+            profile_trigger_override.as_ref(),
+            settings
+                .strategy_positions
+                .get_mut(symbol)
+                .and_then(|lots| lots.get_mut(strategy)),
+        ) {
+            if let Some(provenance) = position.exit_parameter_provenance.as_mut() {
+                append_protection_adjustment(
+                    provenance,
+                    serde_json::json!({
+                        "schema_version":1,
+                        "request_id":format!("autotrader-protection-arm-v1:{id}"),
+                        "barrier_id":id,
+                        "reason":profile_override.reason,
+                        "policy_source":profile_override.policy_source,
+                        "profile_id":profile_override.profile_id,
+                        "profile_version":profile_override.profile_version,
+                        "target_net_return_percent":profile_override.target_net_return_percent,
+                        "previous_trigger_price":null,
+                        "trigger_price":trigger_price,
+                        "updated_at_ms":timestamp,
+                        "source_action":"created_at_profile_protection_threshold",
+                    }),
+                );
+            }
+        }
         settings.orders.push(new_protective_stop_order(
             timestamp,
             symbol,
@@ -154,18 +203,23 @@ async fn arm_protective_stop(
             let excess = settings.orders.len() - MAX_RETAINED_AUTO_TRADER_ORDERS;
             settings.orders.drain(..excess);
         }
-        request_settings_persist(state)?;
+        if profile_trigger_override.is_some() {
+            drop(settings);
+            persist_settings_snapshot_durable(state).await?;
+        } else {
+            request_settings_persist(state)?;
+        }
     } else {
         drop(settings);
         let _ = crate::service_rpc::position_request(
             "DELETE",
             &format!("/positions/orders/{id}"),
             None,
-        ).await;
+        )
+        .await;
     }
     Ok(())
 }
-
 
 fn new_protective_stop_order(
     timestamp: u64,
@@ -229,7 +283,16 @@ mod protective_stop_order_tests {
 
     #[test]
     fn protective_stop_retains_entry_attribution_and_barrier_id() {
-        let order = new_protective_stop_order(200, "PEPE-USDT", "buy", "live-vwap-dislocation".into(), Some("entry-decision".into()), 1.0, 4.8e-6, "barrier-200-1".into());
+        let order = new_protective_stop_order(
+            200,
+            "PEPE-USDT",
+            "buy",
+            "live-vwap-dislocation".into(),
+            Some("entry-decision".into()),
+            1.0,
+            4.8e-6,
+            "barrier-200-1".into(),
+        );
         assert_eq!(order.decision_id.as_deref(), Some("entry-decision"));
         assert_eq!(order.execution_order_id.as_deref(), Some("barrier-200-1"));
     }

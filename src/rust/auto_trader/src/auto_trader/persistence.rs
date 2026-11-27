@@ -270,15 +270,29 @@ fn merge_durable_entry_reservations(
 }
 
 fn mark_restored_price_paths_interrupted(settings: &mut Settings) {
+    let restore_epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let next_epoch = |position: &TraderPosition| {
+        format!(
+            "auto-trader-position-path:v1:restart:{restore_epoch_ms}:{}",
+            position.trade_id.as_deref().unwrap_or("unlinked")
+        )
+    };
     for position in settings.positions.values_mut() {
         if position.quantity.abs() > 1e-12 {
             position.price_path_restart_interrupted = true;
+            let epoch = next_epoch(position);
+            position.price_path_epoch = Some(epoch);
         }
     }
     for lots in settings.strategy_positions.values_mut() {
         for position in lots.values_mut() {
             if position.quantity.abs() > 1e-12 {
                 position.price_path_restart_interrupted = true;
+                let epoch = next_epoch(position);
+                position.price_path_epoch = Some(epoch);
             }
         }
     }
@@ -913,10 +927,13 @@ mod sqlite_state_tests {
             average_entry_price: 100.0,
             trade_id: Some("trade-path-restart".into()),
             entry_timestamp_ms: 1_000,
+            price_path_epoch: Some("epoch-before-restart".into()),
             price_path: vec![TradePriceSample {
                 timestamp: 1_000,
                 bid: 99.5,
                 ask: 100.5,
+                sequence: 17,
+                epoch: Some("epoch-before-restart".into()),
                 source_updated_at_ms: Some(990),
                 freshness_contract_version: Some(1),
                 freshness_max_age_ms: Some(5_000),
@@ -924,6 +941,14 @@ mod sqlite_state_tests {
             }],
             price_path_total_samples: 1,
             price_path_truncated: false,
+            initial_risk_reference: Some(InitialRiskReference {
+                schema_version: 1,
+                quote_currency: Some("USDT".into()),
+                stop_loss_percent: Some(0.5),
+                quote_amount: Some(1.0),
+                fill_ids: vec!["pm-fill:v1:paper:17".into()],
+                status: "complete".into(),
+            }),
             ..TraderPosition::default()
         };
         settings
@@ -942,13 +967,27 @@ mod sqlite_state_tests {
         assert_eq!(restored_position.price_path_total_samples, 1);
         assert!(!restored_position.price_path_truncated);
         assert!(restored_position.price_path_restart_interrupted);
+        assert_ne!(
+            restored_position.price_path_epoch,
+            position.price_path_epoch
+        );
+        assert_eq!(
+            restored_position
+                .initial_risk_reference
+                .as_ref()
+                .unwrap()
+                .quote_amount,
+            Some(1.0)
+        );
         let evidence = price_path_excursion_evidence(restored_position, 2_000);
         assert_eq!(evidence["complete"], false);
-        assert!(evidence["missing_coverage"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|reason| reason == "price_path_restart_interrupted"));
+        assert!(
+            evidence["missing_coverage"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "price_path_restart_interrupted")
+        );
 
         persist_durable_settings_snapshot(&path, &restored).unwrap();
         restored = read_settings_database(&path).unwrap().unwrap();
@@ -958,6 +997,11 @@ mod sqlite_state_tests {
             serde_json::to_value(&position.price_path).unwrap()
         );
         assert!(restored_position.price_path_restart_interrupted);
+        assert_eq!(restored_position.price_path[0].sequence, 17);
+        assert_eq!(
+            restored_position.price_path[0].epoch.as_deref(),
+            Some("epoch-before-restart")
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
@@ -1117,12 +1161,26 @@ mod sqlite_state_tests {
         drop(connection);
 
         let loaded = read_settings_database(&path).unwrap().unwrap();
-        let mut expected = settings.clone();
-        mark_restored_price_paths_interrupted(&mut expected);
+        let restored = loaded.positions.get("BTC-USDT").unwrap();
+        let original = settings.positions.get("BTC-USDT").unwrap();
+        assert!(restored.price_path_restart_interrupted);
         assert_eq!(
-            serde_json::to_value(loaded).unwrap(),
-            serde_json::to_value(expected).unwrap()
+            serde_json::to_value(&restored.price_path).unwrap(),
+            serde_json::to_value(&original.price_path).unwrap()
         );
+        assert_eq!(
+            restored.price_path_total_samples,
+            original.price_path_total_samples
+        );
+        assert!(
+            restored
+                .price_path_epoch
+                .as_deref()
+                .is_some_and(|epoch| epoch.starts_with("auto-trader-position-path:v1:restart:"))
+        );
+        assert_ne!(restored.price_path_epoch, original.price_path_epoch);
+        assert_eq!(loaded.stop_loss_percent, settings.stop_loss_percent);
+        assert_eq!(loaded.take_profit_percent, settings.take_profit_percent);
         let connection = rusqlite::Connection::open(&path).unwrap();
         let old_table: i64 = connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='auto_trader_state'", [], |row| row.get(0)).unwrap();
         assert_eq!(old_table, 0);
@@ -1490,7 +1548,7 @@ fn scheduled_stop_headroom_multiplier(order_type: &str, strategy: Option<&str>) 
 }
 
 fn allocated_notional(settings: &Settings) -> f64 {
-    allocated_notional_for_category(settings, None)
+    allocated_notional_for_category(settings, None) + settings.dated_carry_reserved_usd.max(0.0)
 }
 
 fn allocated_notional_for_symbol(settings: &Settings, symbol: &str) -> f64 {
@@ -1759,13 +1817,6 @@ fn category_position_limit(settings: &Settings, category: StrategyCategory) -> u
     }
 }
 
-fn category_notional_limit(settings: &Settings, category: StrategyCategory) -> f64 {
-    match category {
-        StrategyCategory::Intraday => settings.intraday_notional_limit,
-        StrategyCategory::Daily => settings.daily_strategy_notional_limit,
-    }
-}
-
 fn is_independent_daily_strategy(strategy: &str) -> bool {
     Strategy::from_name(strategy)
         .is_some_and(|kind| !kind.is_live_insight() && !kind.is_dated_carry())
@@ -1780,135 +1831,47 @@ fn enabled_daily_strategy_count(settings: &Settings) -> usize {
         .max(1)
 }
 
-fn daily_strategy_notional_share(settings: &Settings) -> f64 {
-    settings.daily_strategy_notional_limit / enabled_daily_strategy_count(settings) as f64
+fn allocated_notional_for_candidate(settings: &Settings, strategy: &str, symbol: &str) -> f64 {
+    candidate_used_notional(settings, strategy, symbol)
+        + candidate_reserved_notional(settings, strategy, symbol)
 }
 
-fn daily_strategy_budget(settings: &Settings, strategy: &str) -> f64 {
-    if settings.daily_strategy_budgets.is_empty() {
-        return daily_strategy_notional_share(settings);
-    }
-    if let Some(budget) = settings.daily_strategy_budgets.get(strategy) {
-        return *budget;
-    }
-    let enabled = settings
-        .strategies
-        .iter()
-        .filter(|candidate| is_independent_daily_strategy(candidate.as_str()))
-        .collect::<Vec<_>>();
-    let missing = enabled
-        .iter()
-        .filter(|candidate| {
-            !settings
-                .daily_strategy_budgets
-                .contains_key(candidate.as_str())
+fn candidate_used_notional(settings: &Settings, strategy: &str, symbol: &str) -> f64 {
+    let position = settings
+        .strategy_positions
+        .get(symbol)
+        .and_then(|lots| lots.get(strategy))
+        .or_else(|| {
+            settings.positions.get(symbol).filter(|position| {
+                settings.strategy_positions.is_empty()
+                    && position.strategy.as_deref() == Some(strategy)
+            })
+        });
+    let open = position
+        .filter(|position| !position.scout_entry)
+        .map(|position| {
+            position.quantity.abs()
+                * position.average_entry_price.max(0.0)
+                * quote_usd_rate(settings, symbol)
+                * scheduled_stop_headroom_multiplier(&position.entry_order_type, Some(strategy))
         })
-        .count();
-    if missing == 0
-        || !enabled
-            .iter()
-            .any(|candidate| candidate.as_str() == strategy)
-    {
-        return 0.0;
-    }
-    let configured = enabled
-        .iter()
-        .filter_map(|candidate| settings.daily_strategy_budgets.get(candidate.as_str()))
-        .sum::<f64>();
-    (settings.daily_strategy_notional_limit - configured).max(0.0) / missing as f64
+        .unwrap_or(0.0);
+    open
 }
 
-fn enabled_intraday_strategy_count(settings: &Settings) -> usize {
+fn candidate_reserved_notional(settings: &Settings, strategy: &str, symbol: &str) -> f64 {
     settings
-        .strategies
-        .iter()
-        .filter(|strategy| strategy.is_live_insight() && !strategy.is_legacy_composite())
-        .count()
-        .max(1)
-}
-
-fn intraday_strategy_notional_share(settings: &Settings) -> f64 {
-    settings.intraday_notional_limit / enabled_intraday_strategy_count(settings) as f64
-}
-
-fn intraday_strategy_budget(settings: &Settings, strategy: &str) -> f64 {
-    if settings.intraday_strategy_budgets.is_empty() {
-        return intraday_strategy_notional_share(settings);
-    }
-    if let Some(budget) = settings.intraday_strategy_budgets.get(strategy) {
-        return *budget;
-    }
-    let enabled = settings
-        .strategies
-        .iter()
-        .filter(|candidate| candidate.is_live_insight() && !candidate.is_legacy_composite())
-        .collect::<Vec<_>>();
-    let missing = enabled
-        .iter()
-        .filter(|candidate| {
-            !settings
-                .intraday_strategy_budgets
-                .contains_key(candidate.as_str())
-        })
-        .count();
-    if missing == 0
-        || !enabled
-            .iter()
-            .any(|candidate| candidate.as_str() == strategy)
-    {
-        return 0.0;
-    }
-    let configured = enabled
-        .iter()
-        .filter_map(|candidate| settings.intraday_strategy_budgets.get(candidate.as_str()))
-        .sum::<f64>();
-    (settings.intraday_notional_limit - configured).max(0.0) / missing as f64
-}
-
-fn allocated_notional_for_strategy(settings: &Settings, strategy: &str) -> f64 {
-    let open_positions = if settings.strategy_positions.is_empty() {
-        settings
-            .positions
-            .iter()
-            .filter(|(_, position)| position.strategy.as_deref() == Some(strategy))
-            .map(|(symbol, position)| {
-                position.quantity.abs()
-                    * position.average_entry_price.max(0.0)
-                    * quote_usd_rate(settings, symbol)
-                    * scheduled_stop_headroom_multiplier(
-                        &position.entry_order_type,
-                        position.strategy.as_deref(),
-                    )
-            })
-            .sum::<f64>()
-    } else {
-        settings
-            .strategy_positions
-            .iter()
-            .filter_map(|(symbol, lots)| {
-                lots.get(strategy).map(|position| {
-                    position.quantity.abs()
-                        * position.average_entry_price.max(0.0)
-                        * quote_usd_rate(settings, symbol)
-                        * scheduled_stop_headroom_multiplier(
-                            &position.entry_order_type,
-                            Some(strategy),
-                        )
-                })
-            })
-            .sum::<f64>()
-    };
-    let pending_orders = settings
         .orders
         .iter()
         .filter(|order| {
             order.strategy.as_deref() == Some(strategy)
+                && order.symbol == symbol
                 && order.purpose != "stop-loss"
                 && matches!(
                     order.status.as_str(),
                     "submitting" | "accepted" | "resting" | "partially_filled"
                 )
-                && order.quantity > 0.0
+                && order.quantity > order.filled_quantity + 1e-12
         })
         .map(|order| {
             let remaining_fraction = ((order.quantity - order.filled_quantity).max(0.0)
@@ -1919,14 +1882,13 @@ fn allocated_notional_for_strategy(settings: &Settings, strategy: &str) -> f64 {
             } else {
                 order.average_price.unwrap_or(0.0)
                     * order.quantity
-                    * quote_usd_rate(settings, &order.symbol)
+                    * quote_usd_rate(settings, symbol)
             };
             reference
                 * remaining_fraction
-                * scheduled_stop_headroom_multiplier(&order.order_type, order.strategy.as_deref())
+                * scheduled_stop_headroom_multiplier(&order.order_type, Some(strategy))
         })
-        .sum::<f64>();
-    open_positions + pending_orders
+        .sum::<f64>()
 }
 
 fn daily_strategy_open_position_count(settings: &Settings, strategy: &str) -> usize {
@@ -2072,9 +2034,8 @@ mod daily_strategy_allocator_tests {
     use super::*;
 
     #[test]
-    fn daily_budget_and_position_slots_are_split_across_selected_daily_strategies() {
+    fn daily_position_slots_remain_split_across_selected_daily_strategies() {
         let mut settings = Settings::default();
-        settings.daily_strategy_notional_limit = 600.0;
         settings.max_daily_open_positions = 10;
         settings.strategies = vec![
             Strategy::Donchian55Btc200,
@@ -2083,12 +2044,10 @@ mod daily_strategy_allocator_tests {
             Strategy::DatedCarry,
         ];
         assert_eq!(enabled_daily_strategy_count(&settings), 2);
-        assert_eq!(daily_strategy_notional_share(&settings), 300.0);
         assert_eq!(daily_strategy_position_limit(&settings), 5);
 
         settings.strategies.push(Strategy::Rsi2OversoldRebound);
         assert_eq!(enabled_daily_strategy_count(&settings), 3);
-        assert_eq!(daily_strategy_notional_share(&settings), 200.0);
         assert_eq!(daily_strategy_position_limit(&settings), 4);
     }
 }
@@ -2251,7 +2210,7 @@ mod persistence_allocation_tests {
     }
 
     #[test]
-    fn strategy_budgets_allocate_configured_remainder_and_exposure() {
+    fn candidate_exposure_and_position_slots_are_independent_of_legacy_budgets() {
         let mut settings = settings_with_rates();
         settings.strategies = vec![
             Strategy::Donchian20Btc200,
@@ -2259,27 +2218,17 @@ mod persistence_allocation_tests {
             Strategy::LiveMomentum,
             Strategy::LiveTradeFlow,
         ];
-        settings.daily_strategy_notional_limit = 300.0;
+        settings.daily_strategy_notional_limit = 0.0;
         settings
             .daily_strategy_budgets
-            .insert("donchian-20-btc200".into(), 80.0);
-        assert_eq!(enabled_daily_strategy_count(&settings), 2);
-        assert_eq!(daily_strategy_notional_share(&settings), 150.0);
-        assert_eq!(daily_strategy_budget(&settings, "donchian-20-btc200"), 80.0);
-        assert_eq!(
-            daily_strategy_budget(&settings, "donchian-55-btc200"),
-            220.0
-        );
-        assert_eq!(daily_strategy_budget(&settings, "not-enabled"), 0.0);
-
-        settings.intraday_notional_limit = 120.0;
+            .insert("donchian-20-btc200".into(), 0.0);
+        settings
+            .daily_strategy_budgets
+            .insert("donchian-55-btc200".into(), 9_000.0);
+        settings.intraday_notional_limit = 0.0;
         settings
             .intraday_strategy_budgets
-            .insert("live-momentum".into(), 45.0);
-        assert_eq!(enabled_intraday_strategy_count(&settings), 2);
-        assert_eq!(intraday_strategy_notional_share(&settings), 60.0);
-        assert_eq!(intraday_strategy_budget(&settings, "live-momentum"), 45.0);
-        assert_eq!(intraday_strategy_budget(&settings, "live-trade-flow"), 75.0);
+            .insert("live-momentum".into(), 0.0);
 
         settings
             .strategy_positions
@@ -2290,7 +2239,7 @@ mod persistence_allocation_tests {
             .orders
             .push(pending_order("ETH-USDT", "live-momentum", "buy", 5.0));
         assert_eq!(
-            allocated_notional_for_strategy(&settings, "live-momentum"),
+            allocated_notional_for_candidate(&settings, "live-momentum", "ETH-USDT"),
             100.0
         );
         assert_eq!(
@@ -2346,23 +2295,13 @@ mod persistence_allocation_tests {
     }
 
     #[test]
-    fn category_limits_and_quote_conversion_use_safe_fallbacks() {
+    fn position_slot_limits_and_quote_conversion_use_safe_fallbacks() {
         let mut settings = settings_with_rates();
         settings.max_daily_open_positions = 7;
         settings.strategies = vec![Strategy::Donchian20Btc200, Strategy::Donchian55Btc200];
-        settings.daily_strategy_notional_limit = 320.0;
-        settings.intraday_notional_limit = 90.0;
         assert_eq!(
             category_position_limit(&settings, StrategyCategory::Daily),
             7
-        );
-        assert_eq!(
-            category_notional_limit(&settings, StrategyCategory::Daily),
-            320.0
-        );
-        assert_eq!(
-            category_notional_limit(&settings, StrategyCategory::Intraday),
-            90.0
         );
         assert_eq!(daily_strategy_position_limit(&settings), 4);
         assert_eq!(quote_usd_rate(&settings, "ETH-USDT"), 1.0);

@@ -5,6 +5,7 @@
   "exports": {
     "./styles/theme.css": "./src/styles/theme.css",
     "./styles/dashboard_widgets.css": "./src/styles/dashboard_widgets.css",
+    "./styles/operator_dashboard.css": "./src/styles/operator_dashboard.css",
     ".": {
       "@workspace/source": "./src/index.ts",
       "types": "./src/index.ts",

@@ -126,8 +126,20 @@ impl SharedMarketFeed {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = entries.get(instrument) {
-            let _ = entry.updates.send(update);
-            crate::metrics::record_queue_depth(&format!("shared_{}/{}", self.kind.label(), instrument), entry.updates.len());
+            let event = crate::metrics::market_event_timestamp(&update);
+            let delivered = entry.updates.send(update).is_ok();
+            if let Some((kind, timestamp_ms)) = event {
+                crate::metrics::record_symbol_per_symbol_queue(
+                    instrument,
+                    kind,
+                    timestamp_ms,
+                    delivered,
+                );
+            }
+            crate::metrics::record_queue_depth(
+                &format!("shared_{}/{}", self.kind.label(), instrument),
+                entry.updates.len(),
+            );
         }
     }
 }
@@ -222,9 +234,7 @@ async fn send_market_feed_request(
 ) -> Result<()> {
     for request in market_feed_requests(kind, operation, instruments) {
         write
-            .send(tokio_tungstenite::tungstenite::Message::Text(
-                request,
-            ))
+            .send(tokio_tungstenite::tungstenite::Message::Text(request))
             .await
             .map_err(|_| {
                 anyhow::anyhow!("failed to send OKX {} {operation} request", kind.label())
@@ -250,7 +260,6 @@ fn market_feed_requests(
         .collect()
 }
 
-
 fn process_shared_market_message(
     kind: MarketFeedKind,
     text: &str,
@@ -258,63 +267,84 @@ fn process_shared_market_message(
     book_state: &mut HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)>,
 ) -> Result<()> {
     match kind {
-                MarketFeedKind::Trades => {
-                    let update = match serde_json::from_str::<TradeMessage<'_>>(text) {
-                        Ok(update) => update,
-                        Err(error) => {
-                            crate::service_log!("ERROR", "Ignoring invalid shared OKX trades JSON: {error}");
-                            return Ok(());
-                        }
-                    };
-                    if update.event == Some("error") {
-                        anyhow::bail!("OKX shared trades subscription error: {}", update.msg.unwrap_or("unknown error"));
-                    }
-                    for trade in update.data.unwrap_or_default() {
-                        let (Ok(price), Ok(size), Ok(timestamp)) = (
-                            trade.px.parse::<f64>(), trade.sz.parse::<f64>(), trade.ts.parse::<u64>()
-                        ) else { continue; };
-                        let encoded = encode_trade_tick(
-                            trade.instrument,
-                            trade.trade_id,
-                            timestamp,
-                            price,
-                            size,
-                            trade.side,
-                        )?;
-                        crate::metrics::record_trade();
-                        feed.publish(trade.instrument, encoded);
-                    }
+        MarketFeedKind::Trades => {
+            let update = match serde_json::from_str::<TradeMessage<'_>>(text) {
+                Ok(update) => update,
+                Err(error) => {
+                    crate::service_log!(
+                        "ERROR",
+                        "Ignoring invalid shared OKX trades JSON: {error}"
+                    );
+                    return Ok(());
                 }
-                MarketFeedKind::Books => {
-                    let update = match serde_json::from_str::<BookMessage<'_>>(text) {
-                        Ok(update) => update,
-                        Err(error) => {
-                            crate::service_log!("ERROR", "Ignoring invalid shared OKX books JSON: {error}");
-                            return Ok(());
-                        }
-                    };
-                    if update.event == Some("error") {
-                        anyhow::bail!("OKX shared books subscription error: {}", update.msg.unwrap_or("unknown error"));
-                    }
-                    let (Some(argument), Some(items)) = (update.arg, update.data) else { return Ok(()); };
-                    let state = book_state.entry(argument.instrument.to_owned()).or_default();
-                    for item in items {
-                        if update.action == Some("snapshot") {
-                            load_book_snapshot(&mut state.0, &item.bids)?;
-                            load_book_snapshot(&mut state.1, &item.asks)?;
-                        } else {
-                            apply_book_side(&mut state.0, &item.bids, true)?;
-                            apply_book_side(&mut state.1, &item.asks, false)?;
-                        }
-                        let bids = top_book_side(&state.0);
-                        let asks = top_book_side(&state.1);
-                        let timestamp = item.ts.parse::<u64>()
-                            .map_err(|error| anyhow::anyhow!("invalid OKX book timestamp: {error}"))?;
-                        let encoded = encode_book_depth(argument.instrument, timestamp, &bids, &asks)?;
-                        crate::metrics::record_book();
-                        feed.publish(argument.instrument, encoded);
-                    }
+            };
+            if update.event == Some("error") {
+                anyhow::bail!(
+                    "OKX shared trades subscription error: {}",
+                    update.msg.unwrap_or("unknown error")
+                );
+            }
+            for trade in update.data.unwrap_or_default() {
+                let (Ok(price), Ok(size), Ok(timestamp)) = (
+                    trade.px.parse::<f64>(),
+                    trade.sz.parse::<f64>(),
+                    trade.ts.parse::<u64>(),
+                ) else {
+                    continue;
+                };
+                crate::metrics::record_symbol_source_event(trade.instrument, "trade", timestamp);
+                let encoded = encode_trade_tick(
+                    trade.instrument,
+                    trade.trade_id,
+                    timestamp,
+                    price,
+                    size,
+                    trade.side,
+                )?;
+                crate::metrics::record_trade();
+                feed.publish(trade.instrument, encoded);
+            }
+        }
+        MarketFeedKind::Books => {
+            let update = match serde_json::from_str::<BookMessage<'_>>(text) {
+                Ok(update) => update,
+                Err(error) => {
+                    crate::service_log!("ERROR", "Ignoring invalid shared OKX books JSON: {error}");
+                    return Ok(());
                 }
+            };
+            if update.event == Some("error") {
+                anyhow::bail!(
+                    "OKX shared books subscription error: {}",
+                    update.msg.unwrap_or("unknown error")
+                );
+            }
+            let (Some(argument), Some(items)) = (update.arg, update.data) else {
+                return Ok(());
+            };
+            let state = book_state
+                .entry(argument.instrument.to_owned())
+                .or_default();
+            for item in items {
+                if update.action == Some("snapshot") {
+                    load_book_snapshot(&mut state.0, &item.bids)?;
+                    load_book_snapshot(&mut state.1, &item.asks)?;
+                } else {
+                    apply_book_side(&mut state.0, &item.bids, true)?;
+                    apply_book_side(&mut state.1, &item.asks, false)?;
+                }
+                let bids = top_book_side(&state.0);
+                let asks = top_book_side(&state.1);
+                let timestamp = item
+                    .ts
+                    .parse::<u64>()
+                    .map_err(|error| anyhow::anyhow!("invalid OKX book timestamp: {error}"))?;
+                crate::metrics::record_symbol_source_event(argument.instrument, "book", timestamp);
+                let encoded = encode_book_depth(argument.instrument, timestamp, &bids, &asks)?;
+                crate::metrics::record_book();
+                feed.publish(argument.instrument, encoded);
+            }
+        }
     }
     Ok(())
 }
@@ -423,9 +453,15 @@ mod shared_market_feed_tests {
         apply_market_feed_command(MarketFeedCommand::Subscribe("ETH-USDT".into()), &mut active);
         apply_market_feed_command(MarketFeedCommand::Subscribe("BTC-USDT".into()), &mut active);
         assert_eq!(active.len(), 2);
-        apply_market_feed_command(MarketFeedCommand::Unsubscribe("BTC-USDT".into()), &mut active);
+        apply_market_feed_command(
+            MarketFeedCommand::Unsubscribe("BTC-USDT".into()),
+            &mut active,
+        );
         assert_eq!(active, HashSet::from(["ETH-USDT".to_owned()]));
-        apply_market_feed_command(MarketFeedCommand::Unsubscribe("MISSING".into()), &mut active);
+        apply_market_feed_command(
+            MarketFeedCommand::Unsubscribe("MISSING".into()),
+            &mut active,
+        );
         assert_eq!(active, HashSet::from(["ETH-USDT".to_owned()]));
     }
 
@@ -438,7 +474,9 @@ mod shared_market_feed_tests {
             entries: StdMutex::new(HashMap::new()),
         });
         let mut first = feed.subscribe("BTC-USDT");
-        assert!(matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Subscribe(symbol)) if symbol == "BTC-USDT"));
+        assert!(
+            matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Subscribe(symbol)) if symbol == "BTC-USDT")
+        );
         let mut second = feed.subscribe("BTC-USDT");
         assert!(command_receiver.try_recv().is_err());
 
@@ -450,7 +488,9 @@ mod shared_market_feed_tests {
         drop(first);
         assert!(command_receiver.try_recv().is_err());
         drop(second);
-        assert!(matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Unsubscribe(symbol)) if symbol == "BTC-USDT"));
+        assert!(
+            matches!(command_receiver.try_recv(), Ok(MarketFeedCommand::Unsubscribe(symbol)) if symbol == "BTC-USDT")
+        );
     }
 
     #[tokio::test]
@@ -472,15 +512,22 @@ mod shared_market_feed_tests {
         .unwrap();
         let trade = trades.recv().await.unwrap();
         assert_eq!(trade.len(), 97);
-        assert!(process_shared_market_message(
+        assert!(
+            process_shared_market_message(
+                MarketFeedKind::Trades,
+                r#"{"event":"error","msg":"denied"}"#,
+                &feed,
+                &mut book_state,
+            )
+            .is_err()
+        );
+        process_shared_market_message(
             MarketFeedKind::Trades,
-            r#"{"event":"error","msg":"denied"}"#,
+            "invalid json",
             &feed,
             &mut book_state,
         )
-        .is_err());
-        process_shared_market_message(MarketFeedKind::Trades, "invalid json", &feed, &mut book_state)
-            .unwrap();
+        .unwrap();
 
         let mut books = feed.subscribe("BTC-USDT");
         process_shared_market_message(
@@ -493,13 +540,15 @@ mod shared_market_feed_tests {
         assert_eq!(books.recv().await.unwrap().len(), 272);
         assert_eq!(book_state["BTC-USDT"].0, [(99.0, 2.0)]);
         assert_eq!(book_state["BTC-USDT"].1, [(101.0, 3.0)]);
-        assert!(process_shared_market_message(
-            MarketFeedKind::Books,
-            r#"{"event":"error","msg":"denied"}"#,
-            &feed,
-            &mut book_state,
-        )
-        .is_err());
+        assert!(
+            process_shared_market_message(
+                MarketFeedKind::Books,
+                r#"{"event":"error","msg":"denied"}"#,
+                &feed,
+                &mut book_state,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -530,14 +579,21 @@ mod shared_market_feed_tests {
 
         let messages = captured.lock().unwrap();
         assert_eq!(messages.len(), 2);
-        let Message::Text(first) = &messages[0] else { panic!("expected text request"); };
-        let Message::Text(second) = &messages[1] else { panic!("expected text request"); };
+        let Message::Text(first) = &messages[0] else {
+            panic!("expected text request");
+        };
+        let Message::Text(second) = &messages[1] else {
+            panic!("expected text request");
+        };
         let first: serde_json::Value = serde_json::from_str(first).unwrap();
         let second: serde_json::Value = serde_json::from_str(second).unwrap();
         assert_eq!(first["op"], "subscribe");
         assert_eq!(first["args"].as_array().unwrap().len(), 240);
         assert_eq!(first["args"][0]["channel"], "books");
         assert_eq!(second["args"][0]["instId"], "COIN240-USDT");
-        assert_eq!(market_feed_requests(MarketFeedKind::Trades, "subscribe", &[]).len(), 0);
+        assert_eq!(
+            market_feed_requests(MarketFeedKind::Trades, "subscribe", &[]).len(),
+            0
+        );
     }
 }

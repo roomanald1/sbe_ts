@@ -16,11 +16,17 @@ pub async fn serve() -> Result<()> {
     let sub = subscribe(&instrument_data, sub_sender);
     let (ticker_batches, _) = broadcast::channel::<Bytes>(256);
     crate::metrics::record_queue_depth("ticker_batches", ticker_batches.len());
-    let initial_usd_rates = Bytes::from_static(br#"{"rates":{"USD":1.0},"updated_at":0,"updated_at_by_currency":{"USD":0}}"#);
+    let initial_usd_rates = Bytes::from_static(
+        br#"{"rates":{"USD":1.0},"updated_at":0,"updated_at_by_currency":{"USD":0}}"#,
+    );
     let (usd_rate_snapshot, _) = watch::channel(initial_usd_rates);
     tokio::spawn(run_usd_rate_stream(usd_rate_snapshot.clone()));
-    let signal_feeds = SIGNAL_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
-    let signal_price_feeds = SIGNAL_PRICE_FEEDS.get_or_init(|| Arc::new(DashMap::new())).clone();
+    let signal_feeds = SIGNAL_FEEDS
+        .get_or_init(|| Arc::new(DashMap::new()))
+        .clone();
+    let signal_price_feeds = SIGNAL_PRICE_FEEDS
+        .get_or_init(|| Arc::new(DashMap::new()))
+        .clone();
     let (signal_events, _) = broadcast::channel::<Bytes>(65_536);
     crate::metrics::record_queue_depth("signal_events", signal_events.len());
     let mut ticker_router = price_updates.subscribe();
@@ -29,14 +35,30 @@ pub async fn serve() -> Result<()> {
         loop {
             match ticker_router.recv().await {
                 Ok(bytes) => {
-                    if let Some(symbol) = symbol_from_sbe(&bytes) {
-                        let output = routed_prices.get(symbol).map(|entry| entry.value().clone());
-                        if let Some(output) = output { let _ = output.send(bytes); }
+                    if let Some(symbol) = symbol_from_sbe(&bytes).map(str::to_owned) {
+                        let output = routed_prices
+                            .get(&symbol)
+                            .map(|entry| entry.value().clone());
+                        if let Some(output) = output {
+                            let event = crate::metrics::market_event_timestamp(&bytes);
+                            let delivered = output.send(bytes).is_ok();
+                            if let Some((kind, timestamp_ms)) = event {
+                                crate::metrics::record_symbol_per_symbol_queue(
+                                    &symbol,
+                                    kind,
+                                    timestamp_ms,
+                                    delivered,
+                                );
+                            }
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     crate::metrics::record_queue_lagged("price_updates", skipped);
-                    crate::service_log!("WARN", "Signal price router lagged; skipped {skipped} ticker updates");
+                    crate::service_log!(
+                        "WARN",
+                        "Signal price router lagged; skipped {skipped} ticker updates"
+                    );
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -80,7 +102,12 @@ pub async fn serve() -> Result<()> {
         }
     });
     for instrument in instrument_data.iter().take(SIGNAL_INSTRUMENT_LIMIT) {
-        start_signal_feed(instrument, &signal_feeds, &signal_price_feeds, &signal_events);
+        start_signal_feed(
+            instrument,
+            &signal_feeds,
+            &signal_price_feeds,
+            &signal_events,
+        );
     }
     let port = env::var("PORT").unwrap_or_else(|_| "10000".to_string());
     let addr = format!("0.0.0.0:{port}");
@@ -105,4 +132,3 @@ pub async fn serve() -> Result<()> {
     tokio::try_join!(sub, r_socket)?;
     Ok(())
 }
-

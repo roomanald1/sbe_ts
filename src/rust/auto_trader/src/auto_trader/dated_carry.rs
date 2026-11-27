@@ -69,6 +69,121 @@ impl Default for DatedCarryBook {
     }
 }
 
+fn dated_carry_open_spot_notional_usdt(book: &DatedCarryBook) -> Result<f64, String> {
+    book.positions
+        .iter()
+        .filter(|position| position.status == "open")
+        .try_fold(0.0, |total, position| {
+            let notional = position.quantity * position.spot_entry_price;
+            if !position.quantity.is_finite()
+                || position.quantity <= 0.0
+                || !position.spot_entry_price.is_finite()
+                || position.spot_entry_price <= 0.0
+                || !notional.is_finite()
+                || notional <= 0.0
+            {
+                return Err(format!(
+                    "Invalid open dated-carry spot exposure for {}",
+                    position.future_symbol
+                ));
+            }
+            let sum = total + notional;
+            sum.is_finite()
+                .then_some(sum)
+                .ok_or_else(|| "Dated-carry spot exposure overflow".to_owned())
+        })
+}
+
+fn dated_carry_open_gross_reserved_usd(
+    settings: &Settings,
+    book: &DatedCarryBook,
+) -> Result<f64, String> {
+    book.positions
+        .iter()
+        .filter(|position| position.status == "open")
+        .try_fold(0.0, |total, position| {
+            let profile_symbol = position.spot_symbol.replace("USDT", "-USDT");
+            let rate = quote_usd_rate(settings, &profile_symbol);
+            let gross = position.quantity
+                * (position.spot_entry_price + position.future_entry_price)
+                * rate;
+            if !position.quantity.is_finite()
+                || position.quantity <= 0.0
+                || !position.spot_entry_price.is_finite()
+                || position.spot_entry_price <= 0.0
+                || !position.future_entry_price.is_finite()
+                || position.future_entry_price <= 0.0
+                || !rate.is_finite()
+                || rate <= 0.0
+                || !gross.is_finite()
+                || gross <= 0.0
+            {
+                return Err(format!(
+                    "Invalid open dated-carry gross exposure for {}",
+                    position.future_symbol
+                ));
+            }
+            let sum = total + gross;
+            sum.is_finite()
+                .then_some(sum)
+                .ok_or_else(|| "Dated-carry USD reserve overflow".to_owned())
+        })
+}
+
+fn proposed_dated_carry_reserve_usd(
+    settings: &Settings,
+    book: &DatedCarryBook,
+    spot_symbol: &str,
+    spot_entry_price: f64,
+    future_entry_price: f64,
+    quantity: f64,
+) -> Result<f64, (StatusCode, String)> {
+    let current_spot = dated_carry_open_spot_notional_usdt(book)
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+    let proposed_spot = quantity * spot_entry_price;
+    let next_spot_total = current_spot + proposed_spot;
+    if !proposed_spot.is_finite()
+        || proposed_spot <= 0.0
+        || !next_spot_total.is_finite()
+        || next_spot_total > book.max_spot_notional_usdt + 0.01
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Dated-carry entry exceeds the per-book spot capital ceiling".to_owned(),
+        ));
+    }
+    let profile_symbol = spot_symbol.replace("USDT", "-USDT");
+    let rate = quote_usd_rate(settings, &profile_symbol);
+    let current_gross = dated_carry_open_gross_reserved_usd(settings, book)
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+    let entry_gross = quantity * (spot_entry_price + future_entry_price) * rate;
+    let proposed_total = current_gross + entry_gross;
+    if !entry_gross.is_finite()
+        || entry_gross <= 0.0
+        || !proposed_total.is_finite()
+        || !rate.is_finite()
+        || rate <= 0.0
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            "Dated-carry USD capital reservation is invalid".to_owned(),
+        ));
+    }
+    let non_carry_allocated = allocated_notional_for_category(settings, None);
+    if non_carry_allocated + proposed_total > settings.daily_notional_limit + 1e-9 {
+        return Err((
+            StatusCode::CONFLICT,
+            "Dated-carry entry exceeds remaining shared AutoTrader capital".to_owned(),
+        ));
+    }
+    Ok(proposed_total)
+}
+
+fn reconcile_dated_carry_capital(settings: &mut Settings, book: &DatedCarryBook) -> Result<(), String> {
+    settings.dated_carry_reserved_usd = dated_carry_open_gross_reserved_usd(settings, book)?;
+    settings.used_notional_today = allocated_notional(settings);
+    Ok(())
+}
 
 fn carry_now_ms() -> u64 {
     SystemTime::now()
@@ -156,6 +271,14 @@ async fn update_dated_carry(
     }
     let _work = state.dated_carry_work_lock.lock().await;
     let mut book = state.dated_carry.lock().await;
+    let current_spot_notional = dated_carry_open_spot_notional_usdt(&book)
+        .map_err(|error| (StatusCode::CONFLICT, error))?;
+    if current_spot_notional > update.max_spot_notional_usdt + 0.01 {
+        return Err((
+            StatusCode::CONFLICT,
+            "Paper spot notional cannot be lowered below open dated-carry exposure".into(),
+        ));
+    }
     book.max_spot_notional_usdt = update.max_spot_notional_usdt;
     let mut response = book.clone();
     drop(book);
@@ -178,6 +301,7 @@ async fn close_dated_carry(
 ) -> Result<Json<DatedCarryBook>, (StatusCode, String)> {
     let _work = state.dated_carry_work_lock.lock().await;
     let mut book = state.dated_carry.lock().await;
+    let original_book = book.clone();
     let position = book.positions.iter_mut().find(|position| {
         position.future_symbol == request.future_symbol && position.status == "open"
     }).ok_or((StatusCode::NOT_FOUND, "Open dated carry position not found".into()))?;
@@ -212,9 +336,16 @@ async fn close_dated_carry(
     });
     let updated_book = book.clone();
     drop(book);
-    save_dated_carry(&state.dated_carry_path, &updated_book)
-        .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    if let Err(error) = save_dated_carry(&state.dated_carry_path, &updated_book).await {
+        *state.dated_carry.lock().await = original_book.clone();
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+    }
+    {
+        let mut settings = state.settings.lock().await;
+        reconcile_dated_carry_capital(&mut settings, &updated_book)
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        request_settings_persist(&state)?;
+    }
     sync_dated_carry_ledger(&updated_book).await
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
     queue_auto_trader_audit(&state, audit);
@@ -253,6 +384,7 @@ async fn receive_dated_carry_signal(
     let _work = state.dated_carry_work_lock.lock().await;
     let now_ms = carry_now_ms();
     let mut book = state.dated_carry.lock().await;
+    let original_book = book.clone();
     let mut changed = false;
     let mut audit_payload = None;
     match signal {
@@ -340,9 +472,24 @@ async fn receive_dated_carry_signal(
                 } else {
                     let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
                     let future_entry = candidate.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
-                    if candidate.quantity * spot_entry > book.max_spot_notional_usdt + 0.01 {
-                        return Err((StatusCode::BAD_REQUEST, "Carry signal exceeds the paper size limit".into()));
+                    let mut settings = state.settings.lock().await;
+                    if !state.enabled.load(Ordering::Relaxed)
+                        || !settings.strategies.contains(&Strategy::DatedCarry)
+                    {
+                        return Err((StatusCode::CONFLICT, "Dated-carry strategy is no longer enabled".into()));
                     }
+                    let reserve = proposed_dated_carry_reserve_usd(
+                        &settings,
+                        &book,
+                        &candidate.spot_symbol,
+                        spot_entry,
+                        future_entry,
+                        candidate.quantity,
+                    )?;
+                    settings.dated_carry_reserved_usd = reserve;
+                    settings.used_notional_today = allocated_notional(&settings);
+                    request_settings_persist(&state)?;
+                    drop(settings);
                     let fees = candidate.quantity * (0.001 * spot_entry + 0.0005 * future_entry);
                     audit_payload = Some(serde_json::json!({
                         "decision_id": format!("dated-carry:{}", candidate.future_symbol),
@@ -447,9 +594,22 @@ async fn receive_dated_carry_signal(
     if changed {
         let updated_book = book.clone();
         drop(book);
-        save_dated_carry(&state.dated_carry_path, &updated_book)
-            .await
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        if let Err(error) = save_dated_carry(&state.dated_carry_path, &updated_book).await {
+            let mut book = state.dated_carry.lock().await;
+            *book = original_book.clone();
+            drop(book);
+            let mut settings = state.settings.lock().await;
+            reconcile_dated_carry_capital(&mut settings, &original_book)
+                .map_err(|reconcile| (StatusCode::INTERNAL_SERVER_ERROR, reconcile))?;
+            request_settings_persist(&state)?;
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+        }
+        {
+            let mut settings = state.settings.lock().await;
+            reconcile_dated_carry_capital(&mut settings, &updated_book)
+                .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+            request_settings_persist(&state)?;
+        }
         sync_dated_carry_ledger(&updated_book)
             .await
             .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error))?;
@@ -465,6 +625,8 @@ async fn receive_dated_carry_signal(
 #[cfg(test)]
 mod dated_carry_probe_contract_tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     fn candidate() -> DatedCarryCandidate {
         DatedCarryCandidate {
@@ -482,6 +644,141 @@ mod dated_carry_probe_contract_tests {
             eligible: true,
             reason: "eligible".into(),
         }
+    }
+
+    fn open_position(quantity: f64, spot_price: f64, future_price: f64) -> DatedCarryPosition {
+        DatedCarryPosition {
+            spot_symbol: "BTCUSDT".into(),
+            future_symbol: "BTCUSDT_Q1".into(),
+            expiry_ms: 1_800_000_000_000,
+            entry_ms: 1_700_000_000_000,
+            quantity,
+            spot_entry_price: spot_price,
+            future_entry_price: future_price,
+            entry_fees: 0.0,
+            status: "open".into(),
+            spot_exit_twap: None,
+            settlement_price: None,
+            net_pnl_usdt: None,
+            settlement_source: None,
+            spot_mark_bid: Some(spot_price),
+            future_mark_ask: Some(future_price),
+            spot_leg_pnl_usdt: None,
+            future_leg_pnl_usdt: None,
+            estimated_exit_fees_usdt: None,
+            estimated_exit_slippage_usdt: None,
+            marked_net_pnl_usdt: None,
+            mark_checked_at_ms: None,
+            closed_at_ms: None,
+        }
+    }
+
+    fn standard_order(notional: f64) -> TraderOrder {
+        serde_json::from_value(serde_json::json!({
+            "timestamp": 1,
+            "symbol": "ETH-USDT",
+            "side": "buy",
+            "order_type": "Limit",
+            "purpose": "signal",
+            "strategy": "live-momentum",
+            "quantity": 1.0,
+            "filled_quantity": 0.0,
+            "reserved_notional": notional,
+            "status": "submitting",
+            "realized_pnl": 0.0
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn startup_rebuilds_two_leg_usd_reserve_from_reopened_carry_book() {
+        let path = std::env::temp_dir().join(format!(
+            "dated-carry-capital-recovery-{}.sqlite",
+            carry_now_ms()
+        ));
+        let book = DatedCarryBook {
+            enabled: true,
+            positions: vec![open_position(1.0, 300.0, 400.0)],
+            ..DatedCarryBook::default()
+        };
+        persist_dated_carry_book(&path, &book).unwrap();
+        let reopened = read_dated_carry_database(&path).unwrap().unwrap();
+        let mut settings = Settings::default();
+        settings.daily_notional_limit = 650.0;
+        settings.usd_rates.insert("USDT".into(), 1.0);
+        reconcile_dated_carry_capital(&mut settings, &reopened).unwrap();
+        assert_eq!(settings.dated_carry_reserved_usd, 700.0);
+        assert_eq!(allocated_notional(&settings), 700.0);
+        assert_eq!(
+            (settings.daily_notional_limit - allocated_notional(&settings)).max(0.0),
+            0.0
+        );
+        let mut closed_book = reopened.clone();
+        closed_book.positions[0].status = "closed".to_owned();
+        reconcile_dated_carry_capital(&mut settings, &closed_book).unwrap();
+        assert_eq!(settings.dated_carry_reserved_usd, 0.0);
+        assert_eq!(allocated_notional(&settings), 0.0);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_standard_and_carry_reservations_cannot_exceed_shared_pool() {
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        {
+            let mut settings = settings.lock().await;
+            settings.daily_notional_limit = 1_000.0;
+            settings.usd_rates.insert("USDT".into(), 1.0);
+        }
+        let carry_book = Arc::new(Mutex::new(DatedCarryBook::default()));
+        let barrier = Arc::new(Barrier::new(3));
+
+        let standard_settings = Arc::clone(&settings);
+        let standard_barrier = Arc::clone(&barrier);
+        let standard = tokio::spawn(async move {
+            standard_barrier.wait().await;
+            let mut settings = standard_settings.lock().await;
+            if settings.daily_notional_limit - allocated_notional(&settings) < 600.0 {
+                return false;
+            }
+            settings.orders.push(standard_order(600.0));
+            settings.used_notional_today = allocated_notional(&settings);
+            true
+        });
+
+        let carry_settings = Arc::clone(&settings);
+        let carry_book_for_task = Arc::clone(&carry_book);
+        let carry_barrier = Arc::clone(&barrier);
+        let carry = tokio::spawn(async move {
+            carry_barrier.wait().await;
+            let book = carry_book_for_task.lock().await;
+            let mut settings = carry_settings.lock().await;
+            let mut candidate = candidate();
+            candidate.future_bid = 100.0;
+            let spot_entry = candidate.spot_ask * (1.0 + CARRY_ENTRY_SLIPPAGE);
+            let future_entry = candidate.future_bid * (1.0 - CARRY_ENTRY_SLIPPAGE);
+            let Ok(reserve) = proposed_dated_carry_reserve_usd(
+                &settings,
+                &book,
+                &candidate.spot_symbol,
+                spot_entry,
+                future_entry,
+                3.0,
+            ) else {
+                return false;
+            };
+            settings.dated_carry_reserved_usd = reserve;
+            settings.used_notional_today = allocated_notional(&settings);
+            true
+        });
+
+        barrier.wait().await;
+        let (standard_won, carry_won) = (standard.await.unwrap(), carry.await.unwrap());
+        assert_ne!(standard_won, carry_won);
+        let settings = settings.lock().await;
+        assert!(allocated_notional(&settings) <= settings.daily_notional_limit + 1e-9);
+        assert_eq!(allocated_notional(&settings), 600.0);
     }
 
 

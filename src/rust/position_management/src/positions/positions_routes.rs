@@ -185,6 +185,10 @@ fn position_router(store: Arc<PositionStore>) -> Router {
             "/positions/orders/{id}",
             axum::routing::delete(cancel_order),
         )
+        .route(
+            "/positions/orders/{id}/trigger",
+            post(adjust_barrier_trigger),
+        )
         .with_state(store)
         .merge(crate::users::router())
 }

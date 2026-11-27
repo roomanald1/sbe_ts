@@ -7,6 +7,88 @@ struct ActivityPositionSnapshot {
     position_exit_policies: Vec<PositionExitPolicy>,
 }
 
+fn selected_exit_parameter_source(
+    position: &TraderPosition,
+    parameter: &str,
+) -> String {
+    position
+        .exit_parameter_provenance
+        .as_ref()
+        .and_then(|provenance| provenance.get(parameter))
+        .and_then(|selection| selection.get("source"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            let value_is_missing = match parameter {
+                "stop_loss" => position.stop_loss_percent.is_none(),
+                "take_profit" => {
+                    position.take_profit_percent.is_none()
+                        && position.horizon_take_profit_percent.is_none()
+                }
+                _ => false,
+            };
+            if value_is_missing {
+                "global_fallback".into()
+            } else {
+                "unknown".into()
+            }
+        })
+}
+
+fn provenance_selected_percent(
+    position: &TraderPosition,
+    parameter: &str,
+) -> Option<f64> {
+    position
+        .exit_parameter_provenance
+        .as_ref()
+        .and_then(|provenance| provenance.get(parameter))
+        .and_then(|selection| selection.get("selected_percent"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn initial_risk_evidence_status(position: &TraderPosition, symbol: &str) -> &'static str {
+    let Some(reference) = position.initial_risk_reference.as_ref() else {
+        return "unavailable";
+    };
+    if reference.status != "complete"
+        || reference.schema_version != 1
+        || reference.quote_amount.is_none_or(|amount| !amount.is_finite() || amount <= 0.0)
+        || reference.fill_ids.is_empty()
+    {
+        return "incomplete";
+    }
+    let quote_currency = symbol.split_once('-').map(|(_, quote)| quote);
+    if quote_currency.is_none() || reference.quote_currency.as_deref() != quote_currency {
+        return "quote_currency_mismatch";
+    }
+    let identity_complete = position.lifecycle_identity.as_ref().is_some_and(|identity| {
+        identity.schema_version == 1
+            && !identity.episode_id.trim().is_empty()
+            && !identity.opportunity_id.trim().is_empty()
+            && position.trade_id.as_deref() == Some(identity.trade_id.as_str())
+    });
+    if !identity_complete {
+        return "canonical_identity_incomplete";
+    }
+    if reference.fill_ids.len() != position.entry_fill_ids.len()
+        || !reference
+            .fill_ids
+            .iter()
+            .all(|fill_id| position.entry_fill_ids.contains(fill_id))
+        || !entry_fill_identity_complete(position)
+    {
+        return "entry_fill_lineage_incomplete";
+    }
+    if position.entry_fee_currencies.len() != 1
+        || position.entry_fee_currencies[0].as_str() != quote_currency.unwrap_or_default()
+    {
+        return "fee_currency_not_quote";
+    }
+    "eligible_for_r_multiple"
+}
+
 fn external_close_order_for_trade<'a>(
     trade: &serde_json::Value,
     orders: &'a [TraderOrder],
@@ -42,10 +124,26 @@ fn build_closed_ledger_rows(
     realized_by_parent: Option<&BTreeMap<String, f64>>,
 ) -> Vec<serde_json::Value> {
     let mut order_by_id = BTreeMap::<String, &TraderOrder>::new();
+    let mut orders_by_opportunity = BTreeMap::<String, Vec<&TraderOrder>>::new();
     for order in orders {
         order_by_id.insert(order.timestamp.to_string(), order);
         if let Some(id) = order.execution_order_id.as_ref() {
             order_by_id.insert(id.clone(), order);
+        }
+        if matches!(order.purpose.as_str(), "signal" | "scout") {
+            if let Some(opportunity_id) = order
+                .decision_id
+                .as_ref()
+                .and_then(|decision_id| lifecycle_links.get(decision_id))
+                .and_then(|identity| identity.get("opportunity_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                orders_by_opportunity
+                    .entry(opportunity_id.to_owned())
+                    .or_default()
+                    .push(order);
+            }
         }
     }
     let mut groups = BTreeMap::<(String, String, String), Vec<serde_json::Value>>::new();
@@ -58,18 +156,28 @@ fn build_closed_ledger_rows(
         .collect::<Vec<_>>();
     for trade in body["trades"].as_array().into_iter().flatten() {
         let parent = trade["parent_order_id"].as_str().unwrap_or_default();
+        let Some(symbol) = trade["symbol"].as_str() else {
+            continue;
+        };
+        let side = trade["side"].as_str();
         let is_manual_auto_fill =
             parent.starts_with("execution-check-") || parent.starts_with("auto-manual-close:");
-        let order = order_by_id.get(parent).copied().or_else(|| {
+        let exact_opportunity_order = orders_by_opportunity
+            .get(parent)
+            .filter(|matches| matches.len() == 1)
+            .and_then(|matches| matches.first().copied())
+            .filter(|order| order.symbol == symbol && Some(order.side.as_str()) == side);
+        let order = order_by_id
+            .get(parent)
+            .copied()
+            .or(exact_opportunity_order)
+            .or_else(|| {
             let index = external_close_order_for_trade(trade, orders, &external_close_remaining)?;
             let quantity = trade["quantity"].as_f64().unwrap_or_default();
             external_close_remaining[index] = (external_close_remaining[index] - quantity).max(0.0);
             orders.get(index)
         });
         let trade_source = trade["source"].as_str().unwrap_or("auto");
-        let Some(symbol) = trade["symbol"].as_str() else {
-            continue;
-        };
         // Manual Auto orders bypass AutoTrader's strategy order registry, so
         // their fills have no strategy/decision attribution. Keep them for
         // position-cycle reconstruction below, including fills with no order
@@ -201,6 +309,11 @@ fn build_closed_ledger_rows(
             .iter()
             .map(|trade| trade["fee"].as_f64().unwrap_or_default().abs())
             .sum::<f64>();
+        let entry_fees = trades
+            .iter()
+            .filter(|trade| trade["side"].as_str() == Some(entry_side))
+            .map(|trade| trade["fee"].as_f64().unwrap_or_default().abs())
+            .sum::<f64>();
         let parent_orders = trades
             .iter()
             .filter_map(|trade| trade["parent_order_id"].as_str())
@@ -263,11 +376,20 @@ fn build_closed_ledger_rows(
             "workerEventId": worker_identity.and_then(|snapshot| snapshot.event_id.as_deref()),
             "workerEpisodeId": worker_identity.and_then(|snapshot| snapshot.episode_id.as_deref()),
         });
+        let outcome_source = if entry_order.is_some_and(|order| order.purpose == "scout") {
+            "scout"
+        } else {
+            match lifecycle.and_then(|identity| identity["entry_policy"].as_str()) {
+                Some("strict") => "strict",
+                Some("exploratory") => "exploratory",
+                _ => "unknown",
+            }
+        };
         let key = format!("{strategy}:{decision_id}:{symbol}");
-        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":0,"totalFees":total_fees,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":"unknown","provenance":provenance.clone(),"manuallyClosed":manually_closed,"components":{}}));
+        rows.push(serde_json::json!({"rowId":format!("ledger-summary:{key}"),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":entry_side,"openedAt":first["timestamp"],"closedAt":last["timestamp"],"quantity":quantity,"signedQuantity":if entry_side == "buy" {quantity} else {-quantity},"entryPrice":entry_price,"pnl":realized_pnl,"entryFees":entry_fees,"totalFees":total_fees,"estimatedExitFeeRate":0,"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":if entry_side == "buy" {"LONG"} else {"SHORT"},"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":outcome_source,"provenance":provenance.clone(),"manuallyClosed":manually_closed,"components":{}}));
         for trade in trades {
             let trade_source = trade["source"].as_str().unwrap_or("auto");
-            rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":"unknown","provenance":provenance.clone(),"components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));
+            rows.push(serde_json::json!({"rowId":format!("ledger-trade:{}",trade["id"].as_str().unwrap_or_default()),"status":"Closed","decisionId":decision_id,"strategyInstanceId":decision_id,"symbol":symbol,"side":trade["side"],"openedAt":trade["timestamp"],"closedAt":trade["timestamp"],"quantity":trade["quantity"],"signedQuantity":if trade["side"].as_str()==Some("buy"){trade["quantity"].as_f64().unwrap_or_default()}else{-trade["quantity"].as_f64().unwrap_or_default()},"entryPrice":trade["execution_price"],"pnl":0,"entryFees":trade["fee"],"estimatedExitFeeRate":trade["fee_rate"],"estimatedExitSlippageBps":0,"pnlQuoteCurrency":symbol.split_once('-').map(|(_,q)|q).unwrap_or("USD"),"strategy":strategy,"direction":trade["side"],"strength":null,"scout":entry_order.is_some_and(|order| order.purpose == "scout"),"source":outcome_source,"provenance":provenance.clone(),"components":{},"ledgerTrade":trade,"ledgerSource":trade_source}));
         }
     }
     rows.extend(
@@ -317,6 +439,170 @@ fn build_closed_ledger_rows(
 mod closed_ledger_rows_tests {
     use super::*;
 
+    #[test]
+    fn open_strategy_position_exposes_only_its_persisted_lifecycle_identity() {
+        let decision_id = "decision-open";
+        let mut settings = Settings::default();
+        settings.strategy_positions.insert(
+            "DOGE-USDT".into(),
+            BTreeMap::from([(
+                "live-vwap-dislocation".to_owned(),
+                serde_json::from_value(serde_json::json!({
+                    "quantity": -2.0,
+                    "entry_decision_id": decision_id,
+                    "entry_timestamp_ms": 100,
+                    "average_entry_price": 0.05,
+                    "entry_fees": 0.001,
+                    "realized_pnl": 0.0,
+                    "entry_order_type": "PostOnlyLimit",
+                    "entry_order_types": ["PostOnlyLimit"],
+                    "stop_loss_percent": 0.5,
+                    "take_profit_percent": 0.75
+                }))
+                .unwrap(),
+            )]),
+        );
+        settings.canonical_lifecycle_links.insert(
+            decision_id.to_owned(),
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "opportunity_id": "opportunity-1",
+                "episode_id": "episode-1",
+                "trade_id": "trade-1",
+                "profile_id": "profile-1",
+                "profile_hash": "sha256:v1:profile",
+                "profile_version": 2,
+                "execution_mode": "paper",
+                "entry_policy": "exploratory",
+                "source": "auto_trader_entry_reservation"
+            }))
+            .unwrap(),
+        );
+
+        let snapshot = snapshot_activity_positions(&settings, 0);
+        let row = serde_json::to_value(&snapshot.strategy_positions[0]).unwrap();
+        assert_eq!(row["decision_id"], decision_id);
+        assert_eq!(row["lifecycle"]["trade_id"], "trade-1");
+        assert_eq!(row["exit_profile_id"], "profile-1");
+        assert_eq!(row["exit_profile_version"], 2);
+        assert_eq!(row["lifecycle"]["opportunity_id"], "opportunity-1");
+        assert_eq!(row["lifecycle"]["episode_id"], "episode-1");
+        assert_eq!(row["stop_loss_source"], "unknown");
+        assert_eq!(row["selected_stop_loss_percent"], serde_json::Value::Null);
+        assert_eq!(row["exit_control_mode"], "protective_stop_and_target");
+
+        settings.canonical_lifecycle_links.clear();
+        let legacy = snapshot_activity_positions(&settings, 0);
+        assert!(legacy.strategy_positions[0].lifecycle.is_none());
+    }
+
+    #[test]
+    fn signal_managed_strategy_is_explicitly_inactive_for_fixed_protection() {
+        let mut settings = Settings::default();
+        settings.strategy_positions.insert(
+            "BTC-USDT".into(),
+            BTreeMap::from([(
+                "risk-adjusted-monthly-momentum".to_owned(),
+                TraderPosition {
+                    quantity: 1.0,
+                    average_entry_price: 100.0,
+                    ..TraderPosition::default()
+                },
+            )]),
+        );
+        let snapshot = snapshot_activity_positions(&settings, 0);
+        let row = serde_json::to_value(&snapshot.strategy_positions[0]).unwrap();
+        assert_eq!(row["stop_loss_active"], false);
+        assert_eq!(row["take_profit_active"], false);
+        assert_eq!(row["exit_control_mode"], "signal_managed");
+    }
+
+    #[test]
+    fn exit_parameter_source_is_explicit_when_selected_equals_global_fallback() {
+        let mut settings = Settings::default();
+        let provenance = serde_json::json!({
+            "schema_version":1,
+            "profile_id":"profile-btc-momentum-v4",
+            "profile_version":4,
+            "exit_policy_as_of_ms":1_000,
+            "risk_appetite_at_selection":50.0,
+            "stop_loss":{
+                "source":"validated_exit_policy",
+                "selected_percent":0.5,
+                "profile_percent":0.5,
+                "effective_percent":0.5,
+                "global_fallback_percent":0.5
+            },
+            "take_profit":{
+                "source":"validated_exit_policy",
+                "selected_percent":0.75,
+                "profile_percent":0.75,
+                "effective_percent":0.75,
+                "global_fallback_percent":0.75
+            }
+        });
+        settings.strategy_positions.insert(
+            "BTC-USDT".into(),
+            BTreeMap::from([(
+                "live-momentum".to_owned(),
+                TraderPosition {
+                    quantity: 1.0,
+                    average_entry_price: 100.0,
+                    entry_decision_id: Some("decision-profile".into()),
+                    trade_id: Some("trade-profile".into()),
+                    lifecycle_identity: Some(CanonicalLifecycleIdentity {
+                        schema_version: 1,
+                        opportunity_id: "opportunity-profile".into(),
+                        episode_id: "episode-profile".into(),
+                        trade_id: "trade-profile".into(),
+                        profile_id: Some("profile-btc-momentum-v4".into()),
+                        profile_hash: None,
+                        profile_version: Some(4),
+                        execution_mode: "paper".into(),
+                        entry_policy: "strict".into(),
+                        source: "auto_trader_entry_reservation".into(),
+                    }),
+                    stop_loss_percent: Some(0.5),
+                    take_profit_percent: Some(0.75),
+                    exit_parameter_provenance: Some(provenance),
+                    ..TraderPosition::default()
+                },
+            )]),
+        );
+        settings.canonical_lifecycle_links.insert(
+            "decision-profile".into(),
+            CanonicalLifecycleIdentity {
+                schema_version: 1,
+                opportunity_id: "opportunity-profile".into(),
+                episode_id: "episode-profile".into(),
+                trade_id: "trade-profile".into(),
+                profile_id: Some("profile-btc-momentum-v4".into()),
+                profile_hash: None,
+                profile_version: Some(4),
+                execution_mode: "paper".into(),
+                entry_policy: "strict".into(),
+                source: "auto_trader_entry_reservation".into(),
+            },
+        );
+        settings.stop_loss_percent = 0.5;
+        settings.take_profit_percent = 0.75;
+
+        let snapshot = snapshot_activity_positions(&settings, 0);
+        let row = serde_json::to_value(&snapshot.strategy_positions[0]).unwrap();
+        assert_eq!(row["selected_stop_loss_percent"], 0.5);
+        assert_eq!(row["selected_take_profit_percent"], 0.75);
+        assert_eq!(row["stop_loss_source"], "validated_exit_policy");
+        assert_eq!(row["take_profit_source"], "validated_exit_policy");
+        assert_eq!(row["effective_stop_loss_percent"], 0.5);
+        assert_eq!(row["effective_take_profit_percent"], 0.75);
+        assert_eq!(row["fallback_stop_loss_percent"], 0.5);
+        assert_eq!(row["fallback_take_profit_percent"], 0.75);
+        assert_eq!(row["exit_profile_id"], "profile-btc-momentum-v4");
+        assert_eq!(row["exit_profile_version"], 4);
+        assert_eq!(row["exit_policy_as_of_ms"], 1_000);
+        assert_eq!(row["initial_risk_evidence_status"], "unavailable");
+    }
+
     fn lineage_order(exploratory: bool, with_worker_identity: bool) -> TraderOrder {
         serde_json::from_value(serde_json::json!({
             "timestamp": 100, "symbol": "LINK-USDT", "side": "buy",
@@ -340,6 +626,61 @@ mod closed_ledger_rows_tests {
             {"id":"fill-2", "source":"auto", "symbol":"LINK-USDT", "side":"sell", "timestamp":120,
              "quantity":1.0, "execution_price":11.0, "fee":0.1, "fee_rate":0.01, "parent_order_id":"exit-order"}
         ]})
+    }
+
+    #[test]
+    fn canonical_opportunity_id_joins_entry_fill_with_protective_exit() {
+        let entry = serde_json::from_value::<TraderOrder>(serde_json::json!({
+            "timestamp":100,"symbol":"DOGE-USDT","side":"sell","order_type":"Limit",
+            "purpose":"signal","exploratory":true,"strategy":"live-vwap-dislocation",
+            "decision_id":"decision-1","quantity":2.0,"filled_quantity":2.0,
+            "status":"filled","realized_pnl":0.0,"execution_order_id":"entry-execution-1"
+        })).unwrap();
+        let stop = serde_json::from_value::<TraderOrder>(serde_json::json!({
+            "timestamp":120,"symbol":"DOGE-USDT","side":"buy","order_type":"StopMarket",
+            "purpose":"stop-loss","exploratory":false,"strategy":"live-vwap-dislocation",
+            "decision_id":"decision-1","quantity":2.0,"filled_quantity":2.0,
+            "status":"filled","realized_pnl":0.0,"execution_order_id":"barrier-1"
+        })).unwrap();
+        let links = BTreeMap::from([(
+            "decision-1".to_owned(),
+            serde_json::json!({
+                "opportunity_id":"opportunity-1","episode_id":"episode-1",
+                "trade_id":"trade-1","profile_id":"profile-1",
+                "execution_mode":"paper","entry_policy":"exploratory"
+            }),
+        )]);
+        let trades = serde_json::json!({"trades":[
+            {"id":"fill-entry","source":"auto","symbol":"DOGE-USDT","side":"sell",
+             "timestamp":100,"quantity":2.0,"execution_price":0.05,"fee":-0.00008,
+             "fee_rate":-0.0008,"parent_order_id":"opportunity-1"},
+            {"id":"fill-stop","source":"auto","symbol":"DOGE-USDT","side":"buy",
+             "timestamp":120,"quantity":2.0,"execution_price":0.051,"fee":-0.000102,
+             "fee_rate":-0.001,"parent_order_id":"barrier-1"}
+        ]});
+
+        let rows = build_closed_ledger_rows(
+            &[entry, stop], &links, &[], &[], &trades, None,
+        );
+        assert_eq!(rows.len(), 3, "one summary plus two visible fill records");
+        let summary = rows
+            .iter()
+            .find(|row| row["rowId"].as_str().unwrap().starts_with("ledger-summary:"))
+            .unwrap();
+        assert_eq!(summary["openedAt"], 100);
+        assert_eq!(summary["closedAt"], 120);
+        assert_eq!(summary["entryPrice"], 0.05);
+        assert_eq!(summary["source"], "exploratory");
+        assert_eq!(summary["entryFees"], 0.00008);
+        assert_eq!(summary["totalFees"], 0.000182);
+        assert_eq!(summary["provenance"]["exploratory"], true);
+        assert_eq!(summary["provenance"]["tradeId"], "trade-1");
+        let fill_parents = rows
+            .iter()
+            .filter_map(|row| row.get("ledgerTrade"))
+            .filter_map(|trade| trade["parent_order_id"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(fill_parents, ["barrier-1", "opportunity-1"].into());
     }
 
     #[test]
@@ -569,7 +910,7 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let strategy_positions = settings
+    let mut strategy_positions = settings
         .strategy_positions
         .iter()
         .flat_map(|(symbol, lots)| {
@@ -585,14 +926,8 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                         .stop_loss_percent
                         .unwrap_or(settings.stop_loss_percent);
                     let effective_take_profit = if take_profit_active {
-                        let candidate = position
-                            .take_profit_percent
-                            .or_else(|| {
-                                position
-                                    .horizon_take_profit_percent
-                                    .map(|target| target.max(settings.take_profit_percent))
-                            })
-                            .unwrap_or(settings.take_profit_percent);
+                        let (candidate, _) =
+                            position_take_profit_candidate(position, settings.take_profit_percent);
                         let learned_exit_policy = position_uses_learned_exit_policy(position);
                         let effective_candidate = if learned_exit_policy {
                             candidate
@@ -620,6 +955,7 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                         symbol: symbol.clone(),
                         strategy: strategy.clone(),
                         decision_id: position.entry_decision_id.clone(),
+                        lifecycle: None,
                         quantity: position.quantity,
                         average_entry_price: position.average_entry_price,
                         entry_fees: -position.entry_fees.abs(),
@@ -641,14 +977,96 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                         },
                         stop_loss_percent: stop_loss_active.then_some(effective_stop_loss),
                         take_profit_percent: effective_take_profit,
+                        effective_stop_loss_percent: stop_loss_active.then_some(effective_stop_loss),
+                        effective_take_profit_percent: effective_take_profit,
+                        selected_stop_loss_percent: provenance_selected_percent(position, "stop_loss"),
+                        selected_take_profit_percent: provenance_selected_percent(position, "take_profit"),
+                        stop_loss_source: selected_exit_parameter_source(
+                            position,
+                            "stop_loss",
+                        ),
+                        take_profit_source: selected_exit_parameter_source(
+                            position,
+                            "take_profit",
+                        ),
+                        fallback_stop_loss_percent: Some(settings.stop_loss_percent),
+                        fallback_take_profit_percent: Some(settings.take_profit_percent),
+                        exit_profile_id: position
+                            .exit_parameter_provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.get("profile_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                position
+                                    .lifecycle_identity
+                                    .as_ref()
+                                    .and_then(|identity| identity.profile_id.clone())
+                            }),
+                        exit_profile_version: position
+                            .exit_parameter_provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.get("profile_version"))
+                            .and_then(serde_json::Value::as_u64)
+                            .or_else(|| {
+                                position
+                                    .lifecycle_identity
+                                    .as_ref()
+                                    .and_then(|identity| identity.profile_version)
+                            }),
+                        exit_policy_as_of_ms: position
+                            .exit_parameter_provenance
+                            .as_ref()
+                            .and_then(|provenance| provenance.get("exit_policy_as_of_ms"))
+                            .and_then(serde_json::Value::as_u64),
+                        exit_parameter_provenance: position.exit_parameter_provenance.clone(),
+                        protective_barrier: None,
+                        protective_barrier_ids: position.protective_stops.iter().map(|stop| stop.barrier_id.clone()).collect(),
+                        initial_risk_reference: position.initial_risk_reference.clone(),
+                        initial_risk_evidence_status: initial_risk_evidence_status(position, symbol).into(),
                         horizon_take_profit_percent: position.horizon_take_profit_percent,
                         stop_loss_active,
                         take_profit_active,
+                        exit_control_mode: match (stop_loss_active, take_profit_active) {
+                            (false, false) => "signal_managed",
+                            (true, false) => "protective_stop_only",
+                            (false, true) => "fixed_target_only",
+                            (true, true) => "protective_stop_and_target",
+                        }
+                        .into(),
                         carry_details: None,
                     }
                 })
         })
         .collect::<Vec<_>>();
+    let lifecycle_links = settings
+        .canonical_lifecycle_links
+        .iter()
+        .filter_map(|(key, identity)| {
+            serde_json::to_value(identity)
+                .ok()
+                .map(|value| (key.clone(), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for position in &mut strategy_positions {
+        position.lifecycle = position
+            .decision_id
+            .as_ref()
+            .and_then(|decision_id| lifecycle_links.get(decision_id).cloned());
+        if position.exit_profile_id.is_none() {
+            position.exit_profile_id = position
+                .lifecycle
+                .as_ref()
+                .and_then(|identity| identity["profile_id"].as_str())
+                .map(str::to_owned);
+        }
+        if position.exit_profile_version.is_none() {
+            position.exit_profile_version = position
+                .lifecycle
+                .as_ref()
+                .and_then(|identity| identity["profile_version"].as_u64());
+        }
+    }
     let open_position_symbols = auto_positions
         .iter()
         .map(|(symbol, _)| symbol.clone())
@@ -656,14 +1074,8 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
     let position_exit_policies = auto_positions
         .iter()
         .map(|(symbol, position)| {
-            let take_profit_candidate = position
-                .take_profit_percent
-                .or_else(|| {
-                    position
-                        .horizon_take_profit_percent
-                        .map(|target| target.max(settings.take_profit_percent))
-                })
-                .unwrap_or(settings.take_profit_percent);
+            let (take_profit_candidate, _) =
+                position_take_profit_candidate(position, settings.take_profit_percent);
             let stop_loss_percent = position
                 .stop_loss_percent
                 .unwrap_or(settings.stop_loss_percent);
@@ -681,20 +1093,14 @@ fn snapshot_activity_positions(settings: &Settings, today_start: u64) -> Activit
                     now_ms,
                     take_profit_percent,
                 ),
+                source: "global_fallback".into(),
+                is_global_fallback: true,
             }
         })
         .collect();
     ActivityPositionSnapshot {
         orders,
-        lifecycle_links: settings
-            .canonical_lifecycle_links
-            .iter()
-            .filter_map(|(key, identity)| {
-                serde_json::to_value(identity)
-                    .ok()
-                    .map(|value| (key.clone(), value))
-            })
-            .collect(),
+        lifecycle_links,
         auto_positions,
         strategy_positions,
         open_position_symbols,

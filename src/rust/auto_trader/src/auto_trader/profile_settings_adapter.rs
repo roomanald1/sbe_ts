@@ -1,14 +1,40 @@
 fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
-    let Some(strategy_name) = signal.strategy.as_deref() else { return; };
-    let Some(strategy) = Strategy::from_name(strategy_name) else { return; };
-    let profile_symbol = signal.strategy_decision.as_ref()
+    let Some(strategy_name) = signal.strategy.as_deref() else {
+        return;
+    };
+    let Some(strategy) = Strategy::from_name(strategy_name) else {
+        return;
+    };
+    let profile_symbol = signal
+        .strategy_decision
+        .as_ref()
         .and_then(|decision| decision.get("scout_parameter_profile_symbol"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or(&signal.symbol)
         .to_owned();
-    let profile = settings.learned_profiles.get(&format!("{profile_symbol}:{strategy_name}"));
-    let policy = active_exit_protection_policy(settings, &profile_symbol, strategy_name);
+    let profile = settings
+        .learned_profiles
+        .get(&format!("{profile_symbol}:{strategy_name}"));
     let decision = signal.strategy_decision.as_ref();
+    let policy_profile_id = profile
+        .map(|profile| profile.profile_id.as_str())
+        .or_else(|| {
+            decision
+                .and_then(|decision| decision.get("learning_profile_id"))
+                .and_then(serde_json::Value::as_str)
+        });
+    let policy_profile_version = profile.map(|profile| profile.version).or_else(|| {
+        decision
+            .and_then(|decision| decision.get("learning_profile_version"))
+            .and_then(serde_json::Value::as_u64)
+    });
+    let policy = active_exit_protection_policy(
+        settings,
+        &profile_symbol,
+        strategy_name,
+        policy_profile_id,
+        policy_profile_version,
+    );
     let has_override = settings
         .strategy_parameter_overrides
         .keys()
@@ -33,23 +59,26 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
         decision.get("scout_parameter_key").is_some()
             || decision.get("scout_parameter_value").is_some()
     });
-    if profile.is_none()
-        && policy.is_none()
-        && !has_override
-        && !has_probe
-        && parameters_are_valid
+    if profile.is_none() && policy.is_none() && !has_override && !has_probe && parameters_are_valid
     {
         return;
     }
-    let mut learned_parameters = profile.map(|profile| profile.parameters.clone()).unwrap_or_else(|| {
-        signal.strategy_decision.as_ref()
-            .and_then(|decision| decision.get("strategy_parameters"))
-            .and_then(serde_json::Value::as_object)
-            .map(|parameters| parameters.iter().filter_map(|(key, value)| {
-                Some((key.clone(), value.as_f64()?))
-            }).collect())
-            .unwrap_or_default()
-    });
+    let mut learned_parameters = profile
+        .map(|profile| profile.parameters.clone())
+        .unwrap_or_else(|| {
+            signal
+                .strategy_decision
+                .as_ref()
+                .and_then(|decision| decision.get("strategy_parameters"))
+                .and_then(serde_json::Value::as_object)
+                .map(|parameters| {
+                    parameters
+                        .iter()
+                        .filter_map(|(key, value)| Some((key.clone(), value.as_f64()?)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
     if let Some(policy) = policy {
         learned_parameters.extend(exit_protection_policy_parameters(policy));
     }
@@ -68,9 +97,9 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
     );
     if let Some(policy) = policy {
         for (key, value) in exit_protection_policy_parameters(policy) {
-            let explicitly_overridden = settings.strategy_parameter_overrides.contains_key(
-                &strategy_parameter_key(&profile_symbol, strategy, &key),
-            );
+            let explicitly_overridden = settings
+                .strategy_parameter_overrides
+                .contains_key(&strategy_parameter_key(&profile_symbol, strategy, &key));
             let probed = probe.is_some_and(|(probe_key, _)| probe_key == key);
             if !explicitly_overridden && !probed {
                 parameters.insert(key, value);
@@ -78,27 +107,55 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
         }
     }
     let profile_id = strategy::profile_id(&profile_symbol, strategy_name, &parameters);
-    let version = profile.map(|profile| profile.version).or_else(|| {
-        signal.strategy_decision.as_ref()
-            .and_then(|decision| decision.get("learning_profile_version"))
-            .and_then(serde_json::Value::as_u64)
-    }).unwrap_or_default();
-    let decision = signal.strategy_decision.get_or_insert_with(|| serde_json::json!({}));
-    let Some(decision) = decision.as_object_mut() else { return; };
+    let version = profile
+        .map(|profile| profile.version)
+        .or_else(|| {
+            signal
+                .strategy_decision
+                .as_ref()
+                .and_then(|decision| decision.get("learning_profile_version"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or_default();
+    let decision = signal
+        .strategy_decision
+        .get_or_insert_with(|| serde_json::json!({}));
+    let Some(decision) = decision.as_object_mut() else {
+        return;
+    };
     decision.insert("strategy_parameters".into(), serde_json::json!(parameters));
     decision.insert("learning_profile_id".into(), serde_json::json!(profile_id));
-    decision.insert("learning_profile_symbol".into(), serde_json::json!(profile_symbol));
-    decision.insert("learning_profile_version".into(), serde_json::json!(version));
+    decision.insert(
+        "learning_profile_symbol".into(),
+        serde_json::json!(profile_symbol),
+    );
+    decision.insert(
+        "learning_profile_version".into(),
+        serde_json::json!(version),
+    );
     if let Some(policy) = policy {
-        let effective = exit_protection_policy_parameters(policy).into_iter()
-            .filter_map(|(key, _)| decision.get("strategy_parameters")
-                .and_then(|parameters| parameters.get(&key))
-                .cloned().map(|value| (key, value)))
+        let effective = exit_protection_policy_parameters(policy)
+            .into_iter()
+            .filter_map(|(key, _)| {
+                decision
+                    .get("strategy_parameters")
+                    .and_then(|parameters| parameters.get(&key))
+                    .cloned()
+                    .map(|value| (key, value))
+            })
             .collect::<serde_json::Map<_, _>>();
-        decision.insert("learned_exit_protection_policy".into(),
-            serde_json::to_value(policy).unwrap_or(serde_json::Value::Null));
-        decision.insert("effective_exit_protection_parameters".into(), effective.into());
-        decision.insert("exit_protection_policy_as_of_ms".into(), serde_json::json!(policy.as_of_ms));
+        decision.insert(
+            "learned_exit_protection_policy".into(),
+            serde_json::to_value(policy).unwrap_or(serde_json::Value::Null),
+        );
+        decision.insert(
+            "effective_exit_protection_parameters".into(),
+            effective.into(),
+        );
+        decision.insert(
+            "exit_protection_policy_as_of_ms".into(),
+            serde_json::json!(policy.as_of_ms),
+        );
     } else {
         decision.remove("learned_exit_protection_policy");
         decision.remove("effective_exit_protection_parameters");
@@ -108,7 +165,9 @@ fn inject_learned_parameters(settings: &Settings, signal: &mut Signal) {
 
 #[cfg(test)]
 fn strategy_learning_stats(settings: &Settings, symbol: &str, strategy: Strategy) -> LearningStats {
-    settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str()))
+    settings
+        .learned_profiles
+        .get(&format!("{symbol}:{}", strategy.as_str()))
         .map(|profile| LearningStats {
             samples: profile.learning_samples,
             positive: profile.positive_samples,
@@ -141,7 +200,13 @@ fn next_scout_parameter_probe(
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<(String, f64)> {
-    strategy::next_parameter_probe(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
+    strategy::next_parameter_probe(
+        symbol,
+        strategy.as_str(),
+        parameters,
+        &scout_parameter_specs(strategy),
+        day,
+    )
 }
 
 // Pair scouts measure interactions while keeping exploration bounded to two
@@ -154,13 +219,25 @@ fn next_scout_parameter_combination(
     parameters: &BTreeMap<String, f64>,
     day: u64,
 ) -> Option<BTreeMap<String, f64>> {
-    strategy::next_parameter_combination(symbol, strategy.as_str(), parameters, &scout_parameter_specs(strategy), day)
+    strategy::next_parameter_combination(
+        symbol,
+        strategy.as_str(),
+        parameters,
+        &scout_parameter_specs(strategy),
+        day,
+    )
 }
 
 #[cfg(test)]
-fn scout_context_hash(parameters: &BTreeMap<String, f64>, excluded: &BTreeMap<String, f64>) -> String {
+fn scout_context_hash(
+    parameters: &BTreeMap<String, f64>,
+    excluded: &BTreeMap<String, f64>,
+) -> String {
     let mut hash = 14_695_981_039_346_656_037_u64;
-    for (key, value) in parameters.iter().filter(|(key, _)| !excluded.contains_key(*key)) {
+    for (key, value) in parameters
+        .iter()
+        .filter(|(key, _)| !excluded.contains_key(*key))
+    {
         for byte in format!("{key}={value:.8};").bytes() {
             hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
         }
@@ -170,7 +247,8 @@ fn scout_context_hash(parameters: &BTreeMap<String, f64>, excluded: &BTreeMap<St
 
 #[cfg(test)]
 fn scout_combination_key(
-    values: &BTreeMap<String, f64>, full_profile: &BTreeMap<String, f64>,
+    values: &BTreeMap<String, f64>,
+    full_profile: &BTreeMap<String, f64>,
 ) -> Option<String> {
     strategy::combination_key(values, full_profile)
 }
@@ -182,7 +260,10 @@ fn scout_combination_context(key: &str) -> Option<&str> {
 
 #[cfg(test)]
 fn best_scout_parameter_combination(
-    settings: &Settings, symbol: &str, strategy: Strategy, baseline: &BTreeMap<String, f64>,
+    settings: &Settings,
+    symbol: &str,
+    strategy: Strategy,
+    baseline: &BTreeMap<String, f64>,
 ) -> Option<BTreeMap<String, f64>> {
     let learning_prefix = if strategy == Strategy::DatedCarry {
         "probe_combo_scout"
@@ -190,22 +271,35 @@ fn best_scout_parameter_combination(
         "paired_probe_combo"
     };
     let prefix = format!("{learning_prefix}:{symbol}:{}:combo:", strategy.as_str());
-    settings.learning.iter().filter_map(|(key, stored)| {
-        let candidate = format!("combo:{}", key.strip_prefix(&prefix)?);
-        let values = parse_scout_combination(&candidate, strategy)?;
-        if scout_combination_context(&candidate)? != scout_context_hash(baseline, &values) { return None; }
-        let mut stats = stored.clone();
-        decay_learning_stats(&mut stats, current_time_ms());
-        let minimum_samples = minimum_scout_parameter_variant_samples(strategy);
-        if stats.samples < minimum_samples
-            || stats.recent_trade_pnls.len() < minimum_samples { return None; }
-        let returns = stats.recent_trade_pnls.iter().map(|(_, pnl)| *pnl).collect::<Vec<_>>();
-        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-        let variance = returns.iter().map(|pnl| (pnl - mean).powi(2)).sum::<f64>() / (returns.len()-1) as f64;
-        let critical = one_sided_90_t_critical(returns.len())?;
-        let lower_90 = mean - critical * (variance / returns.len() as f64).sqrt();
-        (lower_90 > 0.0).then_some((values, mean))
-    }).max_by(|left, right| left.1.total_cmp(&right.1)).map(|(values, _)| values)
+    settings
+        .learning
+        .iter()
+        .filter_map(|(key, stored)| {
+            let candidate = format!("combo:{}", key.strip_prefix(&prefix)?);
+            let values = parse_scout_combination(&candidate, strategy)?;
+            if scout_combination_context(&candidate)? != scout_context_hash(baseline, &values) {
+                return None;
+            }
+            let mut stats = stored.clone();
+            decay_learning_stats(&mut stats, current_time_ms());
+            let minimum_samples = minimum_scout_parameter_variant_samples(strategy);
+            if stats.samples < minimum_samples || stats.recent_trade_pnls.len() < minimum_samples {
+                return None;
+            }
+            let returns = stats
+                .recent_trade_pnls
+                .iter()
+                .map(|(_, pnl)| *pnl)
+                .collect::<Vec<_>>();
+            let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+            let variance = returns.iter().map(|pnl| (pnl - mean).powi(2)).sum::<f64>()
+                / (returns.len() - 1) as f64;
+            let critical = one_sided_90_t_critical(returns.len())?;
+            let lower_90 = mean - critical * (variance / returns.len() as f64).sqrt();
+            (lower_90 > 0.0).then_some((values, mean))
+        })
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(values, _)| values)
 }
 
 #[cfg(test)]
@@ -254,7 +348,9 @@ fn scout_parameter_variants(
         }
         let mut stats = stored.clone();
         decay_learning_stats(&mut stats, current_time_ms());
-        let candidate = candidates.entry(format!("{value:.8}")).or_insert((value, Vec::new()));
+        let candidate = candidates
+            .entry(format!("{value:.8}"))
+            .or_insert((value, Vec::new()));
         candidate.1.extend(stats.recent_trade_pnls);
     }
     let minimum_samples = minimum_scout_parameter_variant_samples(strategy);
@@ -278,10 +374,10 @@ fn scout_parameter_variants(
                 None
             };
             let upper_90 = lower_90.map(|lower| 2.0 * mean - lower);
-            let promoted = sample_count >= minimum_samples
-                && lower_90.is_some_and(|bound| bound > 0.0);
-            let rejected = sample_count >= minimum_samples
-                && upper_90.is_some_and(|bound| bound < 0.0);
+            let promoted =
+                sample_count >= minimum_samples && lower_90.is_some_and(|bound| bound > 0.0);
+            let rejected =
+                sample_count >= minimum_samples && upper_90.is_some_and(|bound| bound < 0.0);
             Some(StrategyParameterScoutVariant {
                 candidate_value,
                 sample_count,
@@ -319,8 +415,7 @@ fn one_sided_90_t_critical(sample_count: usize) -> Option<f64> {
     Some(
         z + (z3 + z) / (4.0 * degrees)
             + (5.0 * z5 + 16.0 * z3 + 3.0 * z) / (96.0 * degrees.powi(2))
-            + (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z)
-                / (384.0 * degrees.powi(3)),
+            + (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / (384.0 * degrees.powi(3)),
     )
 }
 
@@ -344,35 +439,49 @@ fn strategy_parameter_profile(
         learning.realized_pnl += scout.realized_pnl;
         learning.recent_trade_pnls.extend(scout.recent_trade_pnls);
     }
-    learning.recent_trade_pnls.sort_unstable_by(|left, right| right.0.cmp(&left.0));
-    learning.recent_trade_pnls.truncate(STRATEGY_SIZING_RECENT_TRADES);
+    learning
+        .recent_trade_pnls
+        .sort_unstable_by(|left, right| right.0.cmp(&left.0));
+    learning
+        .recent_trade_pnls
+        .truncate(STRATEGY_SIZING_RECENT_TRADES);
     let positive_rate =
         (learning.samples > 0).then_some(learning.positive as f64 / learning.samples as f64);
     let learned_profile = settings
         .learned_profiles
         .get(&format!("{symbol}:{}", strategy.as_str()));
     let specs = strategy.parameter_specs();
-    let baseline_values = specs.iter().map(|spec| {
-        let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
-        let configured = settings.strategy_parameter_overrides.get(&key).copied().or_else(|| {
-            legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
-                settings.strategy_parameter_overrides.get(&strategy_parameter_key(symbol, strategy, legacy)).copied()
-            })
-        });
-        let base = configured.unwrap_or(spec.default);
-        let learned_value = if configured.is_none() {
-            learned_profile
-                .and_then(|profile| profile.parameters.get(spec.key.as_str()))
+    let baseline_values = specs
+        .iter()
+        .map(|spec| {
+            let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
+            let configured = settings
+                .strategy_parameter_overrides
+                .get(&key)
                 .copied()
-                .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
-        } else {
-            None
-        };
-        let value = best_scout_parameter_value(settings, symbol, strategy, spec)
-            .or(learned_value)
-            .unwrap_or(base);
-        (spec.key.as_str().to_owned(), value)
-    }).collect::<BTreeMap<_, _>>();
+                .or_else(|| {
+                    legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
+                        settings
+                            .strategy_parameter_overrides
+                            .get(&strategy_parameter_key(symbol, strategy, legacy))
+                            .copied()
+                    })
+                });
+            let base = configured.unwrap_or(spec.default);
+            let learned_value = if configured.is_none() {
+                learned_profile
+                    .and_then(|profile| profile.parameters.get(spec.key.as_str()))
+                    .copied()
+                    .filter(|value| value.is_finite() && *value >= spec.min && *value <= spec.max)
+            } else {
+                None
+            };
+            let value = best_scout_parameter_value(settings, symbol, strategy, spec)
+                .or(learned_value)
+                .unwrap_or(base);
+            (spec.key.as_str().to_owned(), value)
+        })
+        .collect::<BTreeMap<_, _>>();
     let learned_combination =
         best_scout_parameter_combination(settings, symbol, strategy, &baseline_values);
     let parameters = specs
@@ -393,7 +502,8 @@ fn strategy_parameter_profile(
                 });
             let default_value = spec.default;
             let base = configured.unwrap_or(default_value);
-            let learned_value = learned_combination.as_ref()
+            let learned_value = learned_combination
+                .as_ref()
                 .and_then(|values| values.get(spec.key.as_str()).copied())
                 .or_else(|| baseline_values.get(spec.key.as_str()).copied())
                 .unwrap_or(base);
@@ -423,6 +533,8 @@ fn strategy_parameter_profile(
     StrategyParameterProfile {
         symbol: symbol.into(),
         strategy: strategy.as_str().into(),
+        profile_id: learned_profile.map(|profile| profile.profile_id.clone()),
+        profile_version: learned_profile.map(|profile| profile.version),
         learning_samples: learning.samples,
         positive_rate,
         realized_pnl: learning.realized_pnl,
@@ -455,60 +567,95 @@ fn learned_strategy_parameter_profile_with_variants(
     profile_variants: &[&strategy::ScoutParameterVariant],
 ) -> StrategyParameterProfile {
     let specs = strategy.parameter_specs();
-    let learned = settings.learned_profiles.get(&format!("{symbol}:{}", strategy.as_str()));
-    let parameters = specs.iter().map(|spec| {
-        let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
-        let configured = settings.strategy_parameter_overrides.get(&key).copied()
-            .or_else(|| legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
-                settings.strategy_parameter_overrides.get(&strategy_parameter_key(symbol, strategy, legacy)).copied()
-            }))
-            .filter(|value| strategy_parameter_value_is_valid(*value, spec));
-        let policy_value = active_exit_protection_policy(settings, symbol, strategy.as_str())
-            .and_then(|policy| exit_protection_policy_parameters(policy).get(spec.key.as_str()).copied());
-        let learned_value = policy_value
-            .filter(|value| strategy_parameter_value_is_valid(*value, spec))
-            .or_else(|| learned.and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
-                .filter(|value| strategy_parameter_value_is_valid(*value, spec)))
-            .unwrap_or(spec.default);
-        let value = configured.unwrap_or(learned_value);
-        StrategyParameterValue {
-            key: spec.key.as_str().to_owned(),
-            label: spec.label.to_owned(),
-            value,
-            learned_value,
-            configured_value: configured,
-            default_value: spec.default,
-            min: spec.min,
-            max: spec.max,
-            step: spec.step,
-            unit: spec.unit.to_owned(),
-            overridden: configured.is_some(),
-            scout_variants: profile_variants.iter()
-                .filter(|variant| variant.parameter == spec.key.as_str())
-                .map(|variant| strategy::StrategyParameterScoutVariant {
-                    candidate_value: variant.candidate_value,
-                    sample_count: variant.sample_count,
-                    minimum_samples: variant.minimum_samples,
-                    average_net_improvement_percent: variant.average_net_improvement_percent,
-                    lower_90_one_sided_improvement_percent: variant.lower_90_one_sided_improvement_percent,
-                    upper_90_one_sided_improvement_percent: variant.upper_90_one_sided_improvement_percent,
-                    paired_baseline_increase_samples: variant.paired_baseline_increase_samples,
-                    paired_baseline_decrease_samples: variant.paired_baseline_decrease_samples,
-                    paired_baseline_same_samples: variant.paired_baseline_same_samples,
-                    paired_baseline_unknown_samples: variant.paired_baseline_unknown_samples,
-                    paired_baseline_delta_mean: variant.paired_baseline_delta_mean,
-                    paired_baseline_delta_samples: variant.paired_baseline_delta_samples,
-                    promoted: variant.promoted && (variant.candidate_value - value).abs() < spec.step * 1e-6,
-                    rejected: variant.rejected,
-                }).collect(),
-        }
-    }).collect();
+    let learned = settings
+        .learned_profiles
+        .get(&format!("{symbol}:{}", strategy.as_str()));
+    let parameters = specs
+        .iter()
+        .map(|spec| {
+            let key = strategy_parameter_key(symbol, strategy, spec.key.as_str());
+            let configured = settings
+                .strategy_parameter_overrides
+                .get(&key)
+                .copied()
+                .or_else(|| {
+                    legacy_strategy_parameter_name(spec.key.as_str()).and_then(|legacy| {
+                        settings
+                            .strategy_parameter_overrides
+                            .get(&strategy_parameter_key(symbol, strategy, legacy))
+                            .copied()
+                    })
+                })
+                .filter(|value| strategy_parameter_value_is_valid(*value, spec));
+            let policy_value = active_exit_protection_policy(
+                settings,
+                symbol,
+                strategy.as_str(),
+                learned.map(|profile| profile.profile_id.as_str()),
+                learned.map(|profile| profile.version),
+            )
+            .and_then(|policy| {
+                exit_protection_policy_parameters(policy)
+                    .get(spec.key.as_str())
+                    .copied()
+            });
+            let learned_value = policy_value
+                .filter(|value| strategy_parameter_value_is_valid(*value, spec))
+                .or_else(|| {
+                    learned
+                        .and_then(|profile| profile.parameters.get(spec.key.as_str()).copied())
+                        .filter(|value| strategy_parameter_value_is_valid(*value, spec))
+                })
+                .unwrap_or(spec.default);
+            let value = configured.unwrap_or(learned_value);
+            StrategyParameterValue {
+                key: spec.key.as_str().to_owned(),
+                label: spec.label.to_owned(),
+                value,
+                learned_value,
+                configured_value: configured,
+                default_value: spec.default,
+                min: spec.min,
+                max: spec.max,
+                step: spec.step,
+                unit: spec.unit.to_owned(),
+                overridden: configured.is_some(),
+                scout_variants: profile_variants
+                    .iter()
+                    .filter(|variant| variant.parameter == spec.key.as_str())
+                    .map(|variant| strategy::StrategyParameterScoutVariant {
+                        candidate_value: variant.candidate_value,
+                        sample_count: variant.sample_count,
+                        minimum_samples: variant.minimum_samples,
+                        average_net_improvement_percent: variant.average_net_improvement_percent,
+                        lower_90_one_sided_improvement_percent: variant
+                            .lower_90_one_sided_improvement_percent,
+                        upper_90_one_sided_improvement_percent: variant
+                            .upper_90_one_sided_improvement_percent,
+                        paired_baseline_increase_samples: variant.paired_baseline_increase_samples,
+                        paired_baseline_decrease_samples: variant.paired_baseline_decrease_samples,
+                        paired_baseline_same_samples: variant.paired_baseline_same_samples,
+                        paired_baseline_unknown_samples: variant.paired_baseline_unknown_samples,
+                        paired_baseline_delta_mean: variant.paired_baseline_delta_mean,
+                        paired_baseline_delta_samples: variant.paired_baseline_delta_samples,
+                        promoted: variant.promoted
+                            && (variant.candidate_value - value).abs() < spec.step * 1e-6,
+                        rejected: variant.rejected,
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
     StrategyParameterProfile {
         symbol: symbol.to_owned(),
         strategy: strategy.as_str().to_owned(),
+        profile_id: learned.map(|profile| profile.profile_id.clone()),
+        profile_version: learned.map(|profile| profile.version),
         learning_samples: learned.map_or(0, |profile| profile.learning_samples),
-        positive_rate: learned.and_then(|profile| (profile.learning_samples > 0)
-            .then_some(profile.positive_samples as f64 / profile.learning_samples as f64)),
+        positive_rate: learned.and_then(|profile| {
+            (profile.learning_samples > 0)
+                .then_some(profile.positive_samples as f64 / profile.learning_samples as f64)
+        }),
         realized_pnl: learned.map_or(0.0, |profile| profile.realized_pnl),
         walk_forward_evidence: None,
         walk_forward_evidence_by_regime: Default::default(),
@@ -553,7 +700,8 @@ fn threshold_observation(
     } else if key == StrategyParameterKey::BreakoutEntryDistancePercent {
         -decision.get("primary_distance_percent")?.as_f64()?
     } else {
-        let side = match strategy::SignalDirection::from_wire(decision.get("direction")?.as_str()?)? {
+        let side = match strategy::SignalDirection::from_wire(decision.get("direction")?.as_str()?)?
+        {
             strategy::SignalDirection::Long => 1.0,
             strategy::SignalDirection::Short => -1.0,
         };
@@ -602,33 +750,62 @@ fn queue_strategy_profile_registration(
     strategy: Strategy,
     profile: &StrategyParameterProfile,
 ) {
-    let parameters = profile.parameters.iter()
+    let parameters = profile
+        .parameters
+        .iter()
         .map(|parameter| (parameter.key.clone(), parameter.value))
         .collect::<BTreeMap<_, _>>();
     let profile_id = strategy::profile_id(symbol, strategy.as_str(), &parameters);
-    if settings.registered_profile_ids.contains(&profile_id) { return; }
-    if settings.profile_registration_outbox.iter().any(|registration| {
-        registration.profile.profile_id == profile_id
-            && registration.profile.symbol == symbol
-            && registration.profile.strategy == strategy.as_str()
-    }) { return; }
-    let version = settings.learned_profiles
+    if settings.registered_profile_ids.contains(&profile_id) {
+        return;
+    }
+    if settings
+        .profile_registration_outbox
+        .iter()
+        .any(|registration| {
+            registration.profile.profile_id == profile_id
+                && registration.profile.symbol == symbol
+                && registration.profile.strategy == strategy.as_str()
+        })
+    {
+        return;
+    }
+    let version = settings
+        .learned_profiles
         .get(&format!("{symbol}:{}", strategy.as_str()))
         .map_or(0, |learned| learned.version);
-    let specs = strategy.parameter_specs().into_iter().map(|spec| strategy::ParameterSpec {
-        key: spec.key.as_str().to_owned(), label: spec.label.to_owned(), default: spec.default,
-        min: spec.min, max: spec.max, step: spec.step, unit: spec.unit.to_owned(),
-        learning_direction: spec.learning_direction,
-    }).filter(|spec| parameters.contains_key(&spec.key)).collect();
-    settings.profile_registration_outbox.push(strategy::StrategyProfileRegistration {
-        profile: strategy::StrategyProfile {
-            profile_id, version, symbol: symbol.to_owned(), strategy: strategy.as_str().to_owned(),
-            parameters, learning_samples: profile.learning_samples,
-            positive_samples: (profile.learning_samples as f64 * profile.positive_rate.unwrap_or(0.0)).round() as usize,
-            realized_pnl: profile.realized_pnl,
-        },
-        specs,
-    });
+    let specs = strategy
+        .parameter_specs()
+        .into_iter()
+        .map(|spec| strategy::ParameterSpec {
+            key: spec.key.as_str().to_owned(),
+            label: spec.label.to_owned(),
+            default: spec.default,
+            min: spec.min,
+            max: spec.max,
+            step: spec.step,
+            unit: spec.unit.to_owned(),
+            learning_direction: spec.learning_direction,
+        })
+        .filter(|spec| parameters.contains_key(&spec.key))
+        .collect();
+    settings
+        .profile_registration_outbox
+        .push(strategy::StrategyProfileRegistration {
+            profile: strategy::StrategyProfile {
+                profile_id,
+                version,
+                symbol: symbol.to_owned(),
+                strategy: strategy.as_str().to_owned(),
+                parameters,
+                learning_samples: profile.learning_samples,
+                positive_samples: (profile.learning_samples as f64
+                    * profile.positive_rate.unwrap_or(0.0))
+                .round() as usize,
+                realized_pnl: profile.realized_pnl,
+            },
+            specs,
+        });
 }
 
 #[cfg(test)]
@@ -640,36 +817,69 @@ mod strategy_parameter_bounds_tests {
         let mut settings = Settings::default();
         let parameters = BTreeMap::from([("minimum_momentum".to_owned(), 0.003)]);
         let profile_id = strategy::profile_id("BTC-USDT", "live-momentum", &parameters);
-        settings.learned_profiles.insert("BTC-USDT:live-momentum".into(), strategy::StrategyProfile {
-            profile_id: profile_id.clone(), version: 5, symbol: "BTC-USDT".into(),
-            strategy: "live-momentum".into(), parameters,
-            learning_samples: 8, positive_samples: 6, realized_pnl: 4.0,
-        });
+        settings.learned_profiles.insert(
+            "BTC-USDT:live-momentum".into(),
+            strategy::StrategyProfile {
+                profile_id: profile_id.clone(),
+                version: 5,
+                symbol: "BTC-USDT".into(),
+                strategy: "live-momentum".into(),
+                parameters,
+                learning_samples: 8,
+                positive_samples: 6,
+                realized_pnl: 4.0,
+            },
+        );
         let mut signal = Signal {
             range_location: None,
-            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
-            timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
-            components: SignalComponents::default(), strategy_candidate: true,
+            symbol: "BTC-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp: 1,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
             strategy: Some("live-momentum".into()),
-            strategy_decision: Some(serde_json::json!({ "strategy_parameters": { "minimum_momentum": 0.0 } })),
-            market_regime: None, market_state: None, news_attribution: None, entry_gate: None,
+            strategy_decision: Some(
+                serde_json::json!({ "strategy_parameters": { "minimum_momentum": 0.0 } }),
+            ),
+            market_regime: None,
+            market_state: None,
+            news_attribution: None,
+            entry_gate: None,
         };
         inject_learned_parameters(&settings, &mut signal);
-        assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.003);
-        assert_eq!(signal.strategy_decision.as_ref().unwrap()["learning_profile_id"],
-            strategy::profile_id("BTC-USDT", "live-momentum", &signal_strategy_parameters(&signal)));
-        settings.strategy_parameter_overrides.insert(
-            "BTC-USDT:live-momentum:minimum_momentum".into(), 0.004,
+        assert_eq!(
+            signal_strategy_parameters(&signal)["minimum_momentum"],
+            0.003
         );
+        assert_eq!(
+            signal.strategy_decision.as_ref().unwrap()["learning_profile_id"],
+            strategy::profile_id(
+                "BTC-USDT",
+                "live-momentum",
+                &signal_strategy_parameters(&signal)
+            )
+        );
+        settings
+            .strategy_parameter_overrides
+            .insert("BTC-USDT:live-momentum:minimum_momentum".into(), 0.004);
         inject_learned_parameters(&settings, &mut signal);
-        assert_eq!(signal_strategy_parameters(&signal)["minimum_momentum"], 0.004);
+        assert_eq!(
+            signal_strategy_parameters(&signal)["minimum_momentum"],
+            0.004
+        );
     }
 
     #[test]
     fn learned_profile_assembly_rejects_off_step_lock_and_unknown_names() {
         let strategy = Strategy::LiveMomentum;
         let symbol = "BTC-USDT";
-        let spec = strategy.parameter_specs().into_iter()
+        let spec = strategy
+            .parameter_specs()
+            .into_iter()
             .find(|spec| spec.key == StrategyParameterKey::ProfitProtectionMinimumLockPercent)
             .unwrap();
         let mut settings = Settings::default();
@@ -677,46 +887,77 @@ mod strategy_parameter_bounds_tests {
             (spec.key.as_str().to_owned(), 0.12),
             ("retired_profit_lock_parameter".to_owned(), 99.0),
         ]);
-        settings.learned_profiles.insert(format!("{symbol}:{}", strategy.as_str()), strategy::StrategyProfile {
-            profile_id: "legacy-profile".into(), version: 1, symbol: symbol.into(),
-            strategy: strategy.as_str().into(), parameters: learned_parameters,
-            learning_samples: 4, positive_samples: 3, realized_pnl: 0.0,
-        });
+        settings.learned_profiles.insert(
+            format!("{symbol}:{}", strategy.as_str()),
+            strategy::StrategyProfile {
+                profile_id: "legacy-profile".into(),
+                version: 1,
+                symbol: symbol.into(),
+                strategy: strategy.as_str().into(),
+                parameters: learned_parameters,
+                learning_samples: 4,
+                positive_samples: 3,
+                realized_pnl: 0.0,
+            },
+        );
         settings.strategy_parameter_overrides.insert(
-            strategy_parameter_key(symbol, strategy, spec.key.as_str()), 0.12,
+            strategy_parameter_key(symbol, strategy, spec.key.as_str()),
+            0.12,
         );
 
         let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
-        let lock = profile.parameters.iter()
-            .find(|parameter| parameter.key == spec.key.as_str()).unwrap();
+        let lock = profile
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == spec.key.as_str())
+            .unwrap();
         assert_eq!(lock.value, spec.default);
-        assert!(profile.parameters.iter().all(|parameter| {
-            parameter.key != "retired_profit_lock_parameter"
-        }));
+        assert!(
+            profile
+                .parameters
+                .iter()
+                .all(|parameter| { parameter.key != "retired_profit_lock_parameter" })
+        );
 
         settings.strategy_parameter_overrides.clear();
-        settings.learned_profiles.get_mut(&format!("{symbol}:{}", strategy.as_str()))
-            .unwrap().parameters.insert(spec.key.as_str().to_owned(), 0.10);
+        settings
+            .learned_profiles
+            .get_mut(&format!("{symbol}:{}", strategy.as_str()))
+            .unwrap()
+            .parameters
+            .insert(spec.key.as_str().to_owned(), 0.10);
         let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
-        let lock = profile.parameters.iter()
-            .find(|parameter| parameter.key == spec.key.as_str()).unwrap();
+        let lock = profile
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == spec.key.as_str())
+            .unwrap();
         assert_eq!(lock.value, 0.10);
     }
 
     #[test]
     fn invalid_signal_probe_and_unknown_parameters_are_sanitized_without_profile() {
         let strategy = Strategy::LiveMomentum;
-        let spec = strategy.parameter_specs().into_iter()
+        let spec = strategy
+            .parameter_specs()
+            .into_iter()
             .find(|spec| spec.key == StrategyParameterKey::ProfitProtectionMinimumLockPercent)
             .unwrap();
         let mut settings = Settings::default();
         settings.strategy_parameter_overrides.insert(
-            strategy_parameter_key("BTC-USDT", strategy, spec.key.as_str()), 0.12,
+            strategy_parameter_key("BTC-USDT", strategy, spec.key.as_str()),
+            0.12,
         );
         let mut signal = Signal {
-            symbol: "BTC-USDT".into(), direction: "bullish".into(), strength: 1.0,
-            timestamp: 1, stale: false, score: 1.0, ranging_probability: None,
-            components: SignalComponents::default(), strategy_candidate: true,
+            symbol: "BTC-USDT".into(),
+            direction: "bullish".into(),
+            strength: 1.0,
+            timestamp: 1,
+            stale: false,
+            score: 1.0,
+            ranging_probability: None,
+            components: SignalComponents::default(),
+            strategy_candidate: true,
             strategy: Some(strategy.as_str().into()),
             strategy_decision: Some(serde_json::json!({
                 "strategy_parameters": {
@@ -727,8 +968,11 @@ mod strategy_parameter_bounds_tests {
                 "scout_parameter_key": "profit_protection_minimum_lock_percent",
                 "scout_parameter_value": 0.12
             })),
-            range_location: None, market_regime: None, market_state: None,
-            news_attribution: None, entry_gate: None,
+            range_location: None,
+            market_regime: None,
+            market_state: None,
+            news_attribution: None,
+            entry_gate: None,
         };
 
         inject_learned_parameters(&settings, &mut signal);
@@ -742,10 +986,7 @@ mod strategy_parameter_bounds_tests {
     fn learned_stop_and_target_are_loaded_from_each_symbol_strategy_profile() {
         let strategy = Strategy::LiveMomentum;
         let mut settings = Settings::default();
-        for (symbol, stop, target) in [
-            ("BTC-USDT", 0.6, 1.0),
-            ("ETH-USDT", 0.9, 1.4),
-        ] {
+        for (symbol, stop, target) in [("BTC-USDT", 0.6, 1.0), ("ETH-USDT", 0.9, 1.4)] {
             let parameters = BTreeMap::from([
                 ("stop_loss_percent".to_owned(), stop),
                 ("take_profit_percent".to_owned(), target),
@@ -765,21 +1006,30 @@ mod strategy_parameter_bounds_tests {
             );
         }
 
-        for (symbol, expected_stop, expected_target) in [
-            ("BTC-USDT", 0.6, 1.0),
-            ("ETH-USDT", 0.9, 1.4),
-        ] {
+        for (symbol, expected_stop, expected_target) in
+            [("BTC-USDT", 0.6, 1.0), ("ETH-USDT", 0.9, 1.4)]
+        {
             let profile = learned_strategy_parameter_profile(&settings, symbol, strategy);
-            let stop = profile.parameters.iter()
+            let stop = profile
+                .parameters
+                .iter()
                 .find(|parameter| parameter.key == "stop_loss_percent")
                 .expect("strategy exposes stop loss");
-            let target = profile.parameters.iter()
+            let target = profile
+                .parameters
+                .iter()
                 .find(|parameter| parameter.key == "take_profit_percent")
                 .expect("strategy exposes take profit");
             assert_eq!(stop.value, expected_stop, "stop profile for {symbol}");
-            assert_eq!(stop.learned_value, expected_stop, "learned stop for {symbol}");
+            assert_eq!(
+                stop.learned_value, expected_stop,
+                "learned stop for {symbol}"
+            );
             assert_eq!(target.value, expected_target, "target profile for {symbol}");
-            assert_eq!(target.learned_value, expected_target, "learned target for {symbol}");
+            assert_eq!(
+                target.learned_value, expected_target,
+                "learned target for {symbol}"
+            );
         }
     }
 
@@ -792,28 +1042,67 @@ mod strategy_parameter_bounds_tests {
         queue_strategy_profile_registration(&mut settings, "BTC-USDT", strategy, &profile);
         assert_eq!(settings.profile_registration_outbox.len(), 1);
         let registration = &settings.profile_registration_outbox[0];
-        assert_eq!(registration.profile.profile_id, strategy::profile_id(
-            "BTC-USDT", strategy.as_str(), &registration.profile.parameters,
-        ));
+        assert_eq!(
+            registration.profile.profile_id,
+            strategy::profile_id(
+                "BTC-USDT",
+                strategy.as_str(),
+                &registration.profile.parameters,
+            )
+        );
         assert!(!registration.specs.is_empty());
     }
 
     #[test]
     fn daily_rule_inputs_are_registered_for_learning_profiles() {
         let cases = [
-            (Strategy::Donchian10Btc200, StrategyParameterKey::BreakoutLookbackDays),
-            (Strategy::Donchian20Btc200, StrategyParameterKey::BreakoutLookbackDays),
-            (Strategy::Donchian20Btc200Hold3, StrategyParameterKey::MinimumHoldDays),
-            (Strategy::RiskAdjustedTrendPortfolio, StrategyParameterKey::TrendPortfolioLookbackDays),
-            (Strategy::RiskAdjustedTrendPortfolio, StrategyParameterKey::TrendPortfolioWeightCap),
-            (Strategy::RiskAdjustedTrendPortfolio, StrategyParameterKey::TrendPortfolioExitWeightFloor),
-            (Strategy::RiskAdjustedMonthlyMomentum, StrategyParameterKey::MonthlyMomentumLookbackDays),
-            (Strategy::RiskAdjustedMonthlyMomentum, StrategyParameterKey::MonthlyMomentumVolatilityTarget),
-            (Strategy::DatedCarry, StrategyParameterKey::CarryMinimumDaysToExpiry),
+            (
+                Strategy::Donchian10Btc200,
+                StrategyParameterKey::BreakoutLookbackDays,
+            ),
+            (
+                Strategy::Donchian20Btc200,
+                StrategyParameterKey::BreakoutLookbackDays,
+            ),
+            (
+                Strategy::Donchian20Btc200Hold3,
+                StrategyParameterKey::MinimumHoldDays,
+            ),
+            (
+                Strategy::RiskAdjustedTrendPortfolio,
+                StrategyParameterKey::TrendPortfolioLookbackDays,
+            ),
+            (
+                Strategy::RiskAdjustedTrendPortfolio,
+                StrategyParameterKey::TrendPortfolioWeightCap,
+            ),
+            (
+                Strategy::RiskAdjustedTrendPortfolio,
+                StrategyParameterKey::TrendPortfolioExitWeightFloor,
+            ),
+            (
+                Strategy::RiskAdjustedMonthlyMomentum,
+                StrategyParameterKey::MonthlyMomentumLookbackDays,
+            ),
+            (
+                Strategy::RiskAdjustedMonthlyMomentum,
+                StrategyParameterKey::MonthlyMomentumVolatilityTarget,
+            ),
+            (
+                Strategy::DatedCarry,
+                StrategyParameterKey::CarryMinimumDaysToExpiry,
+            ),
         ];
         for (strategy, key) in cases {
-            assert!(strategy.parameter_specs().iter().any(|spec| spec.key == key),
-                "{} must expose {}", strategy.as_str(), key.as_str());
+            assert!(
+                strategy
+                    .parameter_specs()
+                    .iter()
+                    .any(|spec| spec.key == key),
+                "{} must expose {}",
+                strategy.as_str(),
+                key.as_str()
+            );
         }
     }
 
@@ -909,30 +1198,53 @@ mod threshold_profile_source_tests {
         let profile_key = format!("BTC-USDT:{}", strategy.as_str());
         let learned_value = 0.08;
         let mut settings = Settings::default();
-        settings.learned_profiles.insert(profile_key, strategy::StrategyProfile {
-            profile_id: strategy::profile_id("BTC-USDT", strategy.as_str(), &BTreeMap::from([
-                (threshold_key.to_owned(), learned_value),
-            ])),
-            version: 7,
-            symbol: "BTC-USDT".into(),
-            strategy: strategy.as_str().into(),
-            parameters: BTreeMap::from([(threshold_key.to_owned(), learned_value)]),
-            learning_samples: 40,
-            positive_samples: 24,
-            realized_pnl: 4.2,
-        });
+        settings.learned_profiles.insert(
+            profile_key,
+            strategy::StrategyProfile {
+                profile_id: strategy::profile_id(
+                    "BTC-USDT",
+                    strategy.as_str(),
+                    &BTreeMap::from([(threshold_key.to_owned(), learned_value)]),
+                ),
+                version: 7,
+                symbol: "BTC-USDT".into(),
+                strategy: strategy.as_str().into(),
+                parameters: BTreeMap::from([(threshold_key.to_owned(), learned_value)]),
+                learning_samples: 40,
+                positive_samples: 24,
+                realized_pnl: 4.2,
+            },
+        );
 
         let active = learned_strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let threshold = active.parameters.iter().find(|p| p.key == threshold_key).unwrap();
+        assert_eq!(
+            active.profile_id.as_deref(),
+            settings
+                .learned_profiles
+                .get(&format!("BTC-USDT:{}", strategy.as_str()))
+                .map(|profile| profile.profile_id.as_str())
+        );
+        assert_eq!(active.profile_version, Some(7));
+        let threshold = active
+            .parameters
+            .iter()
+            .find(|p| p.key == threshold_key)
+            .unwrap();
         assert_eq!(threshold.learned_value, learned_value);
         assert_eq!(threshold.value, learned_value);
         assert_eq!(threshold.scout_variants.len(), 0);
 
         settings.strategy_parameter_overrides.insert(
-            strategy_parameter_key("BTC-USDT", strategy, threshold_key), 0.12,
+            strategy_parameter_key("BTC-USDT", strategy, threshold_key),
+            0.12,
         );
         let overridden = learned_strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let threshold = overridden.parameters.iter().find(|p| p.key == threshold_key).unwrap();
+        assert_eq!(overridden.profile_version, Some(7));
+        let threshold = overridden
+            .parameters
+            .iter()
+            .find(|p| p.key == threshold_key)
+            .unwrap();
         assert_eq!(threshold.learned_value, learned_value);
         assert_eq!(threshold.configured_value, Some(0.12));
         assert_eq!(threshold.value, 0.12);
@@ -944,24 +1256,32 @@ mod threshold_profile_source_tests {
         let strategy = Strategy::LiveTradeFlow;
         let key = format!("ETH-USDT:{}", strategy.as_str());
         let mut settings = Settings::default();
-        settings.learned_profiles.insert(key, strategy::StrategyProfile {
-            profile_id: "learning-profile".into(),
-            version: 3,
-            symbol: "ETH-USDT".into(),
-            strategy: strategy.as_str().into(),
-            parameters: BTreeMap::from([(
-                StrategyParameterKey::MinimumFlowImbalance.as_str().into(), 2.0,
-            )]),
-            learning_samples: 10,
-            positive_samples: 5,
-            realized_pnl: 1.0,
-        });
+        settings.learned_profiles.insert(
+            key,
+            strategy::StrategyProfile {
+                profile_id: "learning-profile".into(),
+                version: 3,
+                symbol: "ETH-USDT".into(),
+                strategy: strategy.as_str().into(),
+                parameters: BTreeMap::from([(
+                    StrategyParameterKey::MinimumFlowImbalance.as_str().into(),
+                    2.0,
+                )]),
+                learning_samples: 10,
+                positive_samples: 5,
+                realized_pnl: 1.0,
+            },
+        );
 
         // The query key follows the profile symbol (which can differ from the
         // signal symbol for scout variants); invalid learned values fall back to
         // the strategy default while the active profile's metadata is retained.
         let profile = learned_strategy_parameter_profile(&settings, "ETH-USDT", strategy);
-        let threshold = profile.parameters.iter()
+        assert_eq!(profile.profile_id.as_deref(), Some("learning-profile"));
+        assert_eq!(profile.profile_version, Some(3));
+        let threshold = profile
+            .parameters
+            .iter()
             .find(|p| p.key == StrategyParameterKey::MinimumFlowImbalance.as_str())
             .unwrap();
         assert_eq!(threshold.value, threshold.default_value);
@@ -981,7 +1301,8 @@ mod threshold_profile_source_tests {
                 symbol: profile_symbol.into(),
                 strategy: strategy.as_str().into(),
                 parameters: BTreeMap::from([(
-                    StrategyParameterKey::MinimumFlowImbalance.as_str().into(), 0.07,
+                    StrategyParameterKey::MinimumFlowImbalance.as_str().into(),
+                    0.07,
                 )]),
                 learning_samples: 20,
                 positive_samples: 12,
@@ -1040,20 +1361,19 @@ mod scout_parameter_learning_tests {
     fn paired_scout_results_from_other_symbols_promote_only_the_tested_parameter() {
         let mut settings = Settings::default();
         let strategy = Strategy::Donchian55Btc200;
-        let spec = strategy.parameter_specs()
+        let spec = strategy
+            .parameter_specs()
             .into_iter()
             .find(|spec| spec.key == StrategyParameterKey::BreakoutEntryDistancePercent)
             .unwrap();
         let candidate = spec.default + spec.step;
         let key = format!(
             "paired_probe:ETH-USDT:{}:{}:{candidate:.8}",
-            strategy.as_str(), spec.key.as_str()
+            strategy.as_str(),
+            spec.key.as_str()
         );
         for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
-            record_learning_outcome(
-                settings.learning.entry(key.clone()).or_default(),
-                0.1,
-            );
+            record_learning_outcome(settings.learning.entry(key.clone()).or_default(), 0.1);
         }
 
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
@@ -1096,7 +1416,9 @@ mod scout_parameter_learning_tests {
 
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
         assert_eq!(profile.learning_samples, 30);
-        let lookback = profile.parameters.iter()
+        let lookback = profile
+            .parameters
+            .iter()
             .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
             .unwrap();
         assert_eq!(lookback.learned_value, lookback.default_value);
@@ -1114,12 +1436,20 @@ mod scout_parameter_variant_tests {
         let strategy = Strategy::Donchian55Btc200;
         for _ in 0..19 {
             record_learning_outcome(
-                settings.learning.entry(format!("paired_probe:BTC-USDT:{}:breakout_lookback_days:52.00000000", strategy.as_str())).or_default(),
+                settings
+                    .learning
+                    .entry(format!(
+                        "paired_probe:BTC-USDT:{}:breakout_lookback_days:52.00000000",
+                        strategy.as_str()
+                    ))
+                    .or_default(),
                 2.0,
             );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let lookback = profile.parameters.iter()
+        let lookback = profile
+            .parameters
+            .iter()
             .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
             .unwrap();
         assert_eq!(lookback.learned_value, lookback.default_value);
@@ -1131,29 +1461,53 @@ mod scout_parameter_variant_tests {
         let strategy = Strategy::Donchian10Btc200;
         for _ in 0..19 {
             record_learning_outcome(
-                settings.learning.entry(format!("paired_probe:BTC-USDT:{}:breakout_entry_distance_percent:10.00000000", strategy.as_str())).or_default(),
+                settings
+                    .learning
+                    .entry(format!(
+                        "paired_probe:BTC-USDT:{}:breakout_entry_distance_percent:10.00000000",
+                        strategy.as_str()
+                    ))
+                    .or_default(),
                 2.0,
             );
         }
         let btc_before_threshold = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let btc_before = btc_before_threshold.parameters.iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+        let btc_before = btc_before_threshold
+            .parameters
+            .iter()
+            .find(|parameter| {
+                parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str()
+            })
             .unwrap();
         assert_eq!(btc_before.learned_value, 0.0);
 
         record_learning_outcome(
-            settings.learning.entry(format!("paired_probe:BTC-USDT:{}:breakout_entry_distance_percent:10.00000000", strategy.as_str())).or_default(),
+            settings
+                .learning
+                .entry(format!(
+                    "paired_probe:BTC-USDT:{}:breakout_entry_distance_percent:10.00000000",
+                    strategy.as_str()
+                ))
+                .or_default(),
             2.0,
         );
         let btc_after = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let btc_distance = btc_after.parameters.iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+        let btc_distance = btc_after
+            .parameters
+            .iter()
+            .find(|parameter| {
+                parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str()
+            })
             .unwrap();
         assert_eq!(btc_distance.learned_value, 10.0);
 
         let eth_profile = strategy_parameter_profile(&settings, "ETH-USDT", strategy);
-        let eth_distance = eth_profile.parameters.iter()
-            .find(|parameter| parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str())
+        let eth_distance = eth_profile
+            .parameters
+            .iter()
+            .find(|parameter| {
+                parameter.key == StrategyParameterKey::BreakoutEntryDistancePercent.as_str()
+            })
             .unwrap();
         assert_eq!(eth_distance.learned_value, 10.0);
     }
@@ -1164,16 +1518,30 @@ mod scout_parameter_variant_tests {
         let strategy = Strategy::Donchian55Btc200;
         for _ in 0..24 {
             record_learning_outcome(
-                settings.learning.entry(format!("paired_probe:BTC-USDT:{}:breakout_lookback_days:50.00000000", strategy.as_str())).or_default(),
+                settings
+                    .learning
+                    .entry(format!(
+                        "paired_probe:BTC-USDT:{}:breakout_lookback_days:50.00000000",
+                        strategy.as_str()
+                    ))
+                    .or_default(),
                 -1.0,
             );
             record_learning_outcome(
-                settings.learning.entry(format!("paired_probe:BTC-USDT:{}:breakout_lookback_days:52.00000000", strategy.as_str())).or_default(),
+                settings
+                    .learning
+                    .entry(format!(
+                        "paired_probe:BTC-USDT:{}:breakout_lookback_days:52.00000000",
+                        strategy.as_str()
+                    ))
+                    .or_default(),
                 2.0,
             );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let lookback = profile.parameters.iter()
+        let lookback = profile
+            .parameters
+            .iter()
             .find(|parameter| parameter.key == StrategyParameterKey::BreakoutLookbackDays.as_str())
             .unwrap();
         assert_eq!(lookback.learned_value, 52.0);
@@ -1190,25 +1558,41 @@ mod dated_carry_scout_probe_learning_tests {
         let mut settings = Settings::default();
         let strategy = Strategy::DatedCarry;
         let scout_key = strategy_parameter_scout_probe_learning_key(
-            "BTC-USDT", strategy.as_str(), "carry_minimum_days_to_expiry", 6.0,
+            "BTC-USDT",
+            strategy.as_str(),
+            "carry_minimum_days_to_expiry",
+            6.0,
         );
         for _ in 0..20 {
-            record_learning_outcome(settings.learning.entry(scout_key.clone()).or_default(), 0.02);
+            record_learning_outcome(
+                settings.learning.entry(scout_key.clone()).or_default(),
+                0.02,
+            );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let minimum_days = profile.parameters.iter()
+        let minimum_days = profile
+            .parameters
+            .iter()
             .find(|parameter| parameter.key == "carry_minimum_days_to_expiry")
             .unwrap();
         assert_eq!(minimum_days.learned_value, 7.0);
 
         let settlement_key = strategy_parameter_probe_learning_key(
-            "BTC-USDT", strategy.as_str(), "carry_minimum_days_to_expiry", 5.0,
+            "BTC-USDT",
+            strategy.as_str(),
+            "carry_minimum_days_to_expiry",
+            5.0,
         );
         for _ in 0..25 {
-            record_learning_outcome(settings.learning.entry(settlement_key.clone()).or_default(), 1.0);
+            record_learning_outcome(
+                settings.learning.entry(settlement_key.clone()).or_default(),
+                1.0,
+            );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let minimum_days = profile.parameters.iter()
+        let minimum_days = profile
+            .parameters
+            .iter()
             .find(|parameter| parameter.key == "carry_minimum_days_to_expiry")
             .unwrap();
         assert_eq!(minimum_days.learned_value, 7.0);
@@ -1218,21 +1602,36 @@ mod dated_carry_scout_probe_learning_tests {
     fn dated_carry_scout_markouts_promote_the_tested_pair_in_its_profile_context() {
         let mut settings = Settings::default();
         let strategy = Strategy::DatedCarry;
-        let baseline = strategy.parameter_specs().into_iter()
-            .map(|spec| (spec.key.as_str().to_owned(), spec.default)).collect::<BTreeMap<_, _>>();
-        let combination = next_scout_parameter_combination("BTC-USDT", strategy, &baseline, 3).unwrap();
+        let baseline = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let combination =
+            next_scout_parameter_combination("BTC-USDT", strategy, &baseline, 3).unwrap();
         let mut probe_profile = baseline.clone();
-        for (key, value) in &combination { probe_profile.insert(key.clone(), *value); }
+        for (key, value) in &combination {
+            probe_profile.insert(key.clone(), *value);
+        }
         let combination_key = scout_combination_key(&combination, &probe_profile).unwrap();
         let learning_key = strategy_parameter_scout_combination_learning_key(
-            "BTC-USDT", strategy.as_str(), &combination_key,
+            "BTC-USDT",
+            strategy.as_str(),
+            &combination_key,
         );
         for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
-            record_learning_outcome(settings.learning.entry(learning_key.clone()).or_default(), 0.02);
+            record_learning_outcome(
+                settings.learning.entry(learning_key.clone()).or_default(),
+                0.02,
+            );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
         for (key, value) in combination {
-            let learned = profile.parameters.iter().find(|parameter| parameter.key == key).unwrap();
+            let learned = profile
+                .parameters
+                .iter()
+                .find(|parameter| parameter.key == key)
+                .unwrap();
             assert_eq!(learned.learned_value, value);
         }
     }
@@ -1245,14 +1644,16 @@ mod scout_parameter_scheduling_tests {
     #[test]
     fn post_only_timeout_is_bounded_and_scoutable() {
         let strategy = Strategy::LiveMomentum;
-        let spec = strategy.parameter_specs()
+        let spec = strategy
+            .parameter_specs()
             .into_iter()
             .find(|spec| spec.key == StrategyParameterKey::PostOnlyTimeoutMinutes)
             .unwrap();
         assert_eq!(spec.default, 5.0);
         assert_eq!((spec.min, spec.max, spec.step), (1.0, 15.0, 1.0));
 
-        let baseline = strategy.parameter_specs()
+        let baseline = strategy
+            .parameter_specs()
             .into_iter()
             .map(|spec| (spec.key.as_str().to_owned(), spec.default))
             .collect::<BTreeMap<_, _>>();
@@ -1268,10 +1669,14 @@ mod scout_parameter_scheduling_tests {
     fn live_strategy_probe_rotates_one_bounded_parameter_value() {
         let strategy = Strategy::LiveMomentum;
         let parameters = strategy_parameter_values(&Settings::default(), "ETH-USDT", strategy);
-        let (key, value) = next_scout_parameter_probe("ETH-USDT", strategy, &parameters, 2).unwrap();
+        let (key, value) =
+            next_scout_parameter_probe("ETH-USDT", strategy, &parameters, 2).unwrap();
         assert_ne!(key, StrategyParameterKey::LearningRate.as_str());
-        let spec = strategy.parameter_specs().into_iter()
-            .find(|spec| spec.key.as_str() == key).unwrap();
+        let spec = strategy
+            .parameter_specs()
+            .into_iter()
+            .find(|spec| spec.key.as_str() == key)
+            .unwrap();
         assert!(spec.min <= value && value <= spec.max);
         let current = parameters[&key];
         assert!((value - current).abs() <= spec.step + 1e-9);
@@ -1286,17 +1691,32 @@ mod scout_parameter_combination_tests {
     #[test]
     fn pair_probes_change_two_bounded_parameters_and_have_stable_keys() {
         let strategy = Strategy::Donchian20Sma200;
-        let parameters = strategy.parameter_specs().into_iter()
-            .map(|spec| (spec.key.as_str().to_owned(), spec.default)).collect::<BTreeMap<_, _>>();
-        let combination = next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
+        let parameters = strategy
+            .parameter_specs()
+            .into_iter()
+            .map(|spec| (spec.key.as_str().to_owned(), spec.default))
+            .collect::<BTreeMap<_, _>>();
+        let combination =
+            next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
         assert_eq!(combination.len(), 2);
         let key = scout_combination_key(&combination, &parameters).unwrap();
         let parsed = parse_scout_combination(&key, strategy).unwrap();
-        assert_eq!(parsed.keys().collect::<Vec<_>>(), combination.keys().collect::<Vec<_>>());
-        for (name, value) in &combination { assert!((parsed[name] - value).abs() < 1e-7); }
-        let repeated = next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
-        assert_eq!(repeated.keys().collect::<Vec<_>>(), combination.keys().collect::<Vec<_>>());
-        for (name, value) in &combination { assert!((repeated[name] - value).abs() < 1e-12); }
+        assert_eq!(
+            parsed.keys().collect::<Vec<_>>(),
+            combination.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in &combination {
+            assert!((parsed[name] - value).abs() < 1e-7);
+        }
+        let repeated =
+            next_scout_parameter_combination("BTC-USDT", strategy, &parameters, 8).unwrap();
+        assert_eq!(
+            repeated.keys().collect::<Vec<_>>(),
+            combination.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in &combination {
+            assert!((repeated[name] - value).abs() < 1e-12);
+        }
     }
 
     #[test]
@@ -1308,11 +1728,20 @@ mod scout_parameter_combination_tests {
             ("breakout_entry_distance_percent".to_owned(), 0.5),
         ]);
         let combination_key = scout_combination_key(&values, &values).unwrap();
-        let learning_key = format!("paired_probe_combo:BTC-USDT:{}:{combination_key}", strategy.as_str());
+        let learning_key = format!(
+            "paired_probe_combo:BTC-USDT:{}:{combination_key}",
+            strategy.as_str()
+        );
         for _ in 0..MIN_SCOUT_PARAMETER_VARIANT_SAMPLES {
-            record_learning_outcome(settings.learning.entry(learning_key.clone()).or_default(), 1.0);
+            record_learning_outcome(
+                settings.learning.entry(learning_key.clone()).or_default(),
+                1.0,
+            );
         }
-        assert_eq!(best_scout_parameter_combination(&settings, "BTC-USDT", strategy, &values), Some(values));
+        assert_eq!(
+            best_scout_parameter_combination(&settings, "BTC-USDT", strategy, &values),
+            Some(values)
+        );
     }
 }
 
@@ -1330,7 +1759,9 @@ mod paired_scout_parameter_tests {
     #[test]
     fn live_parameter_promotion_requires_positive_paired_improvement() {
         let strategy = Strategy::LiveTradeFlow;
-        let spec = strategy.parameter_specs().into_iter()
+        let spec = strategy
+            .parameter_specs()
+            .into_iter()
             .find(|spec| spec.min < spec.max && spec.step > 0.0)
             .expect("live strategy has a tunable parameter");
         let candidate = if spec.default + spec.step <= spec.max {
@@ -1340,32 +1771,62 @@ mod paired_scout_parameter_tests {
         };
         let paired_key = format!(
             "paired_probe:BTC-USDT:{}:{}:{candidate:.8}",
-            strategy.as_str(), spec.key.as_str(),
+            strategy.as_str(),
+            spec.key.as_str(),
         );
         let unpaired_key = format!(
             "probe:BTC-USDT:{}:{}:{candidate:.8}",
-            strategy.as_str(), spec.key.as_str(),
+            strategy.as_str(),
+            spec.key.as_str(),
         );
         let mut settings = Settings::default();
         for _ in 0..MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES {
-            record_learning_outcome(settings.learning.entry(unpaired_key.clone()).or_default(), 5.0);
+            record_learning_outcome(
+                settings.learning.entry(unpaired_key.clone()).or_default(),
+                5.0,
+            );
         }
-        assert_eq!(best_scout_parameter_value(&settings, "BTC-USDT", strategy, &spec), None);
+        assert_eq!(
+            best_scout_parameter_value(&settings, "BTC-USDT", strategy, &spec),
+            None
+        );
 
         for _ in 0..MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES / 2 {
-            record_learning_outcome(settings.learning.entry(paired_key.clone()).or_default(), 0.02);
+            record_learning_outcome(
+                settings.learning.entry(paired_key.clone()).or_default(),
+                0.02,
+            );
         }
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let parameter = profile.parameters.iter().find(|parameter| parameter.key == spec.key.as_str()).unwrap();
-        assert_eq!(parameter.scout_variants[0].sample_count, MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES / 2);
+        let parameter = profile
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == spec.key.as_str())
+            .unwrap();
+        assert_eq!(
+            parameter.scout_variants[0].sample_count,
+            MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES / 2
+        );
         assert!(!parameter.scout_variants[0].promoted);
 
-        for _ in MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES / 2..MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES {
-            record_learning_outcome(settings.learning.entry(paired_key.clone()).or_default(), 0.02);
+        for _ in
+            MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES / 2..MIN_LIVE_SCOUT_PARAMETER_VARIANT_SAMPLES
+        {
+            record_learning_outcome(
+                settings.learning.entry(paired_key.clone()).or_default(),
+                0.02,
+            );
         }
-        assert_eq!(best_scout_parameter_value(&settings, "BTC-USDT", strategy, &spec), Some(candidate));
+        assert_eq!(
+            best_scout_parameter_value(&settings, "BTC-USDT", strategy, &spec),
+            Some(candidate)
+        );
         let profile = strategy_parameter_profile(&settings, "BTC-USDT", strategy);
-        let parameter = profile.parameters.iter().find(|parameter| parameter.key == spec.key.as_str()).unwrap();
+        let parameter = profile
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == spec.key.as_str())
+            .unwrap();
         assert!(parameter.scout_variants[0].promoted);
     }
 }

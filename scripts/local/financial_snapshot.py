@@ -43,9 +43,16 @@ def collect_paged_source(service, endpoint, cursor_name, page_size=500, cap=200)
     cursor = 0
     expected_total = None
     identity = None
+    pinned_max_cursor = None
+    pinned_source_epoch = None
     cumulative_row_bytes = 0
+    last_populated_page_untruncated = None
     for _ in range(cap):
         params = {"limit": page_size, cursor_name: cursor}
+        if (service == "paper_exchange" and endpoint == "financial-evidence"
+                and pinned_max_cursor is not None):
+            params["through_cursor"] = pinned_max_cursor
+            params["through_epoch"] = pinned_source_epoch
         response = api(
             service, endpoint, params=params,
             max_bytes=32_000_000 if endpoint == "portfolio-evidence-intervals" else 4_000_000,
@@ -81,7 +88,8 @@ def collect_paged_source(service, endpoint, cursor_name, page_size=500, cap=200)
             page_rows = page.get("intervals")
             if not isinstance(page_rows, list):
                 raise ValueError("PM portfolio interval page is malformed")
-            current_identity = page.get("coverage")
+            if page_rows:
+                last_populated_page_untruncated = page.get("truncated") is False
             if identity is None:
                 identity = page.get("schema_version")
             elif identity != page.get("schema_version"):
@@ -94,9 +102,34 @@ def collect_paged_source(service, endpoint, cursor_name, page_size=500, cap=200)
             if next_cursor is None:
                 if page.get("truncated") is True:
                     raise ValueError("PM portfolio interval history ended while truncated")
-                body = {"intervals": rows, "coverage": current_identity,
+                # The empty terminal page can describe only its own lack of a
+                # durable checkpoint. It must not overwrite coverage for the
+                # populated pages collected before it. Pagination completeness
+                # establishes that the retained rows cover the source; row
+                # completeness remains an independent, fail-closed condition.
+                # Intermediate pages may be marked truncated because their
+                # cursor advertises another page. The source is complete only
+                # when pagination reaches an untruncated terminal page and the
+                # final populated page itself was untruncated. Cursor progress
+                # is validated above for every intermediate page.
+                complete_pages = (
+                    page.get("truncated") is False
+                    and (last_populated_page_untruncated is not False)
+                )
+                rows_complete = bool(rows) and all(
+                    isinstance(row, dict) and row.get("complete") is True
+                    for row in rows
+                )
+                coverage = (
+                    "pm_internal_complete"
+                    if rows_complete
+                    else "pm_internal_incomplete"
+                    if rows
+                    else page.get("coverage")
+                )
+                body = {"intervals": rows, "coverage": coverage,
                         "schema_version": identity,
-                        "truncated": False, "next_cursor": None,
+                        "truncated": not complete_pages, "next_cursor": None,
                         "collector_complete": True, "page_evidence": pages}
                 break
             if type(next_cursor) is not int or next_cursor <= cursor:
@@ -106,7 +139,14 @@ def collect_paged_source(service, endpoint, cursor_name, page_size=500, cap=200)
             current = (page.get("source_epoch"), page.get("max_cursor"))
             if identity is None:
                 identity = current
-            elif identity != current:
+                pinned_source_epoch = current[0]
+                pinned_max_cursor = current[1]
+                if not isinstance(pinned_source_epoch, str) or not pinned_source_epoch:
+                    raise ValueError("Paper Exchange event source epoch is malformed")
+                if type(pinned_max_cursor) is not int or pinned_max_cursor < 0:
+                    raise ValueError("Paper Exchange event snapshot cursor is malformed")
+            elif (current[0] != identity[0]
+                    or current[1] != pinned_max_cursor):
                 raise ValueError("Paper Exchange epoch or maximum cursor changed during collection")
             page_rows = page.get("events")
             if not isinstance(page_rows, list) or page.get("after_cursor") != cursor:

@@ -1,22 +1,316 @@
 import unittest
 import copy
 import json
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from financial import (
     compare_paper_exchange_match_evidence,
+    MAX_RECONCILIATION_SOURCE_BYTES,
     reconcile_independent_execution_fills,
     reconcile_independent_portfolio_intervals,
     load_execution_reconciliation_inputs,
     project_paper_exchange_financial_evidence_page,
+    reconciliation,
     reconstruct_portfolio_intervals_from_paper_exchange,
+    validate_pm_durable_ledger_epoch,
 )
 from financial_snapshot import collect_paged_source, valid_financial_snapshot_body
 
 
 class FinancialSnapshotContractTests(unittest.TestCase):
+    def pm_epoch_coverage(self, **overrides):
+        return {
+            "ledger_evidence_epoch": "pm-ledger-evidence:v1:allocator-epoch-1",
+            "ledger_evidence_epoch_status": "clean_slate",
+            "trade_rows": 2,
+            "fills_in_evidence_epoch": 2,
+            "rows_without_fill_identity": 0,
+            "rows_with_fill_identity_outside_evidence_epoch": 0,
+            **overrides,
+        }
+
+    def test_pm_durable_epoch_accepts_clean_slate_with_matching_fill_ids(self):
+        rows = [
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:2"},
+        ]
+        result = validate_pm_durable_ledger_epoch(self.pm_epoch_coverage(), rows)
+        self.assertEqual(result["status"], "VALID", result)
+        self.assertTrue(result["durable_epoch_usable"])
+        self.assertEqual(result["fill_ids_checked"], 2)
+
+    def test_pm_durable_epoch_rejects_missing_epoch_or_status(self):
+        rows = [{"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+                {"fill_id": "pm-fill:v1:allocator-epoch-1:2"}]
+        missing_epoch = validate_pm_durable_ledger_epoch(
+            self.pm_epoch_coverage(ledger_evidence_epoch=None), rows
+        )
+        self.assertFalse(missing_epoch["durable_epoch_usable"])
+        self.assertIn(
+            "Position Management durable ledger epoch is missing or malformed",
+            missing_epoch["blockers"],
+        )
+
+        missing_status = validate_pm_durable_ledger_epoch(
+            self.pm_epoch_coverage(ledger_evidence_epoch_status=None), rows
+        )
+        self.assertFalse(missing_status["durable_epoch_usable"])
+        self.assertIn(
+            "Position Management durable ledger epoch status is missing or unrecognized",
+            missing_status["blockers"],
+        )
+
+    def test_pm_durable_epoch_rejects_wrong_version_and_fill_id_epoch_mismatch(self):
+        rows = [
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:2"},
+        ]
+        wrong_version = validate_pm_durable_ledger_epoch(
+            self.pm_epoch_coverage(
+                ledger_evidence_epoch="pm-ledger-evidence:v2:allocator-epoch-1"
+            ),
+            rows,
+        )
+        self.assertFalse(wrong_version["durable_epoch_usable"])
+        self.assertIn(
+            "Position Management durable ledger epoch is missing or malformed",
+            wrong_version["blockers"],
+        )
+
+        mismatch = validate_pm_durable_ledger_epoch(
+            self.pm_epoch_coverage(),
+            [
+                {"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+                {"fill_id": "pm-fill:v1:other-allocator-epoch:2"},
+            ],
+        )
+        self.assertFalse(mismatch["durable_epoch_usable"])
+        self.assertIn(
+            "Position Management fill IDs do not match the advertised allocator epoch",
+            mismatch["blockers"],
+        )
+
+    def test_pm_durable_epoch_keeps_mixed_history_explicitly_blocked(self):
+        mixed = validate_pm_durable_ledger_epoch(
+            self.pm_epoch_coverage(ledger_evidence_epoch_status="mixed_legacy_and_current"),
+            [
+                {"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+                {"fill_id": "pm-fill:v1:allocator-epoch-1:2"},
+            ],
+        )
+        self.assertFalse(mixed["durable_epoch_usable"])
+        self.assertIn(
+            "Position Management fill history is mixed across durable epochs",
+            mixed["blockers"],
+        )
+
+    def test_reconciliation_uses_verified_pm_epoch_instead_of_unconditional_blocker(self):
+        rows = [
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:1"},
+            {"fill_id": "pm-fill:v1:allocator-epoch-1:2"},
+        ]
+        manifest = {
+            "snapshot_id": "pm-paper-v1:fixture",
+            "execution_mode": "paper",
+            "ledger_snapshot_consistent": True,
+            "ledger_coverage": {
+                **self.pm_epoch_coverage(),
+                "unknown_fee_fills": 0,
+                "fee_currency_unknown_rows": 0,
+                "fee_cashflow_currency_mismatch_rows": 0,
+                "rows_without_parent_order_id": 0,
+                "timestamp_order_inversion_rows": 0,
+            },
+            "execution_reconciliation_inputs": {
+                "position_trades": rows,
+                "execution_ledger": None,
+                "position_source_coverage": None,
+                "match_evidence_ledger": None,
+                "pm_portfolio_intervals": None,
+                "independent_portfolio_interval_contract": None,
+                "portfolio_interval_source_coverage": None,
+            },
+        }
+        timestamp = "2026-01-01T00:00:00+00:00"
+        source_data = {
+            "account": {"realized_pnl": 0.0, "currency": "USD"},
+            "positions": {"trade_count": 2},
+            "realized-pnl": {"realized_pnl_all_time_usd": 0.0},
+            "fee-summary": {"fills": 2},
+        }
+
+        with patch("financial.SNAPSHOT_MANIFEST", manifest), patch(
+            "financial.source",
+            side_effect=lambda endpoint: (
+                source_data[endpoint],
+                {"collected_at": timestamp, "modified_at": timestamp},
+            ),
+        ):
+            result = reconciliation()
+
+        self.assertTrue(
+            result["position_management_epoch_validation"]["durable_epoch_usable"]
+        )
+        self.assertNotIn(
+            "Durable ledger epoch across restarts is not exposed", result["blockers"]
+        )
+        self.assertNotIn(
+            "Position Management durable ledger epoch is missing or malformed",
+            result["blockers"],
+        )
+
+    def test_financial_evidence_bundle_above_32mb_remains_reconcilable(self):
+        """The multi-page collector's valid 64 MB bundle must survive loading."""
+        self.assertGreater(MAX_RECONCILIATION_SOURCE_BYTES, 32_018_923)
+        with TemporaryDirectory() as temporary:
+            cache = Path(temporary).resolve()
+            epoch = "execution-epoch-1"
+            fee_schedule = {
+                "schema_version": "paper_exchange_financial_evidence:v1",
+                "event_id": "fee-schedule:v1:BTC-USDT",
+                "event_type": "fee_schedule",
+                "source_system": "paper_exchange_simulator",
+                "source_epoch": epoch,
+                "source_cursor": 1,
+                "source_record_id": "fee-schedule-record-1",
+                "source_timestamp_utc_ms": 100,
+                "fee_schedule_id": "v35-paper-sim-spot",
+                "fee_schedule_version": "v1",
+                "symbol": "BTC-USDT",
+                "effective_from_utc_ms": 1,
+                "effective_to_utc_ms": None,
+                "maker_rate": 0.0008,
+                "taker_rate": 0.001,
+            }
+            settled_execution = {
+                "schema_version": "paper_exchange_financial_evidence:v1",
+                "event_id": "paper-settlement:execution-1",
+                "event_type": "settled_execution",
+                "source_system": "paper_exchange_simulator",
+                "source_epoch": epoch,
+                "source_cursor": 2,
+                "source_record_id": "execution-1",
+                "source_timestamp_utc_ms": 200,
+                "execution_id": "execution-1",
+                "order_id": "order-1",
+                "symbol": "BTC-USDT",
+                "side": "sell",
+                "quantity": 1.0,
+                "price": 100.0,
+                "fee": -0.08,
+                "fee_currency": "USDT",
+                "fee_schedule_id": "v35-paper-sim-spot",
+                "fee_schedule_version": "v1",
+                "execution_origin": "resting_limit",
+            }
+            events = []
+            for cursor, event in enumerate((fee_schedule, settled_execution), start=1):
+                events.append({
+                    "source_cursor": cursor,
+                    "source_epoch": epoch,
+                    "source_record_id": event["source_record_id"],
+                    "source_system": event["source_system"],
+                    "source_timestamp_utc_ms": event["source_timestamp_utc_ms"],
+                    "event": event,
+                })
+            source_bodies = [
+                ("positions", "/positions/trades", "positions-trades-fixture.json", {
+                    "trades": [{
+                        "fill_id": "pm-fill-1",
+                        "parent_order_id": "order-1",
+                        "symbol": "BTC-USDT",
+                        "side": "sell",
+                        "quantity": 1.0,
+                        "execution_price": 100.0,
+                        "fee": -0.08,
+                        "fee_currency": "USDT",
+                        "fee_known": True,
+                    }],
+                    "total": 1,
+                    "has_older": False,
+                }),
+                ("positions", "/positions/portfolio-evidence/intervals",
+                 "positions-portfolio-evidence-intervals-fixture.json", {
+                    "schema_version": 1,
+                    "coverage": "no_durable_checkpoint",
+                    "truncated": False,
+                    "next_cursor": None,
+                    "intervals": [],
+                }),
+                ("paper_exchange", "/internal/financial/evidence",
+                 "paper_exchange-financial-evidence-complete-fixture.json", {
+                    "schema_version": "paper_exchange_financial_evidence:v1",
+                    "evidence_kind": "paper_exchange_source_attributed_account_evidence",
+                    "source_epoch": "financial-history-epoch",
+                    "cursor_kind": "financial_event",
+                    "after_cursor": 0,
+                    "next_cursor": None,
+                    "max_cursor": 2,
+                    "page_size": 2,
+                    "page_complete": True,
+                    "history_complete": True,
+                    "opening_capital_status": "explicit_simulator_opening_capital_captured",
+                    "fee_schedule_status": "versioned_simulator_fee_schedule_captured",
+                    "source_attribution_status": "source_attributed_not_cryptographically_verified",
+                    "captured_execution_flow_types": ["resting_limit"],
+                    "uncovered_execution_flow_types": [],
+                    "events": events,
+                }),
+            ]
+            sources = []
+            large_bundle_path = None
+            for service, route, filename, body in source_bodies:
+                body_bytes = json.dumps(body, separators=(",", ":")).encode()
+                payload = {
+                    "service": service,
+                    "route": route,
+                    "application_status": 200,
+                    "bytes": len(body_bytes),
+                    "body": body,
+                }
+                path = cache / filename
+                path.write_text(json.dumps(payload))
+                if service == "paper_exchange":
+                    large_bundle_path = path.resolve()
+                sources.append({
+                    "service": service,
+                    "endpoint": (
+                        "portfolio-evidence-intervals"
+                        if route == "/positions/portfolio-evidence/intervals"
+                        else "financial-evidence"
+                        if service == "paper_exchange"
+                        else "trades"
+                    ),
+                    "status": "COLLECTED",
+                    "evidence": str(path),
+                    "bytes": len(body_bytes),
+                })
+
+            original_stat = Path.stat
+
+            def report_large_bundle_size(path, *args, **kwargs):
+                stat = original_stat(path, *args, **kwargs)
+                if large_bundle_path is not None and path.name == large_bundle_path.name:
+                    return SimpleNamespace(st_size=32_018_923)
+                return stat
+
+            with patch.object(Path, "stat", report_large_bundle_size):
+                loaded = load_execution_reconciliation_inputs(sources, cache)
+
+            self.assertIsNotNone(loaded)
+            self.assertEqual(len(loaded["execution_ledger"]["fills"]), 1)
+            result = reconcile_independent_execution_fills(
+                loaded["position_trades"],
+                loaded["execution_ledger"],
+                loaded["position_source_coverage"],
+            )
+            self.assertEqual(result["status"], "RECONCILED")
+            self.assertEqual(result["matched_order_count"], 1)
+            self.assertEqual(result["fee_rows_reconciled"], 1)
+
     def test_paged_trade_collector_persists_complete_source_bundle(self):
         response = {"service": "positions", "route": "/positions/trades?limit=500&offset=0",
                     "application_status": 200, "bytes": 2,
@@ -29,6 +323,135 @@ class FinancialSnapshotContractTests(unittest.TestCase):
         self.assertEqual(collected["status"], "COLLECTED")
         self.assertTrue(collected["collector_bundle"])
         self.assertEqual(collected["body"]["total"], 0)
+        self.assertEqual(len(collected["page_evidence"]), 1)
+
+    def test_paper_exchange_event_collector_pins_initial_max_cursor(self):
+        def event(cursor):
+            return {"source_cursor": cursor, "event": {"source_cursor": cursor}}
+
+        pages = [
+            {"source_epoch": "epoch-1", "max_cursor": 2, "after_cursor": 0,
+             "next_cursor": 1, "page_complete": False, "events": [event(1)]},
+            # A concurrent append raised the live maximum to 3, but the
+            # collector asks for the first page's stable through_cursor=2.
+            {"source_epoch": "epoch-1", "max_cursor": 2, "after_cursor": 1,
+             "next_cursor": None, "page_complete": True, "events": [event(2)]},
+        ]
+        responses = [{"service": "paper_exchange",
+                      "route": "/internal/financial/evidence",
+                      "application_status": 200, "bytes": 1, "body": page}
+                     for page in pages]
+        with patch("financial_snapshot.api", side_effect=responses) as api_mock, \
+                patch("financial_snapshot.save", side_effect=["/tmp/page-1.json",
+                      "/tmp/page-2.json", "/tmp/bundle.json"]):
+            collected = collect_paged_source(
+                "paper_exchange", "financial-evidence", "after_cursor", page_size=1
+            )
+
+        calls = [call.kwargs["params"] for call in api_mock.call_args_list]
+        self.assertEqual(calls[0], {"limit": 1, "after_cursor": 0})
+        self.assertEqual(calls[1], {
+            "limit": 1, "after_cursor": 1, "through_cursor": 2,
+            "through_epoch": "epoch-1",
+        })
+        self.assertEqual(collected["body"]["max_cursor"], 2)
+        self.assertEqual([row["source_cursor"] for row in collected["body"]["events"]],
+                         [1, 2])
+        self.assertEqual(len(collected["page_evidence"]), 2)
+
+    def test_interval_collector_aggregates_complete_rows_before_empty_terminal_page(self):
+        pages = [
+            {"schema_version": 1, "coverage": "pm_internal_complete",
+             "truncated": True, "next_cursor": 2,
+             "intervals": [{"evidence_id": "i-1", "complete": True}]},
+            {"schema_version": 1, "coverage": "pm_internal_complete",
+             "truncated": False, "next_cursor": 3,
+             "intervals": [{"evidence_id": "i-2", "complete": True}]},
+            {"schema_version": 1, "coverage": "no_durable_checkpoint",
+             "truncated": False, "next_cursor": None, "intervals": []},
+        ]
+        responses = [{"service": "positions", "route": "/positions/portfolio-evidence/intervals",
+                      "application_status": 200, "bytes": 1, "body": page}
+                     for page in pages]
+        with patch("financial_snapshot.api", side_effect=responses) as api_mock, \
+                patch("financial_snapshot.save", side_effect=["/tmp/page-1.json",
+                      "/tmp/page-2.json", "/tmp/page-3.json", "/tmp/bundle.json"]):
+            collected = collect_paged_source(
+                "positions", "portfolio-evidence-intervals", "after_cursor", page_size=1
+            )
+
+        self.assertEqual([call.kwargs["params"]["after_cursor"]
+                          for call in api_mock.call_args_list], [0, 2, 3])
+        self.assertEqual(collected["body"]["coverage"], "pm_internal_complete")
+        self.assertFalse(collected["body"]["truncated"])
+        self.assertEqual([row["evidence_id"] for row in collected["body"]["intervals"]],
+                         ["i-1", "i-2"])
+        self.assertEqual(len(collected["page_evidence"]), 3)
+        # The terminal empty page is retained for audit, but its local coverage
+        # label does not erase coverage established by the populated pages.
+        self.assertEqual(collected["page_evidence"][-1]["evidence"], "/tmp/page-3.json")
+
+    def test_interval_collector_does_not_upgrade_incomplete_rows(self):
+        pages = [
+            {"schema_version": 1, "coverage": "pm_internal_complete",
+             "truncated": False, "next_cursor": 1,
+             "intervals": [{"evidence_id": "i-1", "complete": True}]},
+            {"schema_version": 1, "coverage": "no_durable_checkpoint",
+             "truncated": False, "next_cursor": None,
+             "intervals": [{"evidence_id": "i-2", "complete": False}]},
+        ]
+        responses = [{"service": "positions", "route": "/positions/portfolio-evidence/intervals",
+                      "application_status": 200, "bytes": 1, "body": page}
+                     for page in pages]
+        with patch("financial_snapshot.api", side_effect=responses), \
+                patch("financial_snapshot.save", side_effect=["/tmp/page-1.json",
+                      "/tmp/page-2.json", "/tmp/bundle.json"]):
+            collected = collect_paged_source(
+                "positions", "portfolio-evidence-intervals", "after_cursor", page_size=1
+            )
+
+        self.assertEqual(collected["body"]["coverage"], "pm_internal_incomplete")
+        self.assertFalse(collected["body"]["truncated"])
+        self.assertFalse(collected["body"]["intervals"][1]["complete"])
+        self.assertEqual(len(collected["page_evidence"]), 2)
+
+    def test_interval_collector_preserves_source_truncation_on_final_populated_page(self):
+        pages = [
+            {"schema_version": 1, "coverage": "pm_internal_complete",
+             "truncated": True, "next_cursor": 1,
+             "intervals": [{"evidence_id": "i-1", "complete": True}]},
+            {"schema_version": 1, "coverage": "no_durable_checkpoint",
+             "truncated": False, "next_cursor": None, "intervals": []},
+        ]
+        responses = [{"service": "positions", "route": "/positions/portfolio-evidence/intervals",
+                      "application_status": 200, "bytes": 1, "body": page}
+                     for page in pages]
+        with patch("financial_snapshot.api", side_effect=responses), \
+                patch("financial_snapshot.save", side_effect=["/tmp/page-1.json",
+                      "/tmp/page-2.json", "/tmp/bundle.json"]):
+            collected = collect_paged_source(
+                "positions", "portfolio-evidence-intervals", "after_cursor", page_size=1
+            )
+
+        self.assertEqual(collected["body"]["coverage"], "pm_internal_complete")
+        self.assertTrue(collected["body"]["truncated"])
+        self.assertEqual(len(collected["body"]["intervals"]), 1)
+
+    def test_interval_collector_preserves_no_checkpoint_for_genuinely_empty_history(self):
+        response = {"service": "positions", "route": "/positions/portfolio-evidence/intervals",
+                    "application_status": 200, "bytes": 1,
+                    "body": {"schema_version": 1, "coverage": "no_durable_checkpoint",
+                             "truncated": False, "next_cursor": None, "intervals": []}}
+        with patch("financial_snapshot.api", return_value=response), \
+                patch("financial_snapshot.save", side_effect=["/tmp/empty-page.json",
+                      "/tmp/empty-bundle.json"]):
+            collected = collect_paged_source(
+                "positions", "portfolio-evidence-intervals", "after_cursor"
+            )
+
+        self.assertEqual(collected["body"]["coverage"], "no_durable_checkpoint")
+        self.assertEqual(collected["body"]["intervals"], [])
+        self.assertFalse(collected["body"]["truncated"])
         self.assertEqual(len(collected["page_evidence"]), 1)
 
     def test_paper_exchange_event_projection_requires_complete_monotonic_source_pages(self):

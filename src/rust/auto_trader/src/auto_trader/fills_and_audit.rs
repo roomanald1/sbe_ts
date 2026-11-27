@@ -33,27 +33,51 @@ fn strategy_from_entry_context(context: &str) -> Option<String> {
     .map(str::to_owned)
 }
 
-fn append_entry_fill_evidence(position: &mut TraderPosition, response: &serde_json::Value) {
-    let fills = response
-        .get("fill_evidence")
-        .and_then(serde_json::Value::as_array);
-    let Some(fills) = fills.filter(|fills| !fills.is_empty()) else {
+fn append_entry_fill_evidence(
+    position: &mut TraderPosition,
+    response: &serde_json::Value,
+    request_body: &serde_json::Value,
+) {
+    const MAX_ENTRY_FILL_LINKS: usize = 4096;
+    let expected_order_id = request_body["client_order_id"].as_str();
+    let expected_symbol = request_body["symbol"].as_str();
+    let expected_side = request_body["side"].as_str();
+    let Some(fills) = response["fill_evidence"]
+        .as_array()
+        .filter(|fills| !fills.is_empty())
+    else {
         position.entry_fill_costs_complete = false;
         return;
     };
-    if response
-        .get("fee_complete")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
-        position.entry_fill_costs_complete = false;
-    }
+    let mut valid = expected_order_id.is_some()
+        && expected_symbol.is_some()
+        && matches!(expected_side, Some("buy" | "sell"))
+        && response["fee_complete"].as_bool() == Some(true);
+    let mut page_ids = std::collections::BTreeSet::new();
+    let mut response_quantity = 0.0;
+    let mut known_fee_total = 0.0;
+    let mut page_fee_currencies = std::collections::BTreeSet::new();
     for fill in fills {
-        if let Some(fill_id) = fill
-            .get("fill_id")
-            .and_then(serde_json::Value::as_str)
-            .filter(|fill_id| !fill_id.trim().is_empty())
-        {
+        let fill_id = fill["fill_id"].as_str();
+        let stable_fill_id = fill_id.is_some_and(|value| {
+            value
+                .strip_prefix("pm-fill:v1:")
+                .and_then(|rest| rest.split_once(':'))
+                .is_some_and(|(epoch, sequence)| {
+                    !epoch.trim().is_empty() && sequence.parse::<u64>().is_ok()
+                })
+        });
+        let quantity = fill["quantity"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let execution_price = fill["execution_price"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let identity_matches = fill["parent_order_id"].as_str() == expected_order_id
+            && fill["client_order_id"].as_str() == expected_order_id
+            && fill["symbol"].as_str() == expected_symbol
+            && fill["side"].as_str() == expected_side;
+        if let Some(fill_id) = fill_id.filter(|_| stable_fill_id) {
             if !position
                 .entry_fill_ids
                 .iter()
@@ -62,27 +86,230 @@ fn append_entry_fill_evidence(position: &mut TraderPosition, response: &serde_js
                 position.entry_fill_ids.push(fill_id.to_owned());
             }
         } else {
-            position.entry_fill_costs_complete = false;
+            valid = false;
         }
-        if fill.get("fee_known").and_then(serde_json::Value::as_bool) != Some(true) {
-            position.entry_fill_costs_complete = false;
+        let unique_in_page = fill_id.is_some_and(|fill_id| page_ids.insert(fill_id.to_owned()));
+        if let Some(quantity) = quantity {
+            response_quantity += quantity;
         }
-        if let Some(currency) = fill
-            .get("fee_currency")
-            .and_then(serde_json::Value::as_str)
-            .filter(|currency| !currency.trim().is_empty())
+        if !stable_fill_id
+            || !unique_in_page
+            || !identity_matches
+            || quantity.is_none()
+            || execution_price.is_none()
         {
+            valid = false;
+            continue;
+        }
+        let fee_amount = fill["fee"].as_f64().filter(|value| value.is_finite());
+        let fee_known = fill["fee_known"].as_bool() == Some(true) && fee_amount.is_some();
+        let fee_currency = fill["fee_currency"]
+            .as_str()
+            .filter(|currency| !currency.trim().is_empty())
+            .map(str::to_owned);
+        if let Some(currency) = fee_currency.as_ref() {
+            page_fee_currencies.insert(currency.clone());
             if !position
                 .entry_fee_currencies
                 .iter()
                 .any(|existing| existing == currency)
             {
-                position.entry_fee_currencies.push(currency.to_owned());
+                position.entry_fee_currencies.push(currency.clone());
             }
         } else {
-            position.entry_fill_costs_complete = false;
+            valid = false;
+        }
+        if !fee_known {
+            valid = false;
+        } else {
+            known_fee_total += fee_amount.unwrap().abs();
+        }
+        let link = PositionEntryFillLink {
+            fill_id: fill_id.unwrap().to_owned(),
+            client_order_id: expected_order_id.unwrap().to_owned(),
+            symbol: expected_symbol.unwrap().to_owned(),
+            side: expected_side.unwrap().to_owned(),
+            quantity: quantity.unwrap(),
+            execution_price: execution_price.unwrap(),
+            timestamp_ms: fill["timestamp"]
+                .as_u64()
+                .filter(|timestamp| *timestamp > 0),
+            fee_known,
+            fee_amount,
+            fee_currency,
+        };
+        if let Some(existing) = position
+            .entry_fill_links
+            .iter()
+            .find(|existing| existing.fill_id == link.fill_id)
+        {
+            if existing.client_order_id != link.client_order_id
+                || existing.symbol != link.symbol
+                || existing.side != link.side
+                || (existing.quantity - link.quantity).abs() > 1e-12
+                || (existing.execution_price - link.execution_price).abs() > 1e-9
+                || existing.timestamp_ms != link.timestamp_ms
+                || existing.fee_amount != link.fee_amount
+                || existing.fee_currency != link.fee_currency
+            {
+                valid = false;
+            }
+        } else if position.entry_fill_links.len() < MAX_ENTRY_FILL_LINKS {
+            position.entry_fill_links.push(link);
+        } else {
+            valid = false;
         }
     }
+    let quantity_matches = response["filled_quantity"]
+        .as_f64()
+        .is_some_and(|reported| {
+            reported.is_finite()
+                && reported >= 0.0
+                && (reported - response_quantity).abs()
+                    <= 1e-9 * response_quantity.abs().max(reported.abs()).max(1.0)
+        });
+    let reported_fee = response["estimated_fee"]
+        .as_f64()
+        .filter(|fee| fee.is_finite())
+        .map(f64::abs);
+    let fee_total_matches = page_fee_currencies.len() == 1
+        && reported_fee.is_some_and(|reported| {
+            (reported - known_fee_total).abs()
+                <= 1e-9 * known_fee_total.abs().max(reported.abs()).max(1.0)
+        });
+    position.entry_fill_costs_complete &= valid && quantity_matches && fee_total_matches;
+}
+
+fn update_initial_risk_reference(
+    position: &mut TraderPosition,
+    response: &serde_json::Value,
+    request_body: &serde_json::Value,
+    stop_loss_percent: f64,
+) {
+    const MAX_RISK_FILL_IDS: usize = 4096;
+
+    let expected_client_order_id = request_body["client_order_id"].as_str();
+    let expected_symbol = request_body["symbol"].as_str();
+    let expected_side = request_body["side"].as_str();
+    let quote_currency = expected_symbol
+        .and_then(|symbol| symbol.split_once('-').map(|(_, quote)| quote))
+        .filter(|quote| !quote.trim().is_empty());
+    let existing_reference = position.initial_risk_reference.take();
+    let had_reference = existing_reference.is_some();
+    let mut reference = existing_reference.unwrap_or_else(|| InitialRiskReference {
+        schema_version: 1,
+        quote_currency: quote_currency.map(str::to_owned),
+        stop_loss_percent: (stop_loss_percent.is_finite() && stop_loss_percent > 0.0)
+            .then_some(stop_loss_percent),
+        quote_amount: Some(0.0),
+        fill_ids: Vec::new(),
+        status: "incomplete".into(),
+    });
+
+    let mut valid = expected_client_order_id.is_some()
+        && expected_symbol.is_some()
+        && matches!(expected_side, Some("buy" | "sell"))
+        && quote_currency.is_some()
+        && stop_loss_percent.is_finite()
+        && stop_loss_percent > 0.0
+        && position
+            .entry_fill_ids
+            .iter()
+            .all(|fill_id| reference.fill_ids.contains(fill_id));
+    if had_reference && reference.status != "complete" {
+        valid = false;
+    }
+    if reference.schema_version != 1
+        || reference.quote_currency.as_deref() != quote_currency
+        || reference.stop_loss_percent.is_none_or(|baseline| {
+            (baseline - stop_loss_percent).abs() > 1e-9 * baseline.abs().max(1.0)
+        })
+    {
+        valid = false;
+    }
+    let fills = response["fill_evidence"].as_array();
+    let reported_filled = response["filled_quantity"].as_f64();
+    let mut request_fill_ids = std::collections::BTreeSet::new();
+    let existing_ids = reference
+        .fill_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut response_quantity = 0.0;
+    let mut response_risk = 0.0;
+    let Some(fills) = fills.filter(|fills| !fills.is_empty()) else {
+        valid = false;
+        reference.status = "incomplete".into();
+        position.initial_risk_reference = Some(reference);
+        return;
+    };
+    for fill in fills {
+        let fill_id = fill["fill_id"].as_str();
+        let stable_fill_id = fill_id.is_some_and(|value| {
+            value
+                .strip_prefix("pm-fill:v1:")
+                .and_then(|rest| rest.split_once(':'))
+                .is_some_and(|(epoch, sequence)| {
+                    !epoch.trim().is_empty() && sequence.parse::<u64>().is_ok()
+                })
+        });
+        let quantity = fill["quantity"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let execution_price = fill["execution_price"]
+            .as_f64()
+            .filter(|value| value.is_finite() && *value > 0.0);
+        let identity_matches = fill["parent_order_id"].as_str() == expected_client_order_id
+            && fill["client_order_id"].as_str() == expected_client_order_id
+            && fill["symbol"].as_str() == expected_symbol
+            && fill["side"].as_str() == expected_side;
+        let unique = fill_id.is_some_and(|id| request_fill_ids.insert(id.to_owned()));
+        if !stable_fill_id
+            || !identity_matches
+            || !unique
+            || quantity.is_none()
+            || execution_price.is_none()
+        {
+            valid = false;
+            continue;
+        }
+        let (quantity, execution_price) = (quantity.unwrap(), execution_price.unwrap());
+        response_quantity += quantity;
+        if !existing_ids.contains(fill_id.unwrap()) {
+            response_risk += quantity * execution_price * stop_loss_percent / 100.0;
+        }
+    }
+    let quantity_matches = reported_filled.is_some_and(|reported| {
+        reported.is_finite()
+            && reported >= 0.0
+            && (reported - response_quantity).abs()
+                <= 1e-9 * response_quantity.abs().max(reported.abs()).max(1.0)
+    });
+    valid &= quantity_matches && response_risk.is_finite() && response_risk >= 0.0;
+
+    if valid {
+        let new_ids = request_fill_ids
+            .into_iter()
+            .filter(|fill_id| !existing_ids.contains(fill_id))
+            .collect::<Vec<_>>();
+        if reference.fill_ids.len().saturating_add(new_ids.len()) > MAX_RISK_FILL_IDS {
+            valid = false;
+        } else {
+            // Replayed pages are idempotent: only risk rows not already linked
+            // to this position are added to the persisted baseline.
+            for fill_id in new_ids {
+                reference.fill_ids.push(fill_id);
+            }
+            let existing_risk = reference.quote_amount.unwrap_or(0.0);
+            if existing_risk.is_finite() && existing_risk >= 0.0 {
+                reference.quote_amount = Some(existing_risk + response_risk);
+            } else {
+                valid = false;
+            }
+        }
+    }
+    reference.status = if valid { "complete" } else { "incomplete" }.into();
+    position.initial_risk_reference = Some(reference);
 }
 
 fn attach_authoritative_outcome_lineage(
@@ -227,8 +454,12 @@ fn apply_auto_fill(
             position.total_fees_paid = fee;
             position.total_entry_fees_paid = fee;
             position.entry_fill_ids.clear();
+            position.entry_fill_links.clear();
             position.entry_fee_currencies.clear();
             position.entry_fill_costs_complete = true;
+            position.initial_risk_reference = None;
+            position.price_path_epoch = None;
+            position.exit_parameter_provenance = None;
         } else {
             if position.initial_entry_notional <= 0.0 {
                 position.initial_entry_notional = old.abs() * position.average_entry_price;
@@ -297,19 +528,37 @@ fn apply_auto_fill(
         position.total_fees_paid = fee - closing_fee;
         position.total_entry_fees_paid = fee - closing_fee;
         position.entry_order_type = order_type.to_owned();
-        position.entry_order_types = vec![order_type
-            .split(" · ")
-            .next()
-            .unwrap_or(order_type)
-            .to_owned()];
+        position.entry_order_types = vec![
+            order_type
+                .split(" · ")
+                .next()
+                .unwrap_or(order_type)
+                .to_owned(),
+        ];
         position.entry_context = context.to_owned();
         position.scout_entry = context.starts_with("scout:");
         position.entries = 1;
         position.horizon_take_profit_percent = horizon_take_profit_percent;
         position.take_profit_deferred_at_ms = None;
         position.entry_fill_ids.clear();
+        position.entry_fill_links.clear();
         position.entry_fee_currencies.clear();
         position.entry_fill_costs_complete = true;
+        position.initial_risk_reference = None;
+        position.price_path.clear();
+        position.price_path_total_samples = 0;
+        position.price_path_truncated = false;
+        position.price_path_restart_interrupted = false;
+        position.price_path_epoch = None;
+        position.entry_timestamp_ms = current_time_ms();
+        position.entry_decision_id = None;
+        position.trade_id = None;
+        position.lifecycle_identity = None;
+        position.strategy_decision = None;
+        position.exit_parameter_provenance = None;
+        position.stop_loss_percent = None;
+        position.take_profit_percent = None;
+        position.protective_stops.clear();
     } else {
         position.quantity = net;
         position.entry_fees -= entry_fee_closed;
@@ -336,6 +585,13 @@ fn apply_strategy_position_fill(
     stop_loss_percent: Option<f64>,
     take_profit_percent: Option<f64>,
 ) -> (f64, Option<String>) {
+    let reversed_position = strategy_positions
+        .get(symbol)
+        .and_then(|lots| lots.get(strategy))
+        .is_some_and(|position| {
+            position.quantity.abs() > 1e-12
+                && position.quantity.signum() != if side == "buy" { 1.0 } else { -1.0 }
+        });
     let mut one_position = BTreeMap::new();
     if let Some(position) = strategy_positions
         .get(symbol)
@@ -377,6 +633,14 @@ fn apply_strategy_position_fill(
         }
         if updated.take_profit_percent.is_none() {
             updated.take_profit_percent = take_profit_percent;
+        }
+        if reversed_position || updated.price_path_epoch.is_none() {
+            updated.price_path_epoch = updated.trade_id.as_ref().map(|trade_id| {
+                format!(
+                    "auto-trader-position-path:v1:{}:{trade_id}",
+                    updated.entry_timestamp_ms
+                )
+            });
         }
         lots.insert(strategy.to_owned(), updated);
     } else {
@@ -806,6 +1070,104 @@ async fn store_execution_audit_until_saved(
 mod strategy_lot_pnl_tests {
     use super::*;
 
+    fn fill_response(
+        client_order_id: &str,
+        fill_id: &str,
+        quantity: f64,
+        price: f64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "filled_quantity": quantity,
+            "estimated_fee": 0.01,
+            "fee_complete": true,
+            "fill_evidence": [{
+                "id": format!("pm-row-{fill_id}"),
+                "fill_id": fill_id,
+                "parent_order_id": client_order_id,
+                "client_order_id": client_order_id,
+                "symbol": "BTC-USDT",
+                "side": "buy",
+                "quantity": quantity,
+                "execution_price": price,
+                "timestamp": 1_500,
+                "fee": 0.01,
+                "fee_known": true,
+                "fee_currency": "USDT"
+            }]
+        })
+    }
+
+    #[test]
+    fn authoritative_initial_risk_links_partial_fill_pages_idempotently() {
+        let request = serde_json::json!({
+            "client_order_id": "entry-order-1",
+            "symbol": "BTC-USDT",
+            "side": "buy"
+        });
+        let first = fill_response("entry-order-1", "pm-fill:v1:paper:11", 0.5, 100.0);
+        let second = fill_response("entry-order-1", "pm-fill:v1:paper:12", 0.5, 102.0);
+        let mut position = TraderPosition {
+            entry_fill_costs_complete: true,
+            ..TraderPosition::default()
+        };
+
+        update_initial_risk_reference(&mut position, &first, &request, 0.5);
+        append_entry_fill_evidence(&mut position, &first, &request);
+        update_initial_risk_reference(&mut position, &second, &request, 0.5);
+        append_entry_fill_evidence(&mut position, &second, &request);
+        update_initial_risk_reference(&mut position, &second, &request, 0.5);
+
+        let risk = position.initial_risk_reference.as_ref().unwrap();
+        assert_eq!(risk.status, "complete");
+        assert_eq!(risk.quote_currency.as_deref(), Some("USDT"));
+        assert_eq!(risk.fill_ids.len(), 2);
+        assert!((risk.quote_amount.unwrap() - 0.505).abs() < 1e-12);
+        assert!(position.entry_fill_costs_complete);
+        assert_eq!(position.entry_fill_links.len(), 2);
+        assert!(
+            position
+                .entry_fill_links
+                .iter()
+                .all(|link| link.client_order_id == "entry-order-1")
+        );
+        assert!(
+            position
+                .entry_fill_links
+                .iter()
+                .all(|link| link.timestamp_ms == Some(1_500))
+        );
+    }
+
+    #[test]
+    fn mismatched_or_missing_execution_identity_keeps_initial_risk_unavailable() {
+        let request = serde_json::json!({
+            "client_order_id": "entry-order-1",
+            "symbol": "BTC-USDT",
+            "side": "buy"
+        });
+        let mut mismatched = fill_response("entry-order-2", "pm-fill:v1:paper:11", 1.0, 100.0);
+        mismatched["fill_evidence"][0]["parent_order_id"] = serde_json::json!("entry-order-1");
+        let mut position = TraderPosition::default();
+        update_initial_risk_reference(&mut position, &mismatched, &request, 0.5);
+        assert_eq!(
+            position.initial_risk_reference.as_ref().unwrap().status,
+            "incomplete"
+        );
+        position.entry_fill_costs_complete = true;
+        append_entry_fill_evidence(&mut position, &mismatched, &request);
+        assert!(!position.entry_fill_costs_complete);
+        assert!(position.entry_fill_links.is_empty());
+
+        let mut legacy = TraderPosition {
+            entry_fill_ids: vec!["legacy-fill-without-execution-fields".into()],
+            ..TraderPosition::default()
+        };
+        let complete_future_fill =
+            fill_response("entry-order-1", "pm-fill:v1:paper:12", 1.0, 100.0);
+        update_initial_risk_reference(&mut legacy, &complete_future_fill, &request, 0.5);
+        assert_eq!(legacy.initial_risk_reference.unwrap().status, "incomplete");
+    }
+
     #[test]
     fn add_on_fill_keeps_the_original_entry_exit_policy_and_profile_trace() {
         let mut lots = BTreeMap::new();
@@ -897,6 +1259,77 @@ mod strategy_lot_pnl_tests {
             None,
         );
         assert!(!positions["ETH-USDT"].scout_entry);
+    }
+
+    #[test]
+    fn direction_reversal_starts_a_new_path_and_identity_lifetime() {
+        let mut lots = BTreeMap::new();
+        let mut aggregate = BTreeMap::new();
+        apply_strategy_position_fill(
+            &mut lots,
+            &mut aggregate,
+            "BTC-USDT",
+            "live-momentum",
+            "buy",
+            1.0,
+            100.0,
+            0.0,
+            "Limit",
+            "live-momentum:strict",
+            true,
+            None,
+            Some("trade-old"),
+            None,
+            Some(0.5),
+            Some(0.8),
+        );
+        {
+            let position = lots
+                .get_mut("BTC-USDT")
+                .unwrap()
+                .get_mut("live-momentum")
+                .unwrap();
+            position.price_path.push(TradePriceSample {
+                timestamp: 1,
+                bid: 99.0,
+                ask: 101.0,
+                sequence: 1,
+                epoch: Some("old-path".into()),
+                ..TradePriceSample::default()
+            });
+            position.initial_risk_reference = Some(InitialRiskReference {
+                schema_version: 1,
+                status: "complete".into(),
+                ..InitialRiskReference::default()
+            });
+        }
+        apply_strategy_position_fill(
+            &mut lots,
+            &mut aggregate,
+            "BTC-USDT",
+            "live-momentum",
+            "sell",
+            2.0,
+            99.0,
+            0.0,
+            "Limit",
+            "live-momentum:strict",
+            true,
+            None,
+            Some("trade-new"),
+            None,
+            Some(0.6),
+            Some(0.9),
+        );
+
+        let position = &lots["BTC-USDT"]["live-momentum"];
+        assert_eq!(position.quantity, -1.0);
+        assert_eq!(position.trade_id.as_deref(), Some("trade-new"));
+        assert_eq!(position.entry_decision_id.as_deref(), Some("trade-new"));
+        assert!(position.price_path.is_empty());
+        assert_eq!(position.price_path_total_samples, 0);
+        assert!(position.initial_risk_reference.is_none());
+        assert_eq!(position.stop_loss_percent, Some(0.6));
     }
 
     #[test]

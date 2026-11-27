@@ -48,6 +48,7 @@ struct InsightBtcRegime {
     sma: f64,
     window_days: usize,
     risk_on: bool,
+    source_close_time_ms: u64,
 }
 
 struct InsightDailyEvaluation {
@@ -128,6 +129,7 @@ fn insight_btc_regime(
         sma,
         window_days: days,
         risk_on: close > sma,
+        source_close_time_ms: btc.last().expect("non-empty candles checked above").close_time_ms,
     })
 }
 
@@ -306,6 +308,7 @@ fn insight_risk_adjusted_monthly_selection(
         sma: btc_sma,
         window_days: regime_days,
         risk_on: btc_close > btc_sma,
+        source_close_time_ms: btc_anchor_time,
     };
     if !btc_regime.risk_on {
         return Ok(InsightRiskAdjustedSelection {
@@ -1277,6 +1280,12 @@ fn insight_daily_batch(
                 "btc_close": btc.map(|regime| regime.close),
                 "btc_sma": btc.map(|regime| regime.sma),
                 "btc_window_days": btc.map(|regime| regime.window_days),
+                "btc_source_close_time_ms": btc.map(|regime| regime.source_close_time_ms),
+                "btc_source_timeframe": btc.map(|_| if evaluation.monthly_anchor_close_time_ms.is_some() {
+                    "monthly_rebalance_anchor_daily"
+                } else {
+                    "daily"
+                }),
                 "btc_gate_required": btc.is_some(),
                 "btc_gate_passed": btc.map(|regime| regime.risk_on),
                 "trend_return_windows": if trend_return_windows.is_empty() { None } else { Some(trend_return_windows.clone()) },
@@ -1481,6 +1490,12 @@ fn insight_daily_batch(
                 probe_decision["btc_close"] = serde_json::json!(probe_btc.map(|regime| regime.close));
                 probe_decision["btc_sma"] = serde_json::json!(probe_btc.map(|regime| regime.sma));
                 probe_decision["btc_window_days"] = serde_json::json!(probe_btc.map(|regime| regime.window_days));
+                probe_decision["btc_source_close_time_ms"] = serde_json::json!(probe_btc.map(|regime| regime.source_close_time_ms));
+                probe_decision["btc_source_timeframe"] = serde_json::json!(probe_btc.map(|_| if probe_evaluation.monthly_anchor_close_time_ms.is_some() {
+                    "monthly_rebalance_anchor_daily"
+                } else {
+                    "daily"
+                }));
                 probe_decision["btc_gate_passed"] = serde_json::json!(probe_btc.map(|regime| regime.risk_on));
                 probe_signal["strategy_decision"] = probe_decision;
                 if let Some(regime) = probe_btc {
@@ -1498,6 +1513,12 @@ fn insight_daily_batch(
             "btc_sma": btc.map(|regime| regime.sma),
             "btc_distance_percent": btc.map(|regime| (regime.close/regime.sma-1.0)*100.0),
             "btc_window_days": btc.map(|regime| regime.window_days),
+            "btc_source_close_time_ms": btc.map(|regime| regime.source_close_time_ms),
+            "btc_source_timeframe": btc.map(|_| if strategy == "risk-adjusted-monthly-momentum" {
+                "monthly_rebalance_anchor_daily"
+            } else {
+                "daily"
+            }),
             "btc_gate_required": btc.is_some(),
             "btc_gate_passed": btc.map(|regime| regime.risk_on),
             "symbols": diagnostic_symbols,
@@ -1826,6 +1847,8 @@ mod daily_snapshot_status_tests {
                 btc_gate_required: false,
                 btc_gate_passed: None,
                 btc_window_days: None,
+                btc_source_close_time_ms: None,
+                btc_source_timeframe: None,
                 symbols: vec![
                     diagnostic("BTC-USDT", true, true),
                     diagnostic("ETH-USDT", true, false),
@@ -1854,6 +1877,66 @@ mod daily_snapshot_status_tests {
 #[cfg(test)]
 mod daily_strategy_metric_tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_carry_the_daily_or_monthly_btc_source_anchor_used_for_the_gate() {
+        let day_ms = INSIGHT_DAY_MS;
+        let candles = DAILY_PAIRS
+            .iter()
+            .map(|(_, pair)| {
+                (
+                    (*pair).to_owned(),
+                    (0..300)
+                        .map(|index| InsightDailyBar {
+                            close_time_ms: index * day_ms,
+                            high: 1.0,
+                            close: 1.0,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let now = 400 * day_ms;
+        let (batch, _) = insight_daily_batch(
+            &[
+                "donchian-55-btc200".to_owned(),
+                "risk-adjusted-monthly-momentum".to_owned(),
+            ],
+            &serde_json::json!([]),
+            &candles,
+            now,
+            None,
+        )
+        .unwrap();
+        let diagnostics = batch["diagnostics"].as_array().unwrap();
+        let daily = diagnostics
+            .iter()
+            .find(|item| item["strategy"] == "donchian-55-btc200")
+            .unwrap();
+        let monthly = diagnostics
+            .iter()
+            .find(|item| item["strategy"] == "risk-adjusted-monthly-momentum")
+            .unwrap();
+
+        assert_eq!(daily["btc_source_close_time_ms"], 299 * day_ms);
+        assert_eq!(daily["btc_source_timeframe"], "daily");
+        let expected_monthly_anchor = candles["BTCUSDT"]
+            .iter()
+            .rev()
+            .find(|bar| {
+                insight_utc_month_id(bar.close_time_ms) < insight_utc_month_id(now)
+            })
+            .unwrap()
+            .close_time_ms;
+        assert_eq!(
+            monthly["btc_source_close_time_ms"],
+            expected_monthly_anchor
+        );
+        assert_eq!(
+            monthly["btc_source_timeframe"],
+            "monthly_rebalance_anchor_daily"
+        );
+    }
 
     #[test]
     fn trend_50_200_rejection_records_observed_close_as_primary_metric() {
@@ -1962,6 +2045,76 @@ mod donchian_20_btc200_tests {
             && signal["symbol"] == "ETH-USDT"));
         assert!(audits.iter().any(|audit| audit["status"] == "signal-published"
             && audit["symbol"] == "ETH-USDT"));
+    }
+
+    #[test]
+    fn btc_regime_requirement_is_local_to_the_strategy_policy() {
+        let mut candles = TREND_PORTFOLIO_PAIRS
+            .iter()
+            .map(|(_, pair)| {
+                let mut bars = vec![bar(1.0, 1.0); 260];
+                for (index, candle) in bars.iter_mut().enumerate() {
+                    candle.close_time_ms = (index as u64 + 1) * INSIGHT_DAY_MS;
+                }
+                ((*pair).to_owned(), bars)
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Keep the target asset histories valid while putting the BTC
+        // benchmark below its own 200-day average.
+        candles.get_mut("BTCUSDT").unwrap()[259] = bar(0.5, 0.5);
+
+        let gated = [
+            "donchian-55-btc200",
+            "donchian-20-btc200",
+            "donchian-20-btc200-hold3",
+            "donchian-10-btc200",
+            "trend-sleeves-btc200",
+            "risk-adjusted-trend-portfolio",
+            "risk-adjusted-monthly-momentum",
+        ];
+        let ungated = [
+            "donchian-20-sma200",
+            "trend-50-200",
+            "relative-strength-90-sma200",
+            "rsi2-oversold-rebound",
+        ];
+        let parameters = BTreeMap::new();
+        for strategy in gated {
+            for (symbol, pair) in [("ETH-USDT", "ETHUSDT"), ("BNB-USDT", "BNBUSDT")] {
+                let evaluation = insight_evaluate_daily(
+                    strategy,
+                    symbol,
+                    pair,
+                    &candles,
+                    &parameters,
+                    &serde_json::json!([]),
+                    365 * INSIGHT_DAY_MS,
+                )
+                .unwrap_or_else(|error| panic!("{strategy}/{symbol} evaluation failed: {error}"));
+                let regime = evaluation.btc_regime.unwrap_or_else(|| {
+                    panic!("{strategy} must declare its BTC regime dependency")
+                });
+                assert!(!regime.risk_on, "fixture must exercise a failed BTC gate");
+            }
+        }
+        for strategy in ungated {
+            for (symbol, pair) in [("ETH-USDT", "ETHUSDT"), ("BNB-USDT", "BNBUSDT")] {
+                let evaluation = insight_evaluate_daily(
+                    strategy,
+                    symbol,
+                    pair,
+                    &candles,
+                    &parameters,
+                    &serde_json::json!([]),
+                    365 * INSIGHT_DAY_MS,
+                )
+                .unwrap_or_else(|error| panic!("{strategy}/{symbol} evaluation failed: {error}"));
+                assert!(
+                    evaluation.btc_regime.is_none(),
+                    "{strategy} must use its own policy and not inherit the BTC gate"
+                );
+            }
+        }
     }
 
     #[test]

@@ -58,11 +58,21 @@ impl PositionStore {
         let now = now_ms()?;
         {
             let mut ledger = self.ledger.lock().await;
-            let old_len = ledger.orders.len();
-            ledger
-                .orders
-                .retain(|order| order.expires_at.is_none_or(|expires| expires > now));
-            if ledger.orders.len() != old_len {
+            let mut retained = Vec::with_capacity(ledger.orders.len());
+            let mut expired = Vec::new();
+            for order in std::mem::take(&mut ledger.orders) {
+                if order.expires_at.is_some_and(|expires| expires <= now) {
+                    expired.push(order);
+                } else {
+                    retained.push(order);
+                }
+            }
+            ledger.orders = retained;
+            let expired_any = !expired.is_empty();
+            for order in expired {
+                terminalize_resting_order(&mut ledger, order, "expired", now);
+            }
+            if expired_any {
                 self.persist(&ledger).await?;
             }
         }
@@ -142,17 +152,35 @@ impl PositionStore {
             }
             response.average_execution_price =
                 (response.filled_quantity > EPSILON).then_some(order.limit_price);
-            matches.push((order.id, match_quantity, response));
+            let path_sample = ObservedMarketPathSample {
+                source_system: "paper_exchange.match_response".to_owned(),
+                source_epoch: response.source_epoch.clone(),
+                source_cursor: response.source_cursor,
+                source_cursor_kind: response.source_cursor_kind.clone(),
+                source_capture_complete: response.capture_complete,
+                request_fingerprint: response.request_fingerprint.clone(),
+                attempt_order_id: attempt_order_id.clone(),
+                parent_order_id: parent_order_id.map(str::to_owned),
+                recorded_at_utc_ms: response.recorded_at_utc_ms,
+                book_updated_at_ms: response.book_updated_at_ms,
+                best_bid: response.best_bid.filter(|price| price.is_finite()),
+                best_ask: response.best_ask.filter(|price| price.is_finite()),
+                reference_price: response.reference_price.filter(|price| price.is_finite()),
+            };
+            matches.push((order.id, match_quantity, response, path_sample));
         }
         let mut ledger = self.ledger.lock().await;
         let original_order_count = ledger.orders.len();
+        let had_match_responses = !matches.is_empty();
         for order in &mut ledger.orders {
             if stale_reduce_only_orders.iter().any(|id| id == &order.id) {
                 order.remaining_quantity = 0.0;
             }
         }
+        let mut terminalized = Vec::new();
         let mut fills = Vec::new();
-        for (id, requested_quantity, result) in matches {
+        for (id, requested_quantity, result, path_sample) in matches {
+            record_execution_path_sample(&mut ledger, &id, path_sample);
             let reduce_allowance = ledger
                 .orders
                 .iter()
@@ -215,9 +243,21 @@ impl PositionStore {
                 );
             }
         }
-        ledger
-            .orders
-            .retain(|order| order.remaining_quantity > EPSILON);
+        let mut retained = Vec::with_capacity(ledger.orders.len());
+        for order in std::mem::take(&mut ledger.orders) {
+            if stale_reduce_only_orders.iter().any(|id| id == &order.id) {
+                terminalized.push((order, "reduce_only_no_longer_applicable"));
+            } else if order.remaining_quantity <= EPSILON {
+                terminalized.push((order, "filled"));
+            } else {
+                retained.push(order);
+            }
+        }
+        ledger.orders = retained;
+        let terminalized_any = !terminalized.is_empty();
+        for (order, reason) in terminalized {
+            terminalize_resting_order(&mut ledger, order, reason, now);
+        }
         if !fills.is_empty() {
             let timestamp = now_ms()?;
             let offset = ledger.trades.len();
@@ -285,7 +325,10 @@ impl PositionStore {
                 return Ok(());
             }
             self.persist(&ledger).await?;
-        } else if ledger.orders.len() != original_order_count {
+        } else if ledger.orders.len() != original_order_count
+            || had_match_responses
+            || terminalized_any
+        {
             self.persist(&ledger).await?;
         }
         Ok(())

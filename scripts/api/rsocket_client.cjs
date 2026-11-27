@@ -109,10 +109,11 @@ async function main() {
             throw new Error('Query parameters unsupported for this route');
         }
         const allowedParams = new Set([
-            'symbol', 'source', 'since_ms', 'before_ms', 'limit', 'offset', 'after_cursor', 'after_ms'
+            'symbol', 'source', 'since_ms', 'before_ms', 'limit', 'offset', 'after_cursor', 'after_ms',
+            'through_cursor', 'through_epoch'
         ]);
         const routeParams = service === 'paper_exchange'
-            ? new Set(['after_cursor', 'limit'])
+            ? new Set(['after_cursor', 'limit', 'through_cursor', 'through_epoch'])
             : route === '/positions/portfolio-evidence/intervals'
                 ? new Set(['after_cursor', 'after_ms', 'limit'])
                 : allowedParams;
@@ -128,6 +129,10 @@ async function main() {
             } else if (key === 'source') {
                 if (typeof value !== 'string' || !['auto', 'manual'].includes(value)) {
                     throw new Error('Invalid positions.trades source');
+                }
+            } else if (key === 'through_epoch') {
+                if (typeof value !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+                    throw new Error('Invalid paper_exchange financial evidence epoch');
                 }
             } else {
                 if (!Number.isSafeInteger(value) || value < 0) {

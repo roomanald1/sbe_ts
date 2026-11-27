@@ -48,6 +48,7 @@ impl Default for SignalEngine {
             absorption_trades: VecDeque::with_capacity(512),
             book_imbalance: None,
             best_quote: None,
+            book_input_provenance: BookInputProvenance::default(),
             book_bid_levels: Vec::with_capacity(16),
             book_ask_levels: Vec::with_capacity(16),
             book_history: VecDeque::with_capacity(64),

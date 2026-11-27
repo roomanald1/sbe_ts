@@ -1,12 +1,12 @@
 use crate::market_data::{BookSnapshot, MarketData};
 use axum::{
-    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     routing::{get, post},
+    Json, Router,
 };
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -240,10 +240,12 @@ struct FinancialEvidencePage {
     after_cursor: u64,
     next_cursor: Option<u64>,
     max_cursor: u64,
+    observed_source_max_cursor: u64,
     page_size: usize,
     page_complete: bool,
     source_attribution_status: &'static str,
     history_complete: bool,
+    current_history_complete: bool,
     execution_history_empty: bool,
     opening_capital_status: String,
     fee_schedule_status: String,
@@ -266,6 +268,8 @@ struct FinancialEvidenceStoredEvent {
 struct FinancialEvidenceQuery {
     after_cursor: Option<u64>,
     limit: Option<usize>,
+    through_cursor: Option<u64>,
+    through_epoch: Option<String>,
 }
 
 async fn match_order(
@@ -440,6 +444,12 @@ async fn financial_evidence_history(
 ) -> Result<Json<FinancialEvidencePage>, (StatusCode, String)> {
     let after_cursor = query.after_cursor.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
+    if query.through_cursor.is_some() != query.through_epoch.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "through_cursor and through_epoch must be supplied together".to_owned(),
+        ));
+    }
     if i64::try_from(after_cursor).is_err() || !(1..=MAX_LEDGER_PAGE_SIZE).contains(&limit) {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -448,13 +458,40 @@ async fn financial_evidence_history(
             ),
         ));
     }
+    if query
+        .through_cursor
+        .is_some_and(|through_cursor| after_cursor > through_cursor)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "after_cursor cannot exceed through_cursor".to_owned(),
+        ));
+    }
     let path = state.ledger_path;
     let page = tokio::task::spawn_blocking(move || {
-        read_financial_evidence_page(&path, after_cursor, limit)
+        read_financial_evidence_page(
+            &path,
+            after_cursor,
+            limit,
+            query.through_cursor,
+            query.through_epoch.as_deref(),
+        )
     })
     .await
     .map_err(database_join_error)?
-    .map_err(database_error)?;
+    .map_err(|error| {
+        if error
+            .to_string()
+            .contains("financial evidence source epoch mismatch")
+            || error
+                .to_string()
+                .contains("through_cursor exceeds current source maximum")
+        {
+            (StatusCode::CONFLICT, error.to_string())
+        } else {
+            database_error(error)
+        }
+    })?;
     Ok(Json(page))
 }
 
@@ -805,20 +842,37 @@ fn read_financial_evidence_page(
     path: &PathBuf,
     after_cursor: u64,
     limit: usize,
+    through_cursor: Option<u64>,
+    through_epoch: Option<&str>,
 ) -> anyhow::Result<FinancialEvidencePage> {
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    let max_cursor: i64 = transaction.query_row(
+    let observed_max_cursor: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(source_cursor), 0) FROM financial_evidence_events",
         [],
         |row| row.get(0),
     )?;
-    let opening_capital_status = simulator_opening_capital_status(&transaction)?;
-    let fee_schedule_count: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM financial_fee_schedules", [], |row| {
-            row.get(0)
-        })?;
+    let source_epoch = financial_evidence_source_epoch(&transaction)?;
+    if through_epoch.is_some_and(|epoch| epoch != source_epoch) {
+        anyhow::bail!("financial evidence source epoch mismatch");
+    }
+    let max_cursor = through_cursor
+        .map(i64::try_from)
+        .transpose()?
+        .unwrap_or(observed_max_cursor);
+    if max_cursor > observed_max_cursor {
+        anyhow::bail!("through_cursor exceeds current source maximum");
+    }
+    if i64::try_from(after_cursor)? > max_cursor {
+        anyhow::bail!("after_cursor exceeds the pinned through_cursor");
+    }
+    let opening_capital_status = simulator_opening_capital_status(&transaction, max_cursor)?;
+    let fee_schedule_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM financial_fee_schedules WHERE event_cursor <= ?1",
+        [max_cursor],
+        |row| row.get(0),
+    )?;
     let fee_schedule_status = if fee_schedule_count > 0 {
         "versioned_simulator_fee_schedule_captured".to_owned()
     } else if configured_simulator_fee_schedule().is_none() {
@@ -830,16 +884,40 @@ fn read_financial_evidence_page(
         &transaction,
         &opening_capital_status,
         fee_schedule_count,
+        max_cursor,
     )?;
-    let execution_history_count: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM match_fills", [], |row| row.get(0))?;
+    let current_opening_status =
+        simulator_opening_capital_status(&transaction, observed_max_cursor)?;
+    let current_fee_schedule_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM financial_fee_schedules WHERE event_cursor <= ?1",
+        [observed_max_cursor],
+        |row| row.get(0),
+    )?;
+    let current_history_complete = financial_source_history_complete(
+        &transaction,
+        &current_opening_status,
+        current_fee_schedule_count,
+        observed_max_cursor,
+    )?;
+    // Preserve the established meaning of this safety flag: whether the
+    // matcher ledger has any real execution history (probes are excluded).
+    // It is intentionally a live ledger-level fact rather than a claim about
+    // the pinned financial-event page; the latter is represented by `events`.
+    let execution_history_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM match_fills f
+         JOIN match_requests r ON r.source_cursor = f.request_cursor
+         WHERE r.execution_origin != 'match_probe'",
+        [],
+        |row| row.get(0),
+    )?;
     let execution_history_empty = execution_history_count == 0;
     let mut captured_execution_flow_types = Vec::new();
     {
         let mut statement = transaction.prepare(
-            "SELECT event_json FROM financial_evidence_events WHERE event_type = 'settled_execution'",
+            "SELECT event_json FROM financial_evidence_events
+             WHERE source_cursor <= ?1 AND event_type = 'settled_execution'",
         )?;
-        let mut rows = statement.query([])?;
+        let mut rows = statement.query([max_cursor])?;
         while let Some(row) = rows.next()? {
             let event: FinancialEvidenceEvent = serde_json::from_str(&row.get::<_, String>(0)?)?;
             if let FinancialEvidencePayload::SettledExecution {
@@ -897,7 +975,6 @@ fn read_financial_evidence_page(
     let page_complete = events.len() <= limit;
     events.truncate(limit);
     let next_cursor = events.last().map(|event| event.source_cursor);
-    let source_epoch = financial_evidence_source_epoch(&transaction)?;
     transaction.commit()?;
     Ok(FinancialEvidencePage {
         schema_version: FINANCIAL_EVIDENCE_SCHEMA_VERSION,
@@ -907,12 +984,14 @@ fn read_financial_evidence_page(
         after_cursor,
         next_cursor,
         max_cursor: u64::try_from(max_cursor)?,
+        observed_source_max_cursor: u64::try_from(observed_max_cursor)?,
         page_size: events.len(),
         page_complete,
         source_attribution_status: "source_attributed_not_cryptographically_verified",
         // This describes the durable Paper Exchange source ledger only. The
         // portfolio reconciler still cross-checks PM fill/cash coverage.
         history_complete,
+        current_history_complete,
         execution_history_empty,
         opening_capital_status,
         fee_schedule_status,
@@ -926,6 +1005,7 @@ fn financial_source_history_complete(
     connection: &Connection,
     opening_capital_status: &str,
     fee_schedule_count: i64,
+    through_cursor: i64,
 ) -> anyhow::Result<bool> {
     if opening_capital_status != "explicit_simulator_opening_capital_captured"
         || fee_schedule_count <= 0
@@ -934,11 +1014,11 @@ fn financial_source_history_complete(
     }
     let (event_count, max_cursor, min_cursor): (i64, i64, i64) = connection.query_row(
         "SELECT COUNT(*), COALESCE(MAX(source_cursor), 0), COALESCE(MIN(source_cursor), 0)
-         FROM financial_evidence_events",
-        [],
+         FROM financial_evidence_events WHERE source_cursor <= ?1",
+        [through_cursor],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    if event_count != max_cursor || min_cursor != 1 {
+    if event_count != through_cursor || max_cursor != through_cursor || min_cursor != 1 {
         return Ok(false);
     }
     let unsettled_match_fills: i64 = connection.query_row(
@@ -957,12 +1037,16 @@ fn financial_source_history_complete(
     Ok(unsettled_match_fills == 0)
 }
 
-fn simulator_opening_capital_status(connection: &Connection) -> anyhow::Result<String> {
+fn simulator_opening_capital_status(
+    connection: &Connection,
+    through_cursor: i64,
+) -> anyhow::Result<String> {
     let configured = configured_opening_capital();
     let mut statement = connection.prepare(
-        "SELECT event_json FROM financial_evidence_events WHERE event_type = 'account_balance'",
+        "SELECT event_json FROM financial_evidence_events
+         WHERE source_cursor <= ?1 AND event_type = 'account_balance'",
     )?;
-    let mut rows = statement.query([])?;
+    let mut rows = statement.query([through_cursor])?;
     while let Some(row) = rows.next()? {
         let event: FinancialEvidenceEvent = serde_json::from_str(&row.get::<_, String>(0)?)?;
         if let FinancialEvidencePayload::AccountBalance { boundary, .. } = &event.payload {
@@ -989,8 +1073,20 @@ fn simulator_opening_capital_status(connection: &Connection) -> anyhow::Result<S
             }
         }
     }
-    let existing_match_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM match_fills", [], |row| row.get(0))?;
+    let existing_match_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM match_fills f
+         JOIN match_requests r ON r.source_cursor = f.request_cursor
+         WHERE r.execution_origin != 'match_probe'
+           AND NOT EXISTS (
+               SELECT 1 FROM financial_evidence_events e
+               WHERE e.source_cursor <= ?1
+                 AND e.event_type = 'settled_execution'
+                 AND e.source_system = 'paper_exchange_simulator'
+                 AND e.source_record_id = f.source_execution_id
+           )",
+        [through_cursor],
+        |row| row.get(0),
+    )?;
     if existing_match_count > 0 {
         return Ok("existing_execution_history_needs_new_account_baseline".to_owned());
     }
@@ -1369,8 +1465,13 @@ fn ensure_simulator_opening_capital_with(
             }
         }
     }
-    let existing_match_count: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM match_fills", [], |row| row.get(0))?;
+    let existing_match_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM match_fills f
+         JOIN match_requests r ON r.source_cursor = f.request_cursor
+         WHERE r.execution_origin != 'match_probe'",
+        [],
+        |row| row.get(0),
+    )?;
     if existing_match_count > 0 {
         return Ok(Some(
             "existing_execution_history_requires_new_account_baseline",
@@ -1939,7 +2040,7 @@ mod tests {
         }
 
         // Reopen the database to exercise the same code path used after process restart.
-        let page = read_financial_evidence_page(&path, 0, 10).unwrap();
+        let page = read_financial_evidence_page(&path, 0, 10, None, None).unwrap();
         assert_eq!(page.schema_version, FINANCIAL_EVIDENCE_SCHEMA_VERSION);
         assert_eq!(
             page.evidence_kind,
@@ -1997,6 +2098,108 @@ mod tests {
             },
         );
         assert!(append_financial_evidence_sync(&path, &cursor_conflict).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn financial_evidence_pinned_cursor_stays_stable_across_appends_and_rejects_invalid_bounds() {
+        let path = temp_db("financial-evidence-pinned-cursor");
+        let schedule = fixture_fee_schedule();
+        let mut balance = financial_event(
+            "opening-balance-pinned",
+            2,
+            FinancialEvidencePayload::AccountBalance {
+                portfolio_id: "paper-default".to_owned(),
+                boundary: "opening".to_owned(),
+                balances_by_currency: BTreeMap::from([("USD".to_owned(), 10_000.0)]),
+            },
+        );
+        balance.source_system = "paper_exchange_simulator_account_configuration".to_owned();
+        balance.source_record_id = "opening-capital:paper-default".to_owned();
+        let contribution = financial_event(
+            "contribution-pinned",
+            3,
+            FinancialEvidencePayload::CashMovement {
+                movement_id: "deposit-pinned".to_owned(),
+                portfolio_id: "paper-default".to_owned(),
+                movement_kind: "contribution".to_owned(),
+                currency: "USD".to_owned(),
+                amount: 250.0,
+            },
+        );
+        let fx = financial_event(
+            "fx-pinned",
+            4,
+            FinancialEvidencePayload::FxMark {
+                portfolio_id: "paper-default".to_owned(),
+                currency: "USDT".to_owned(),
+                rate_usd: 0.9998,
+            },
+        );
+        for event in [&schedule, &balance, &contribution, &fx] {
+            append_financial_evidence_sync(&path, event).unwrap();
+        }
+
+        let first = read_financial_evidence_page(&path, 0, 2, None, None).unwrap();
+        assert_eq!(first.max_cursor, 4);
+        assert_eq!(first.observed_source_max_cursor, 4);
+        assert!(!first.page_complete);
+        let pinned_cursor = first.max_cursor;
+        let pinned_epoch = first.source_epoch.clone();
+
+        let appended = financial_event(
+            "contribution-appended-after-first-page",
+            5,
+            FinancialEvidencePayload::CashMovement {
+                movement_id: "deposit-after-snapshot".to_owned(),
+                portfolio_id: "paper-default".to_owned(),
+                movement_kind: "contribution".to_owned(),
+                currency: "USD".to_owned(),
+                amount: 125.0,
+            },
+        );
+        append_financial_evidence_sync(&path, &appended).unwrap();
+
+        let second = read_financial_evidence_page(
+            &path,
+            first.next_cursor.unwrap(),
+            2,
+            Some(pinned_cursor),
+            Some(&pinned_epoch),
+        )
+        .unwrap();
+        assert_eq!(second.source_epoch, pinned_epoch);
+        assert_eq!(second.max_cursor, pinned_cursor);
+        assert_eq!(second.observed_source_max_cursor, 5);
+        assert!(second.page_complete);
+        assert!(second.history_complete);
+        assert!(second.current_history_complete);
+        assert!(second
+            .events
+            .iter()
+            .all(|event| event.source_cursor <= pinned_cursor));
+        assert!(!second
+            .events
+            .iter()
+            .any(|event| event.event.event_id == appended.event_id));
+
+        assert!(read_financial_evidence_page(&path, 0, 2, Some(6), Some(&pinned_epoch)).is_err());
+        assert!(read_financial_evidence_page(
+            &path,
+            5,
+            2,
+            Some(pinned_cursor),
+            Some(&pinned_epoch)
+        )
+        .is_err());
+        assert!(read_financial_evidence_page(
+            &path,
+            0,
+            2,
+            Some(pinned_cursor),
+            Some("wrong-epoch")
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2082,7 +2285,7 @@ mod tests {
             response.fills[0].fee_schedule_version.as_deref(),
             Some("paper-config-v1")
         );
-        let page = read_financial_evidence_page(&path, 0, 20).unwrap();
+        let page = read_financial_evidence_page(&path, 0, 20, None, None).unwrap();
         assert_eq!(page.events.len(), 3);
         assert_eq!(
             page.opening_capital_status,
@@ -2151,11 +2354,56 @@ mod tests {
             Some("existing_execution_history_requires_new_account_baseline")
         );
         transaction.commit().unwrap();
-        let page = read_financial_evidence_page(&path, 0, 20).unwrap();
+        let page = read_financial_evidence_page(&path, 0, 20, None, None).unwrap();
         assert_eq!(page.events.len(), 0);
+        assert!(!page.execution_history_empty);
         assert_eq!(
             page.opening_capital_status,
             "existing_execution_history_needs_new_account_baseline"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn matcher_probe_fills_do_not_count_as_execution_history_or_block_opening_capital() {
+        let path = temp_db("probe-only-history");
+        let mut probe = request(Some("probe-only-order-1"), 1.0);
+        probe.execution_origin = Some("match_probe".to_owned());
+        let response = match_book(&probe, &book(), request_fingerprint(&probe));
+        assert_eq!(response.filled_quantity, 1.0);
+
+        commit_match_with_config(
+            &path,
+            "probe-only-order-1",
+            &request_fingerprint(&probe),
+            &probe,
+            response,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let page = read_financial_evidence_page(&path, 0, 20, None, None).unwrap();
+        assert!(page.execution_history_empty);
+        assert_eq!(page.events.len(), 0);
+
+        let mut connection = open_ledger(&path).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let status = ensure_simulator_opening_capital_with(
+            &transaction,
+            Some(("paper-default".to_owned(), 10_000.0)),
+        )
+        .unwrap();
+        assert_eq!(status, None);
+        transaction.commit().unwrap();
+
+        let page = read_financial_evidence_page(&path, 0, 20, None, None).unwrap();
+        assert!(page.execution_history_empty);
+        assert_eq!(
+            page.opening_capital_status,
+            "explicit_simulator_opening_capital_captured"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -2203,12 +2451,10 @@ mod tests {
         assert!(first.capture_complete);
         assert_eq!(first.capture_status, "durably_captured");
         assert_eq!(first.source_cursor_kind, "match_request");
-        assert!(
-            first
-                .source_epoch
-                .as_ref()
-                .is_some_and(|epoch| epoch.len() == 32)
-        );
+        assert!(first
+            .source_epoch
+            .as_ref()
+            .is_some_and(|epoch| epoch.len() == 32));
         assert!(first.fills.iter().all(|fill| {
             fill.source_execution_id.is_some()
                 && fill.source_cursor.is_some()
@@ -2228,15 +2474,13 @@ mod tests {
             serde_json::to_value(first).unwrap(),
             serde_json::to_value(replay).unwrap()
         );
-        assert!(
-            lookup_committed_match(
-                &path,
-                "client-order-7",
-                &request_fingerprint(&request(Some("client-order-7"), 2.0)),
-                None,
-            )
-            .is_err()
-        );
+        assert!(lookup_committed_match(
+            &path,
+            "client-order-7",
+            &request_fingerprint(&request(Some("client-order-7"), 2.0)),
+            None,
+        )
+        .is_err());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -2314,12 +2558,10 @@ mod tests {
         let snapshot_page = read_ledger_page_snapshot(&snapshot, 0, 10).unwrap();
         assert_eq!(snapshot_page.max_cursor, u64::try_from(high_water).unwrap());
         assert_eq!(snapshot_page.rows.len(), 1);
-        assert!(
-            snapshot_page
-                .rows
-                .iter()
-                .all(|row| row.source_cursor <= snapshot_page.max_cursor)
-        );
+        assert!(snapshot_page
+            .rows
+            .iter()
+            .all(|row| row.source_cursor <= snapshot_page.max_cursor));
         snapshot.commit().unwrap();
 
         let next_page = read_ledger_page(&path, snapshot_page.max_cursor, 10).unwrap();
@@ -2352,12 +2594,10 @@ mod tests {
         );
         assert!(!result.reconciliation_eligible);
         assert_eq!(result.source_epoch, None);
-        assert!(
-            result
-                .fills
-                .iter()
-                .all(|fill| fill.source_execution_id.is_none())
-        );
+        assert!(result
+            .fills
+            .iter()
+            .all(|fill| fill.source_execution_id.is_none()));
     }
 
     #[test]
@@ -2372,12 +2612,10 @@ mod tests {
             incomplete.capture_failure_reason.as_deref(),
             Some("durable_ledger_write_failed")
         );
-        assert!(
-            incomplete
-                .fills
-                .iter()
-                .all(|fill| fill.source_cursor.is_none())
-        );
+        assert!(incomplete
+            .fills
+            .iter()
+            .all(|fill| fill.source_cursor.is_none()));
     }
 
     #[test]
