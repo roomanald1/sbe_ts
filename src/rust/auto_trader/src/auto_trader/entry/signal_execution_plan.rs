@@ -842,6 +842,7 @@ fn exit_parameter_provenance(
         )
     };
     let parameter_support = |key: &str| profile_values.contains_key(key);
+    let maximum_hold_days_spec = captured_maximum_hold_days_specification(strategy);
     serde_json::json!({
         "schema_version": 1,
         "selected_at_ms": current_time_ms(),
@@ -871,6 +872,14 @@ fn exit_parameter_provenance(
                 .and_then(|parameters| parameters.get(StrategyParameterKey::MaximumHoldDays.as_str()))
                 .and_then(serde_json::Value::as_f64)
                 .map(|days| (days * 86_400_000.0).ceil() as u64),
+            "effective_ms": active_policy
+                .and_then(|policy| policy.maximum_holding_duration_ms)
+                .or_else(|| signal.strategy_decision.as_ref()
+                    .and_then(|decision| decision.get("strategy_parameters"))
+                    .and_then(|parameters| parameters.get(StrategyParameterKey::MaximumHoldDays.as_str()))
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|days| days.is_finite() && *days > 0.0)
+                    .map(|days| (days * 86_400_000.0).ceil() as u64)),
         },
         "profile_parameters": profile_values,
         "profile_parameter_support": {
@@ -882,6 +891,10 @@ fn exit_parameter_provenance(
             "trailing_activation_percent": parameter_support(StrategyParameterKey::TrailingActivationPercent.as_str()),
             "trailing_distance_percent": parameter_support(StrategyParameterKey::TrailingDistancePercent.as_str()),
             "breakeven_activation_percent": parameter_support(StrategyParameterKey::BreakevenActivationPercent.as_str()),
+        },
+        "strategy_parameter_specification": {
+            "schema_version": 1,
+            "maximum_hold_days": maximum_hold_days_spec
         },
         "unsupported_profile_exit_parameters": ["server_side_trailing_barrier_amendment", "server_side_breakeven_barrier"],
         "volatility_stop_adjustment": {
@@ -969,6 +982,28 @@ fn exit_parameter_provenance(
             "server_side_barrier": "initial_static_stop_remains_armed",
         },
         "risk_appetite_at_selection": settings.risk_appetite,
+    })
+}
+
+fn captured_maximum_hold_days_specification(strategy: Option<Strategy>) -> serde_json::Value {
+    let specification = strategy.and_then(|kind| {
+        kind.parameter_specs()
+            .into_iter()
+            .find(|spec| spec.key == StrategyParameterKey::MaximumHoldDays)
+            .map(|spec| {
+                serde_json::json!({
+                    "key": StrategyParameterKey::MaximumHoldDays.as_str(),
+                    "default": spec.default,
+                    "min": spec.min,
+                    "max": spec.max,
+                    "step": spec.step,
+                    "unit": spec.unit
+                })
+            })
+    });
+    serde_json::json!({
+        "schema_version": 1,
+        "maximum_hold_days": specification
     })
 }
 
@@ -1470,6 +1505,34 @@ async fn prepare_signal_execution_plan(
             ..exploration_risk_adjustment
         },
     })
+}
+
+#[cfg(test)]
+mod captured_maximum_hold_specification_tests {
+    use super::*;
+
+    #[test]
+    fn entry_provenance_captures_registered_hold_days_bounds_only() {
+        let specification =
+            captured_maximum_hold_days_specification(Some(Strategy::Rsi2OversoldRebound));
+        let captured = &specification["maximum_hold_days"];
+        let registered = Strategy::Rsi2OversoldRebound
+            .parameter_specs()
+            .into_iter()
+            .find(|spec| spec.key == StrategyParameterKey::MaximumHoldDays)
+            .unwrap();
+        assert_eq!(specification["schema_version"], 1);
+        assert_eq!(captured["key"], "maximum_hold_days");
+        assert_eq!(captured["unit"], "days");
+        assert_eq!(captured["default"], registered.default);
+        assert_eq!(captured["min"], registered.min);
+        assert_eq!(captured["max"], registered.max);
+        assert_eq!(captured["step"], registered.step);
+        assert_eq!(
+            captured_maximum_hold_days_specification(None)["maximum_hold_days"],
+            serde_json::Value::Null
+        );
+    }
 }
 
 #[cfg(test)]

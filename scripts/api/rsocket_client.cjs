@@ -38,7 +38,8 @@ const allowedRoutes = {
     "/internal/strategy/open-position-counts",
     "/positions/auto-trader",
     "/positions/auto-trader/parameters",
-    "/positions/auto-trader/activity"
+    "/positions/auto-trader/activity",
+    "/positions/auto-trader/dated-carry"
   ],
   "insights": [
     "/signals/dashboard",
@@ -60,7 +61,8 @@ const allowedRoutes = {
     "/positions/portfolio-evidence/intervals"
   ],
   "paper_exchange": [
-    "/internal/financial/evidence"
+    "/internal/financial/evidence",
+    "/internal/market-mark"
   ]
 };
 const allowed = Object.fromEntries(Object.entries(allowedRoutes).map(([k,v]) => [k,new Set(v)]));
@@ -103,7 +105,7 @@ async function main() {
 
     if (input.params !== undefined) {
         if (!((service === 'positions' && ['/positions/trades', '/positions/portfolio-evidence/intervals'].includes(route)) ||
-              (service === 'paper_exchange' && route === '/internal/financial/evidence')) ||
+              (service === 'paper_exchange' && ['/internal/financial/evidence', '/internal/market-mark'].includes(route))) ||
             input.params === null || typeof input.params !== 'object' ||
             Array.isArray(input.params)) {
             throw new Error('Query parameters unsupported for this route');
@@ -113,7 +115,9 @@ async function main() {
             'through_cursor', 'through_epoch'
         ]);
         const routeParams = service === 'paper_exchange'
-            ? new Set(['after_cursor', 'limit', 'through_cursor', 'through_epoch'])
+            ? route === '/internal/market-mark'
+                ? new Set(['symbol'])
+                : new Set(['after_cursor', 'limit', 'through_cursor', 'through_epoch'])
             : route === '/positions/portfolio-evidence/intervals'
                 ? new Set(['after_cursor', 'after_ms', 'limit'])
                 : allowedParams;

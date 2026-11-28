@@ -662,10 +662,17 @@ fn effective_fee_schedule_snapshot(
                     .get("fee_schedule_version")
                     .and_then(serde_json::Value::as_str)
                     == Some(version.as_str())
-                && epoch == source_epoch
                 && cursor > 0
                 && !record_id.trim().is_empty()
                 && timestamp > 0
+                && event.get("source_epoch").and_then(serde_json::Value::as_str)
+                    == Some(epoch.as_str())
+                && event.get("source_cursor").and_then(serde_json::Value::as_u64)
+                    == u64::try_from(cursor).ok()
+                && event.get("source_record_id").and_then(serde_json::Value::as_str)
+                    == Some(record_id.as_str())
+                && event.get("source_timestamp_utc_ms").and_then(serde_json::Value::as_u64)
+                    == u64::try_from(timestamp).ok()
                 && effective_from > 0
                 && maker.is_finite()
                 && taker.is_finite();

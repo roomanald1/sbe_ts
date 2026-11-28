@@ -5,5 +5,7 @@ export * from './workspace/dashboard_layout.js';
 export * from './workspace/dashboard_layout_storage.js';
 export * from './workspace/useDashboardLayout.js';
 export * from './workspace/DashboardWidgetFrame.js';
+export * from './workspace/dashboard_layout_storage.js';
+export * from './components/UnavailableDashboardWidget.js';
 export * from './components/operator_dashboard.js';
 export * from './components/compact_operator.js';

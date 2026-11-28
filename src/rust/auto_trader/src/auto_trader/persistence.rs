@@ -1,5 +1,115 @@
 use rusqlite::OptionalExtension;
 
+type CompactTradePriceSampleV1 = (
+    u8,
+    u64,
+    u64,
+    u64,
+    u64,
+    Option<String>,
+    Option<u64>,
+    Option<u16>,
+    Option<u64>,
+    Option<bool>,
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Option<String>,
+);
+
+#[cfg(test)]
+fn encode_trade_price_sample_v1(sample: &TradePriceSample) -> serde_json::Result<Vec<u8>> {
+    let compact: CompactTradePriceSampleV1 = (
+        1,
+        sample.timestamp,
+        sample.bid.to_bits(),
+        sample.ask.to_bits(),
+        sample.sequence,
+        sample.epoch.clone(),
+        sample.source_updated_at_ms,
+        sample.freshness_contract_version,
+        sample.freshness_max_age_ms,
+        sample.source_fresh,
+        sample.quote_source_system.clone(),
+        sample.quote_source_epoch.clone(),
+        sample.quote_source_cursor,
+        sample.quote_source_record_id.clone(),
+    );
+    serde_json::to_vec(&compact)
+}
+
+fn encode_trade_price_sample(
+    sample: &TradePriceSample,
+) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+    rmp_serde::to_vec(&(2_u8, sample))
+}
+
+fn decode_trade_price_sample(
+    payload: &[u8],
+) -> Result<TradePriceSample, Box<dyn std::error::Error + Send + Sync>> {
+    if payload.first() == Some(&b'{') {
+        return serde_json::from_slice(payload).map_err(|error| Box::new(error) as _);
+    }
+    if payload.first() == Some(&b'[') {
+        let (
+            version,
+            timestamp,
+            bid_bits,
+            ask_bits,
+            sequence,
+            epoch,
+            source_updated_at_ms,
+            freshness_contract_version,
+            freshness_max_age_ms,
+            source_fresh,
+            quote_source_system,
+            quote_source_epoch,
+            quote_source_cursor,
+            quote_source_record_id,
+        ): CompactTradePriceSampleV1 = serde_json::from_slice(payload)?;
+        if version != 1 {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported compact JSON trade price sample version",
+            )));
+        }
+        return Ok(TradePriceSample {
+            timestamp,
+            bid: f64::from_bits(bid_bits),
+            ask: f64::from_bits(ask_bits),
+            sequence,
+            epoch,
+            source_updated_at_ms,
+            freshness_contract_version,
+            freshness_max_age_ms,
+            source_fresh,
+            quote_source_system,
+            quote_source_epoch,
+            quote_source_cursor,
+            quote_source_record_id,
+        });
+    }
+    let (version, sample): (u8, TradePriceSample) = rmp_serde::from_slice(payload)?;
+    if version != 2 {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported MessagePack trade price sample version",
+        )));
+    }
+    Ok(sample)
+}
+
+fn decode_trade_price_sample_column(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<TradePriceSample> {
+    let value = row.get_ref(column)?;
+    let value_type = value.data_type();
+    let payload = value.as_bytes()?;
+    decode_trade_price_sample(payload)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(column, value_type, error))
+}
+
 fn settings_path() -> PathBuf {
     if let Some(path) = std::env::var_os("AUTO_TRADER_STATE_FILE") {
         return PathBuf::from(path);
@@ -459,16 +569,7 @@ fn hydrate_persisted_trade_paths(
         let newest = statement
             .query_map(
                 rusqlite::params![trade_id, i64::try_from(memory_window).unwrap_or(i64::MAX)],
-                |row| {
-                    let payload: String = row.get(0)?;
-                    serde_json::from_str::<TradePriceSample>(&payload).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            0,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
-                },
+                |row| decode_trade_price_sample_column(row, 0),
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
@@ -491,13 +592,9 @@ fn hydrate_persisted_trade_paths(
         if samples.len() > memory_window {
             samples.drain(..samples.len() - memory_window);
         }
-        position.price_path_total_samples = position.price_path_total_samples.max(
-            samples
-                .iter()
-                .map(|sample| sample.sequence)
-                .max()
-                .unwrap_or_default(),
-        );
+        position.price_path_total_samples = position
+            .price_path_total_samples
+            .max(u64::try_from(total_rows).unwrap_or(u64::MAX));
         position.price_path_memory_window_truncated =
             i64::try_from(total_rows).unwrap_or(i64::MAX) > samples.len() as i64;
         position.price_path = samples;
@@ -520,6 +617,189 @@ fn hydrate_persisted_trade_paths(
     Ok(())
 }
 
+fn trade_price_path_capture_policy() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version":1,
+        "fine_interval_ms":TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS,
+        "fine_window_ms":TRADE_PRICE_PATH_FINE_WINDOW_MS,
+        "coarse_interval_ms":TRADE_PRICE_PATH_COARSE_INTERVAL_MS,
+        "coarse_after_ms":TRADE_PRICE_PATH_FINE_WINDOW_MS,
+        "event_driven_extrema":true,
+        "event_driven_threshold_crossings":true
+    })
+}
+
+fn trade_price_path_entry_timestamp_from_epoch(epoch: &str) -> Option<u64> {
+    let remainder = epoch.strip_prefix("auto-trader-position-path:v1:")?;
+    let (timestamp, trade_id) = remainder.split_once(':')?;
+    (!trade_id.is_empty())
+        .then(|| timestamp.parse::<u64>().ok())
+        .flatten()
+        .filter(|timestamp| *timestamp > 0)
+}
+
+fn read_trade_price_path_event_summary(
+    connection: &rusqlite::Connection,
+    trade_id: &str,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_price_path_event_summary')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(settings_persistence_error)?;
+    if !table_exists {
+        return Ok(serde_json::json!({
+            "gross_mfe_percent":null,"gross_mae_percent":null,
+            "event_sample_count":0,"event_maximum_gap_ms":null,
+            "complete":false,"threshold_crossings":[],
+            "missing_reasons":["lifetime_event_summary_unavailable"]
+        }));
+    }
+    let summary = connection
+        .query_row(
+            "SELECT gross_mfe_percent,gross_mae_percent,event_sample_count,
+                    event_maximum_gap_ms,event_metrics_complete,restart_interrupted,threshold_crossings_json
+             FROM trade_price_path_event_summary WHERE trade_id=?1",
+            [trade_id],
+            |row| {
+                let crossings_json: String = row.get(6)?;
+                let crossings = serde_json::from_str::<Vec<serde_json::Value>>(&crossings_json)
+                    .unwrap_or_default();
+                Ok(serde_json::json!({
+                    "gross_mfe_percent":row.get::<_,Option<f64>>(0)?,
+                    "gross_mae_percent":row.get::<_,Option<f64>>(1)?,
+                    "event_sample_count":row.get::<_,i64>(2)?.max(0),
+                    "event_maximum_gap_ms":row.get::<_,i64>(3)?.max(0),
+                    "complete":row.get::<_,i64>(4)? != 0 && row.get::<_,i64>(5)? == 0,
+                    "missing_reasons":if row.get::<_,i64>(5)? != 0 { vec!["process_restart_interrupted"] } else { Vec::<&str>::new() },
+                    "threshold_crossings":crossings
+                }))
+            },
+        )
+        .optional()
+        .map_err(settings_persistence_error)?;
+    Ok(summary.unwrap_or_else(|| {
+        serde_json::json!({
+            "gross_mfe_percent":null,"gross_mae_percent":null,
+            "event_sample_count":0,"event_maximum_gap_ms":null,
+            "complete":false,"threshold_crossings":[],
+            "missing_reasons":["lifetime_event_summary_not_persisted"]
+        })
+    }))
+}
+
+fn read_trade_price_path_horizon_coverage(
+    connection: &rusqlite::Connection,
+    trade_id: &str,
+    epoch: &str,
+    entry_timestamp_ms: u64,
+    last_timestamp_ms: u64,
+) -> Result<Vec<serde_json::Value>, (StatusCode, String)> {
+    let fine_end = entry_timestamp_ms.saturating_add(TRADE_PRICE_PATH_FINE_WINDOW_MS);
+    let mut output = Vec::with_capacity(2);
+    for (label, start_ms, end_ms, target_ms, include_start, horizon_end) in [
+        (
+            "fine_0_30m",
+            entry_timestamp_ms,
+            fine_end,
+            TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS,
+            true,
+            fine_end,
+        ),
+        (
+            "coarse_after_30m",
+            fine_end,
+            last_timestamp_ms,
+            TRADE_PRICE_PATH_COARSE_INTERVAL_MS,
+            false,
+            last_timestamp_ms,
+        ),
+    ] {
+        let observed_end_ms = last_timestamp_ms.min(horizon_end);
+        let query = if include_start {
+            "WITH ordered AS (
+                SELECT timestamp_ms,LAG(timestamp_ms) OVER (ORDER BY timestamp_ms,sample_cursor) AS previous_ms
+                FROM trade_price_path_samples WHERE trade_id=?1 AND path_epoch=?2
+             ) SELECT COUNT(*),COALESCE(MAX(timestamp_ms-previous_ms),0),MIN(timestamp_ms),MAX(timestamp_ms)
+               FROM ordered WHERE timestamp_ms>=?3 AND timestamp_ms<=?4"
+        } else {
+            "WITH ordered AS (
+                SELECT timestamp_ms,LAG(timestamp_ms) OVER (ORDER BY timestamp_ms,sample_cursor) AS previous_ms
+                FROM trade_price_path_samples WHERE trade_id=?1 AND path_epoch=?2
+             ) SELECT COUNT(*),COALESCE(MAX(timestamp_ms-previous_ms),0),MIN(timestamp_ms),MAX(timestamp_ms)
+               FROM ordered WHERE timestamp_ms>?3 AND timestamp_ms<=?4"
+        };
+        let (sample_count, maximum_gap_ms, first_sample_ms, last_sample_ms): (
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) = connection
+            .query_row(
+                query,
+                rusqlite::params![
+                    trade_id,
+                    epoch,
+                    i64::try_from(start_ms).map_err(settings_persistence_error)?,
+                    i64::try_from(end_ms).map_err(settings_persistence_error)?
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(settings_persistence_error)?;
+        let sample_count = sample_count.max(0) as u64;
+        let maximum_gap_ms = maximum_gap_ms.max(0) as u64;
+        let observed_start_ms = first_sample_ms
+            .map(|value| value.max(0) as u64)
+            .unwrap_or(start_ms);
+        let observed_end_ms = last_sample_ms
+            .map(|value| value.max(0) as u64)
+            .unwrap_or(start_ms)
+            .min(observed_end_ms);
+        let mut missing_reasons = Vec::new();
+        if sample_count == 0 {
+            if label == "fine_0_30m" || last_timestamp_ms > fine_end {
+                missing_reasons.push("horizon_samples_missing");
+            }
+        } else {
+            if maximum_gap_ms > target_ms {
+                missing_reasons.push("sample_gap_exceeds_target_cadence");
+            }
+            if label == "fine_0_30m"
+                && first_sample_ms.is_some_and(|timestamp| {
+                    (timestamp.max(0) as u64).saturating_sub(entry_timestamp_ms) > target_ms
+                })
+            {
+                missing_reasons.push("entry_to_first_fine_sample_gap_exceeds_target");
+            }
+            if label == "coarse_after_30m"
+                && first_sample_ms.is_some_and(|timestamp| {
+                    (timestamp.max(0) as u64).saturating_sub(fine_end) > target_ms
+                })
+            {
+                missing_reasons.push("fine_to_coarse_transition_gap_exceeds_target");
+            }
+        }
+        let horizon_reached = last_timestamp_ms >= horizon_end
+            && (label == "fine_0_30m" || last_timestamp_ms > fine_end);
+        output.push(serde_json::json!({
+            "horizon":label,
+            "offset_start_ms":start_ms.saturating_sub(entry_timestamp_ms),
+            "offset_end_ms":observed_end_ms.saturating_sub(entry_timestamp_ms),
+            "target_interval_ms":target_ms,
+            "sample_count":sample_count,
+            "maximum_observed_gap_ms":maximum_gap_ms,
+            "complete":missing_reasons.is_empty(),
+            "horizon_reached":horizon_reached,
+            "missing_reasons":missing_reasons,
+            "first_sample_at_ms":first_sample_ms,
+            "last_sample_at_ms":last_sample_ms
+        }));
+    }
+    Ok(output)
+}
+
 fn read_trade_price_path_page(
     path: &PathBuf,
     trade_id: &str,
@@ -536,7 +816,10 @@ fn read_trade_price_path_page(
         return Ok(serde_json::json!({
             "schema_version": 1, "trade_id": trade_id, "coverage_status": "no_durable_path",
             "history_complete": false, "total_sample_count": 0, "segments": [], "samples": [],
-            "next_timestamp_ms": null, "next_cursor": null, "has_more": false
+            "next_timestamp_ms": null, "next_cursor": null, "has_more": false,
+            "capture_policy":trade_price_path_capture_policy(),"horizon_coverage":[],
+            "lifetime_excursion_evidence":read_trade_price_path_event_summary(&connection,trade_id)?,
+            "replay_eligibility":{"status":"unavailable","required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS,"maximum_observed_gap_ms":null,"reason":"no_durable_path"}
         }));
     }
     let total_count: u64 = connection
@@ -609,7 +892,7 @@ fn read_trade_price_path_page(
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
+                        decode_trade_price_sample_column(row, 4)?,
                     ))
                 },
             )
@@ -629,7 +912,7 @@ fn read_trade_price_path_page(
                         row.get::<_, String>(1)?,
                         row.get::<_, i64>(2)?,
                         row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
+                        decode_trade_price_sample_column(row, 4)?,
                     ))
                 },
             )
@@ -640,9 +923,8 @@ fn read_trade_price_path_page(
     let has_more = rows.len() > limit;
     let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
     let mut samples = Vec::with_capacity(rows.len());
-    for (cursor, epoch, sequence, timestamp, payload) in rows {
-        let sample: serde_json::Value =
-            serde_json::from_str(&payload).map_err(settings_persistence_error)?;
+    for (cursor, epoch, sequence, timestamp, sample) in rows {
+        let sample = serde_json::to_value(sample).map_err(settings_persistence_error)?;
         samples.push(serde_json::json!({
             "cursor":cursor,"path_epoch":epoch,"sequence":sequence,"timestamp_ms":timestamp,"sample":sample
         }));
@@ -672,11 +954,75 @@ fn read_trade_price_path_page(
     if segment_count_total != total_count {
         missing_reasons.insert("segment_sample_count_mismatch".into());
     }
+    let maximum_observed_gap_ms = segments
+        .iter()
+        .filter_map(|segment| segment["maximum_gap_ms"].as_u64())
+        .max()
+        .unwrap_or_default();
+    let mut horizon_coverage = Vec::new();
+    for segment in &segments {
+        let Some(epoch) = segment["path_epoch"].as_str() else {
+            continue;
+        };
+        let Some(entry_timestamp_ms) = trade_price_path_entry_timestamp_from_epoch(epoch) else {
+            for (horizon, offset_start_ms, target_interval_ms) in [
+                ("fine_0_30m", 0_u64, TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS),
+                (
+                    "coarse_after_30m",
+                    TRADE_PRICE_PATH_FINE_WINDOW_MS,
+                    TRADE_PRICE_PATH_COARSE_INTERVAL_MS,
+                ),
+            ] {
+                horizon_coverage.push(serde_json::json!({
+                    "horizon":horizon,"offset_start_ms":offset_start_ms,
+                    "offset_end_ms":offset_start_ms,"target_interval_ms":target_interval_ms,
+                    "sample_count":0,"maximum_observed_gap_ms":null,"complete":false,
+                    "horizon_reached":false,"missing_reasons":["entry_timestamp_unavailable"]
+                }));
+            }
+            continue;
+        };
+        horizon_coverage.extend(read_trade_price_path_horizon_coverage(
+            &connection,
+            trade_id,
+            epoch,
+            entry_timestamp_ms,
+            segment["last_timestamp_ms"].as_u64().unwrap_or_default(),
+        )?);
+    }
+    let lifetime_excursion_evidence = read_trade_price_path_event_summary(&connection, trade_id)?;
+    let replay_eligibility = if total_count == 0 {
+        serde_json::json!({
+            "status":"unavailable","required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS,
+            "maximum_observed_gap_ms":null,"reason":"no_durable_path"
+        })
+    } else if maximum_observed_gap_ms > TRADE_PRICE_PATH_MAX_GAP_MS {
+        serde_json::json!({
+            "status":"ineligible_coarse_sampling",
+            "required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS,
+            "maximum_observed_gap_ms":maximum_observed_gap_ms,
+            "reason":"coarse_samples_exceed_one_second_replay_resolution"
+        })
+    } else if history_complete {
+        serde_json::json!({
+            "status":"eligible","required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS,
+            "maximum_observed_gap_ms":maximum_observed_gap_ms,"reason":null
+        })
+    } else {
+        serde_json::json!({
+            "status":"incomplete","required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS,
+            "maximum_observed_gap_ms":maximum_observed_gap_ms,"reason":"durable_path_incomplete"
+        })
+    };
     Ok(serde_json::json!({
         "schema_version":1,"trade_id":trade_id,
         "coverage_status":if history_complete {"complete"} else if total_count==0 {"no_durable_path"} else {"incomplete"},
         "history_complete":history_complete,"total_sample_count":total_count,
         "segments":segments,"missing_reasons":missing_reasons,
+        "capture_policy":trade_price_path_capture_policy(),
+        "horizon_coverage":horizon_coverage,
+        "lifetime_excursion_evidence":lifetime_excursion_evidence,
+        "replay_eligibility":replay_eligibility,
         "samples":samples,"next_timestamp_ms":if has_more {next_timestamp_ms} else {None},
         "next_cursor":if has_more {next_cursor} else {None},"has_more":has_more
     }))
@@ -714,6 +1060,234 @@ async fn get_trade_price_path(
     .await
     .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
     Ok(Json(page))
+}
+
+#[derive(serde::Deserialize)]
+struct TradePathWhatIfRequest {
+    trade_id: String,
+    candidate_policy_id: String,
+    candidate_policy_version: String,
+    candidate_parameters: learning::ProfitProtectionParameters,
+    candidate_maximum_holding_duration_days: Option<f64>,
+}
+
+const WHAT_IF_REPLAY_PAGE_SIZE: usize = 500;
+const WHAT_IF_REPLAY_TIME_BUDGET: Duration = Duration::from_secs(5);
+
+async fn post_trade_price_path_what_if(
+    State(state): State<AutoTraderState>,
+    axum::Json(request): axum::Json<TradePathWhatIfRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if request.trade_id.trim().is_empty()
+        || request.trade_id.len() > 256
+        || request.trade_id.chars().any(char::is_control)
+        || request.candidate_policy_id.trim().is_empty()
+        || request.candidate_policy_version.trim().is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Stable trade and candidate policy identities are required".into(),
+        ));
+    }
+    let path = settings_database_path(&state.settings_path);
+    let trade_id = request.trade_id;
+    let policy_id = request.candidate_policy_id;
+    let policy_version = request.candidate_policy_version;
+    let parameters = request.candidate_parameters;
+    let candidate_maximum_holding_duration_days = request.candidate_maximum_holding_duration_days;
+    let read = tokio::task::spawn_blocking(move || {
+        replay_trade_price_path_what_if(
+            &path,
+            &trade_id,
+            &policy_id,
+            &policy_version,
+            parameters,
+            candidate_maximum_holding_duration_days,
+        )
+    })
+    .await
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))??;
+    Ok(Json(read))
+}
+
+fn replay_trade_price_path_what_if(
+    path: &PathBuf,
+    trade_id: &str,
+    candidate_policy_id: &str,
+    candidate_policy_version: &str,
+    candidate: learning::ProfitProtectionParameters,
+    candidate_maximum_holding_duration_days: Option<f64>,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let connection = rusqlite::Connection::open(path).map_err(settings_persistence_error)?;
+    let context_table_exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='trade_price_path_replay_context')",
+            [], |row| row.get(0),
+        )
+        .map_err(settings_persistence_error)?;
+    if !context_table_exists {
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"completed_replay_context_missing"}),
+        );
+    }
+    let context: Option<String> = connection
+        .query_row(
+            "SELECT payload FROM trade_price_path_replay_context WHERE trade_id=?1",
+            [trade_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(settings_persistence_error)?;
+    let Some(context) = context else {
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"completed_replay_context_missing"}),
+        );
+    };
+    let context: serde_json::Value =
+        serde_json::from_str(&context).map_err(settings_persistence_error)?;
+    let segment = connection.query_row(
+        "SELECT path_epoch,sample_count,complete,missing_reasons_json,maximum_gap_ms FROM trade_price_path_segments WHERE trade_id=?1 ORDER BY first_timestamp_ms,path_epoch",
+        [trade_id],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?)),
+    ).optional().map_err(settings_persistence_error)?;
+    let Some((path_epoch, segment_count, complete, missing_json, maximum_gap_ms)) = segment else {
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"durable_path_segment_missing"}),
+        );
+    };
+    let segment_count_total: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM trade_price_path_segments WHERE trade_id=?1",
+            [trade_id],
+            |row| row.get::<_, i64>(0).map(|value| value.max(0) as u64),
+        )
+        .map_err(settings_persistence_error)?;
+    let sample_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM trade_price_path_samples WHERE trade_id=?1",
+            [trade_id],
+            |row| row.get::<_, i64>(0).map(|value| value.max(0) as u64),
+        )
+        .map_err(settings_persistence_error)?;
+    let missing_reasons = serde_json::from_str::<Vec<String>>(&missing_json).unwrap_or_default();
+    if maximum_gap_ms > TRADE_PRICE_PATH_MAX_GAP_MS as i64 {
+        return Ok(serde_json::json!({
+            "schema_version":1,"status":"unavailable","learning_eligible":false,
+            "trade_id":trade_id,"reason":"replay_resolution_exceeds_one_second",
+            "maximum_observed_gap_ms":maximum_gap_ms,
+            "required_maximum_gap_ms":TRADE_PRICE_PATH_MAX_GAP_MS
+        }));
+    }
+    if segment_count_total != 1
+        || complete != 1
+        || !missing_reasons.is_empty()
+        || sample_count != u64::try_from(segment_count).unwrap_or_default()
+    {
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"durable_path_incomplete","missing_reasons":missing_reasons}),
+        );
+    }
+    let metadata = serde_json::json!({
+        "trade_id":trade_id,"history_complete":true,"complete":true,"segment_count":1,
+        "path_epoch":path_epoch,"sample_count":sample_count
+    });
+    let Some(mut replay) = learning::DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+        &context,
+        &metadata,
+        candidate_policy_id,
+        candidate_policy_version,
+        candidate,
+        candidate_maximum_holding_duration_days,
+    ) else {
+        let reason = if candidate_maximum_holding_duration_days.is_some() {
+            "candidate_maximum_holding_duration_spec_missing_or_invalid"
+        } else {
+            "replay_input_lineage_incomplete_or_invalid"
+        };
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":reason}),
+        );
+    };
+    let started = Instant::now();
+    let mut after_timestamp_ms = None;
+    let mut after_cursor = None;
+    loop {
+        if started.elapsed() >= WHAT_IF_REPLAY_TIME_BUDGET {
+            return Ok(serde_json::json!({
+                "schema_version":1,"status":"not_computed","learning_eligible":false,
+                "trade_id":trade_id,"reason":"replay_time_budget_exceeded",
+                "processed_sample_count":replay.processed_sample_count(),
+                "total_sample_count":sample_count,"after_timestamp_ms":after_timestamp_ms,
+                "after_cursor":after_cursor,"time_budget_ms":WHAT_IF_REPLAY_TIME_BUDGET.as_millis()
+            }));
+        }
+        let mut statement = if after_timestamp_ms.is_some() && after_cursor.is_some() {
+            connection.prepare("SELECT sample_cursor,path_epoch,sequence,timestamp_ms,sample_json FROM trade_price_path_samples WHERE trade_id=?1 AND (timestamp_ms>?2 OR (timestamp_ms=?2 AND sample_cursor>?3)) ORDER BY timestamp_ms,sample_cursor LIMIT ?4")
+                .map_err(settings_persistence_error)?
+        } else {
+            connection.prepare("SELECT sample_cursor,path_epoch,sequence,timestamp_ms,sample_json FROM trade_price_path_samples WHERE trade_id=?1 ORDER BY timestamp_ms,sample_cursor LIMIT ?2")
+                .map_err(settings_persistence_error)?
+        };
+        let rows = if let (Some(timestamp), Some(cursor)) = (after_timestamp_ms, after_cursor) {
+            statement
+                .query_map(
+                    rusqlite::params![trade_id, timestamp, cursor, WHAT_IF_REPLAY_PAGE_SIZE as i64],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get_ref(4)?.as_bytes()?.to_vec(),
+                        ))
+                    },
+                )
+                .map_err(settings_persistence_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(settings_persistence_error)?
+        } else {
+            statement
+                .query_map(
+                    rusqlite::params![trade_id, WHAT_IF_REPLAY_PAGE_SIZE as i64],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get_ref(4)?.as_bytes()?.to_vec(),
+                        ))
+                    },
+                )
+                .map_err(settings_persistence_error)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(settings_persistence_error)?
+        };
+        if rows.is_empty() {
+            break;
+        }
+        for (cursor, path_epoch, sequence, timestamp, payload) in rows {
+            let sample = decode_trade_price_sample(&payload).map_err(settings_persistence_error)?;
+            let sample = serde_json::to_value(sample).map_err(settings_persistence_error)?;
+            if sample["epoch"].as_str() != Some(path_epoch.as_str())
+                || sample["sequence"].as_u64() != u64::try_from(sequence).ok()
+                || sample["timestamp"].as_u64() != u64::try_from(timestamp).ok()
+                || !replay.push_sample(&sample)
+            {
+                return Ok(
+                    serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"durable_sample_provenance_or_order_invalid","processed_sample_count":replay.processed_sample_count(),"total_sample_count":sample_count,"after_timestamp_ms":timestamp,"after_cursor":cursor}),
+                );
+            }
+            after_timestamp_ms = Some(timestamp);
+            after_cursor = Some(cursor);
+        }
+    }
+    let Some(result) = replay.finish() else {
+        return Ok(
+            serde_json::json!({"schema_version":1,"status":"unavailable","trade_id":trade_id,"reason":"replay_horizon_or_threshold_evidence_incomplete","processed_sample_count":sample_count,"total_sample_count":sample_count,"after_timestamp_ms":after_timestamp_ms,"after_cursor":after_cursor}),
+        );
+    };
+    Ok(result)
 }
 
 fn persist_settings_snapshot(
@@ -815,8 +1389,7 @@ fn persist_trade_price_path_samples(
              sample_json TEXT NOT NULL,
              UNIQUE(trade_id,path_epoch,sequence)
          );
-         CREATE INDEX IF NOT EXISTS trade_price_path_samples_page
-             ON trade_price_path_samples(trade_id,sample_cursor);
+         DROP INDEX IF EXISTS trade_price_path_samples_page;
          CREATE INDEX IF NOT EXISTS trade_price_path_samples_chronological_page
              ON trade_price_path_samples(trade_id,timestamp_ms,sample_cursor);
          CREATE TABLE IF NOT EXISTS trade_price_path_segments (
@@ -831,6 +1404,23 @@ fn persist_trade_price_path_samples(
              complete INTEGER NOT NULL,
              missing_reasons_json TEXT NOT NULL,
              PRIMARY KEY(trade_id,path_epoch)
+         );
+         CREATE TABLE IF NOT EXISTS trade_price_path_replay_context (
+             trade_id TEXT PRIMARY KEY,
+             event_id TEXT NOT NULL UNIQUE,
+             payload TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS trade_price_path_event_summary (
+             trade_id TEXT PRIMARY KEY,
+             entry_timestamp_ms INTEGER NOT NULL,
+             gross_mfe_percent REAL,
+             gross_mae_percent REAL,
+             event_sample_count INTEGER NOT NULL,
+             event_maximum_gap_ms INTEGER NOT NULL,
+             event_metrics_complete INTEGER NOT NULL,
+             restart_interrupted INTEGER NOT NULL,
+             threshold_crossings_json TEXT NOT NULL,
+             finalized INTEGER NOT NULL
          );",
         )
         .map_err(settings_persistence_error)?;
@@ -934,15 +1524,19 @@ fn persist_trade_price_path_samples(
                 } else {
                     let gap = sample.timestamp.saturating_sub(progress.last_timestamp_ms);
                     progress.maximum_gap_ms = progress.maximum_gap_ms.max(gap);
+                    let expected_gap_ms = trade_price_path_interval_ms(
+                        position.entry_timestamp_ms,
+                        progress.last_timestamp_ms,
+                    );
                     if sample.sequence != progress.last_sequence.saturating_add(1) {
                         progress
                             .missing_reasons
                             .insert("path_sequence_gap".to_owned());
                     }
-                    if sample.timestamp <= progress.last_timestamp_ms || gap > MAX_PATH_GAP_MS {
+                    if sample.timestamp <= progress.last_timestamp_ms || gap > expected_gap_ms {
                         progress
                             .missing_reasons
-                            .insert("path_time_gap_exceeds_bound".to_owned());
+                            .insert("path_time_gap_exceeds_scheduled_cadence".to_owned());
                     }
                 }
                 if !source_fresh {
@@ -970,7 +1564,7 @@ fn persist_trade_price_path_samples(
                      VALUES(?1,?2,?3,?4,?5)",
                     rusqlite::params![trade_id, epoch, i64::try_from(sample.sequence).map_err(settings_persistence_error)?,
                         i64::try_from(sample.timestamp).map_err(settings_persistence_error)?,
-                        serde_json::to_string(sample).map_err(settings_persistence_error)?],
+                        encode_trade_price_sample(sample).map_err(settings_persistence_error)?],
                 ).map_err(settings_persistence_error)?;
                 progress.last_sequence = sample.sequence;
                 progress.last_timestamp_ms = sample.timestamp;
@@ -1015,6 +1609,7 @@ fn persist_trade_price_path_samples(
                     serde_json::to_string(&progress.missing_reasons.into_iter().collect::<Vec<_>>()).map_err(settings_persistence_error)?],
             ).map_err(settings_persistence_error)?;
         }
+        persist_trade_price_path_event_summary(transaction, trade_id, position)?;
     }
     // A closed position is removed from strategy_positions during fill
     // accounting. Its existing post-exit observation retains the captured
@@ -1072,6 +1667,26 @@ fn persist_trade_price_path_samples(
             observation["path_restart_interrupted"].as_bool() == Some(true);
         position.price_path_finalized =
             observation["completion_pending_durable"].as_bool() == Some(true);
+        position.price_path_gross_mfe_percent =
+            observation["pre_exit_price_path_evidence"]["event_driven_gross_mfe_percent"].as_f64();
+        position.price_path_gross_mae_percent =
+            observation["pre_exit_price_path_evidence"]["event_driven_gross_mae_percent"].as_f64();
+        position.price_path_event_sample_count =
+            observation["pre_exit_price_path_evidence"]["event_driven_sample_count"]
+                .as_u64()
+                .unwrap_or_default();
+        position.price_path_event_maximum_gap_ms =
+            observation["pre_exit_price_path_evidence"]["event_driven_maximum_gap_ms"]
+                .as_u64()
+                .unwrap_or_default();
+        position.price_path_event_metrics_complete =
+            observation["pre_exit_price_path_evidence"]["event_driven_metrics_complete"].as_bool()
+                == Some(true);
+        position.price_path_threshold_crossings =
+            observation["pre_exit_price_path_evidence"]["threshold_crossings"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
         position.price_path = samples;
         pending
             .strategy_positions
@@ -1090,7 +1705,116 @@ fn persist_trade_price_path_samples(
                 position,
             );
         persist_trade_price_path_samples(transaction, &pending)?;
+        if observation["completion_pending_durable"].as_bool() == Some(true) {
+            let segment_complete: bool = transaction
+                .query_row(
+                    "SELECT COUNT(*)=1 AND COALESCE(MIN(complete),0)=1 FROM trade_price_path_segments WHERE trade_id=?1",
+                    [trade_id],
+                    |row| row.get(0),
+                )
+                .map_err(settings_persistence_error)?;
+            if segment_complete {
+                // Keep only replay inputs and source references here. Raw path
+                // samples and per-quote fee observations are rebuilt from the
+                // authoritative sample table and fee schedule intervals.
+                let mut context = observation.clone();
+                if let Some(object) = context.as_object_mut() {
+                    object.remove("pre_exit_price_path");
+                    object.remove("price_path");
+                }
+                context["durable_context_schema_version"] = serde_json::Value::from(1);
+                if context["counterfactual_exit_fee_attribution"].is_object() {
+                    if let Some(object) =
+                        context["counterfactual_exit_fee_attribution"].as_object_mut()
+                    {
+                        object.remove("quote_observations");
+                    }
+                }
+                let payload =
+                    serde_json::to_string(&context).map_err(settings_persistence_error)?;
+                let existing = transaction
+                    .query_row(
+                        "SELECT event_id,payload FROM trade_price_path_replay_context WHERE trade_id=?1",
+                        [trade_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()
+                    .map_err(settings_persistence_error)?;
+                if let Some((existing_event_id, existing_payload)) = existing {
+                    if existing_event_id != observation["event_id"].as_str().unwrap_or_default()
+                        || existing_payload != payload
+                    {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            "Conflicting immutable replay context for trade".into(),
+                        ));
+                    }
+                } else {
+                    transaction
+                        .execute(
+                            "INSERT INTO trade_price_path_replay_context(trade_id,event_id,payload) VALUES(?1,?2,?3)",
+                            rusqlite::params![trade_id, observation["event_id"].as_str().unwrap_or_default(), payload],
+                        )
+                        .map_err(settings_persistence_error)?;
+                }
+            }
+        }
     }
+    Ok(())
+}
+
+fn persist_trade_price_path_event_summary(
+    transaction: &rusqlite::Transaction<'_>,
+    trade_id: &str,
+    position: &TraderPosition,
+) -> Result<(), (StatusCode, String)> {
+    let threshold_crossings = serde_json::to_string(&position.price_path_threshold_crossings)
+        .map_err(settings_persistence_error)?;
+    transaction
+        .execute(
+            "INSERT INTO trade_price_path_event_summary(
+                trade_id,entry_timestamp_ms,gross_mfe_percent,gross_mae_percent,
+                event_sample_count,event_maximum_gap_ms,event_metrics_complete,
+                restart_interrupted,threshold_crossings_json,finalized
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(trade_id) DO UPDATE SET
+                entry_timestamp_ms=excluded.entry_timestamp_ms,
+                gross_mfe_percent=excluded.gross_mfe_percent,
+                gross_mae_percent=excluded.gross_mae_percent,
+                event_sample_count=excluded.event_sample_count,
+                event_maximum_gap_ms=excluded.event_maximum_gap_ms,
+                event_metrics_complete=excluded.event_metrics_complete,
+                restart_interrupted=excluded.restart_interrupted,
+                threshold_crossings_json=excluded.threshold_crossings_json,
+                finalized=excluded.finalized",
+            rusqlite::params![
+                trade_id,
+                i64::try_from(position.entry_timestamp_ms).map_err(settings_persistence_error)?,
+                position.price_path_gross_mfe_percent,
+                position.price_path_gross_mae_percent,
+                i64::try_from(position.price_path_event_sample_count)
+                    .map_err(settings_persistence_error)?,
+                i64::try_from(position.price_path_event_maximum_gap_ms)
+                    .map_err(settings_persistence_error)?,
+                if position.price_path_event_metrics_complete {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                if position.price_path_restart_interrupted {
+                    1_i64
+                } else {
+                    0_i64
+                },
+                threshold_crossings,
+                if position.price_path_finalized {
+                    1_i64
+                } else {
+                    0_i64
+                }
+            ],
+        )
+        .map_err(settings_persistence_error)?;
     Ok(())
 }
 
@@ -1762,10 +2486,13 @@ mod sqlite_state_tests {
                 "CREATE TABLE auto_trader_state (id INTEGER PRIMARY KEY, payload BLOB NOT NULL);",
             )
             .unwrap();
+        let mut legacy_payload = serde_json::to_value(&settings).unwrap();
+        legacy_payload["positions"]["BTC-USDT"]["price_path"] =
+            serde_json::to_value(&settings.positions["BTC-USDT"].price_path).unwrap();
         connection
             .execute(
                 "INSERT INTO auto_trader_state VALUES(1,?1)",
-                [rmp_serde::to_vec_named(&settings).unwrap()],
+                [rmp_serde::to_vec_named(&legacy_payload).unwrap()],
             )
             .unwrap();
         drop(connection);
@@ -2987,6 +3714,94 @@ mod trade_price_path_persistence_tests {
     }
 
     #[test]
+    fn compact_sample_encoding_round_trips_every_source_field_and_reads_legacy_objects() {
+        let mut full = sample(17, 42_000, "path-epoch-bits");
+        full.bid = f64::from_bits(0x4059_1eb8_51eb_851f);
+        full.ask = f64::from_bits(0x4059_1eb8_51eb_8520);
+        let compact = encode_trade_price_sample(&full).unwrap();
+        let legacy = serde_json::to_vec(&full).unwrap();
+        let compact_v1 = encode_trade_price_sample_v1(&full).unwrap();
+        assert_eq!(&compact[..2], &[0x92, 2]);
+        assert!(compact.len() < legacy.len());
+        let decoded = decode_trade_price_sample(&compact).unwrap();
+        assert_eq!(decoded.timestamp, full.timestamp);
+        assert_eq!(decoded.sequence, full.sequence);
+        assert_eq!(decoded.epoch, full.epoch);
+        assert_eq!(decoded.bid.to_bits(), full.bid.to_bits());
+        assert_eq!(decoded.ask.to_bits(), full.ask.to_bits());
+        assert_eq!(decoded.source_updated_at_ms, full.source_updated_at_ms);
+        assert_eq!(
+            decoded.freshness_contract_version,
+            full.freshness_contract_version
+        );
+        assert_eq!(decoded.freshness_max_age_ms, full.freshness_max_age_ms);
+        assert_eq!(decoded.source_fresh, full.source_fresh);
+        assert_eq!(decoded.quote_source_system, full.quote_source_system);
+        assert_eq!(decoded.quote_source_epoch, full.quote_source_epoch);
+        assert_eq!(decoded.quote_source_cursor, full.quote_source_cursor);
+        assert_eq!(decoded.quote_source_record_id, full.quote_source_record_id);
+        let v1_decoded = decode_trade_price_sample(&compact_v1).unwrap();
+        assert_eq!(v1_decoded.bid.to_bits(), full.bid.to_bits());
+        assert_eq!(v1_decoded.ask.to_bits(), full.ask.to_bits());
+        let legacy_decoded = decode_trade_price_sample(&legacy).unwrap();
+        assert_eq!(legacy_decoded.bid.to_bits(), full.bid.to_bits());
+        assert_eq!(legacy_decoded.ask.to_bits(), full.ask.to_bits());
+        assert_eq!(
+            legacy_decoded.quote_source_record_id,
+            full.quote_source_record_id
+        );
+    }
+
+    #[test]
+    fn sqlite_payload_decoder_accepts_legacy_text_and_messagepack_blob() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute("CREATE TABLE payloads(sample_json TEXT NOT NULL)", [])
+            .unwrap();
+        let expected = sample(7, 8_000, "codec-epoch");
+        let legacy = serde_json::to_string(&expected).unwrap();
+        connection
+            .execute("INSERT INTO payloads(sample_json) VALUES(?1)", [&legacy])
+            .unwrap();
+        let compact = encode_trade_price_sample(&expected).unwrap();
+        connection
+            .execute("INSERT INTO payloads(sample_json) VALUES(?1)", [compact])
+            .unwrap();
+
+        let legacy_type: rusqlite::types::Type = connection
+            .query_row("SELECT sample_json FROM payloads LIMIT 1", [], |row| {
+                Ok(row.get_ref(0)?.data_type())
+            })
+            .unwrap();
+        let blob_type: rusqlite::types::Type = connection
+            .query_row(
+                "SELECT sample_json FROM payloads ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| Ok(row.get_ref(0)?.data_type()),
+            )
+            .unwrap();
+        assert_eq!(legacy_type, rusqlite::types::Type::Text);
+        assert_eq!(blob_type, rusqlite::types::Type::Blob);
+        for rowid in [1_i64, 2_i64] {
+            let decoded = connection
+                .query_row(
+                    "SELECT sample_json FROM payloads WHERE rowid=?1",
+                    [rowid],
+                    |row| decode_trade_price_sample_column(row, 0),
+                )
+                .unwrap();
+            assert_eq!(decoded.timestamp, expected.timestamp);
+            assert_eq!(decoded.sequence, expected.sequence);
+            assert_eq!(decoded.bid.to_bits(), expected.bid.to_bits());
+            assert_eq!(decoded.ask.to_bits(), expected.ask.to_bits());
+            assert_eq!(
+                decoded.quote_source_record_id,
+                expected.quote_source_record_id
+            );
+        }
+    }
+
+    #[test]
     fn path_appends_are_idempotent_and_paged_chronologically() {
         let path = temporary_database_path();
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -3009,6 +3824,14 @@ mod trade_price_path_persistence_tests {
             count, 3,
             "repeated Settings snapshots must not duplicate samples"
         );
+        let compact_payload: Vec<u8> = connection
+            .query_row(
+                "SELECT sample_json FROM trade_price_path_samples WHERE trade_id='trade-path-test' ORDER BY sequence LIMIT 1",
+                [],
+                |row| Ok(row.get_ref(0)?.as_bytes()?.to_vec()),
+            )
+            .unwrap();
+        assert_eq!(&compact_payload[..2], &[0x92, 2]);
         drop(connection);
 
         let first = read_trade_price_path_page(&path, "trade-path-test", None, None, 2).unwrap();
@@ -3016,6 +3839,9 @@ mod trade_price_path_persistence_tests {
         assert_eq!(first["has_more"], true);
         assert_eq!(first["samples"][0]["timestamp_ms"], 2_000);
         assert_eq!(first["samples"][1]["timestamp_ms"], 3_000);
+        assert!(first["samples"][0]["sample"].is_object());
+        assert!(first["samples"][0]["sample"]["bid"].is_number());
+        assert!(first["samples"][0]["sample"]["quote_source_record_id"].is_string());
         let second = read_trade_price_path_page(
             &path,
             "trade-path-test",
@@ -3027,6 +3853,127 @@ mod trade_price_path_persistence_tests {
         assert_eq!(second["samples"].as_array().unwrap().len(), 1);
         assert_eq!(second["samples"][0]["timestamp_ms"], 4_000);
         assert_eq!(second["has_more"], false);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn multi_day_path_keeps_tiered_coverage_extrema_and_rejects_fine_replay() {
+        let path = temporary_database_path();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let trade_id = "trade-path-multi-day";
+        let entry_timestamp_ms = 1_000_000_u64;
+        let epoch = format!("auto-trader-position-path:v1:{entry_timestamp_ms}:{trade_id}");
+        let fine_end = entry_timestamp_ms + TRADE_PRICE_PATH_FINE_WINDOW_MS;
+        let multi_day_end = entry_timestamp_ms + 2 * 86_400_000;
+        let mut samples = Vec::new();
+        let mut sequence = 0_u64;
+        for timestamp in ((entry_timestamp_ms + 1_000)..=fine_end).step_by(1_000) {
+            sequence += 1;
+            samples.push(sample(sequence, timestamp, &epoch));
+        }
+        for timestamp in ((fine_end + TRADE_PRICE_PATH_COARSE_INTERVAL_MS)..=multi_day_end)
+            .step_by(TRADE_PRICE_PATH_COARSE_INTERVAL_MS as usize)
+        {
+            sequence += 1;
+            samples.push(sample(sequence, timestamp, &epoch));
+        }
+
+        let mut settings = Settings::default();
+        let mut position = TraderPosition::default();
+        position.trade_id = Some(trade_id.into());
+        position.price_path_epoch = Some(epoch);
+        position.entry_timestamp_ms = entry_timestamp_ms;
+        position.price_path_total_samples = sequence;
+        position.price_path_finalized = true;
+        position.price_path = samples;
+        position.price_path_gross_mfe_percent = Some(4.25);
+        position.price_path_gross_mae_percent = Some(-2.75);
+        position.price_path_event_sample_count = 20_000;
+        position.price_path_event_maximum_gap_ms = 1_000;
+        position.price_path_event_metrics_complete = true;
+        position.price_path_threshold_crossings = vec![serde_json::json!({
+            "threshold_type":"stop_loss","timestamp_ms":multi_day_end,
+            "quote_source_system":"paper_exchange","quote_source_epoch":"pex-epoch",
+            "quote_source_cursor":sequence,"quote_source_record_id":"multi-day-crossing"
+        })];
+        settings
+            .strategy_positions
+            .entry("BTC-USDT".into())
+            .or_default()
+            .insert("live-momentum".into(), position);
+        let transaction = connection.unchecked_transaction().unwrap();
+        persist_trade_price_path_samples(&transaction, &settings).unwrap();
+        transaction.commit().unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO trade_price_path_replay_context(trade_id,event_id,payload) VALUES(?1,?2,?3)",
+                rusqlite::params![trade_id, "multi-day-event", "{}"],
+            )
+            .unwrap();
+        let page = read_trade_price_path_page(&path, trade_id, None, None, 1).unwrap();
+        assert_eq!(page["history_complete"], true);
+        assert_eq!(page["capture_policy"]["fine_interval_ms"], 1_000);
+        assert_eq!(page["capture_policy"]["coarse_interval_ms"], 60_000);
+        assert_eq!(
+            page["replay_eligibility"]["status"],
+            "ineligible_coarse_sampling"
+        );
+        assert_eq!(
+            page["replay_eligibility"]["maximum_observed_gap_ms"],
+            60_000
+        );
+        let horizons = page["horizon_coverage"].as_array().unwrap();
+        assert_eq!(horizons.len(), 2);
+        let fine = horizons
+            .iter()
+            .find(|horizon| horizon["horizon"] == "fine_0_30m")
+            .unwrap();
+        assert_eq!(fine["sample_count"], 1_800);
+        assert_eq!(fine["maximum_observed_gap_ms"], 1_000);
+        assert_eq!(fine["complete"], true);
+        let coarse = horizons
+            .iter()
+            .find(|horizon| horizon["horizon"] == "coarse_after_30m")
+            .unwrap();
+        assert_eq!(coarse["sample_count"], 2_850);
+        assert_eq!(coarse["maximum_observed_gap_ms"], 60_000);
+        assert_eq!(coarse["complete"], true);
+        assert_eq!(coarse["horizon_reached"], true);
+        assert_eq!(
+            page["lifetime_excursion_evidence"]["gross_mfe_percent"],
+            4.25
+        );
+        assert_eq!(
+            page["lifetime_excursion_evidence"]["gross_mae_percent"],
+            -2.75
+        );
+        assert_eq!(
+            page["lifetime_excursion_evidence"]["event_sample_count"],
+            20_000
+        );
+        assert_eq!(
+            page["lifetime_excursion_evidence"]["threshold_crossings"][0]["timestamp_ms"],
+            multi_day_end
+        );
+
+        let candidate = learning::ProfitProtectionParameters {
+            stop_loss_percent: 0.5,
+            take_profit_percent: 0.8,
+            activation_percent: 0.15,
+            giveback_percent: 0.1,
+            minimum_lock_percent: 0.05,
+            trailing_activation_percent: None,
+            trailing_distance_percent: None,
+            breakeven_activation_percent: None,
+        };
+        let replay =
+            replay_trade_price_path_what_if(&path, trade_id, "candidate", "v1", candidate, None)
+                .unwrap();
+        assert_eq!(replay["status"], "unavailable");
+        assert_eq!(replay["reason"], "replay_resolution_exceeds_one_second");
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
@@ -3076,6 +4023,17 @@ mod trade_price_path_persistence_tests {
         settings.post_exit_observations[0]["completion_pending_durable"] =
             serde_json::Value::Bool(true);
         append_snapshot(&connection, &settings);
+        let context_payload: String = connection
+            .query_row(
+                "SELECT payload FROM trade_price_path_replay_context WHERE trade_id='trade-path-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let context: serde_json::Value = serde_json::from_str(&context_payload).unwrap();
+        assert!(context.get("pre_exit_price_path").is_none());
+        assert!(context.get("price_path").is_none());
+        assert_eq!(context["durable_context_schema_version"], 1);
         let complete =
             read_trade_price_path_page(&path, "trade-path-test", None, None, 10).unwrap();
         assert_eq!(

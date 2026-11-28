@@ -579,12 +579,33 @@ async fn evaluate_position_exit(
         {
             let should_sample = trade_price_path_sample_due(
                 current.price_path.last().map(|sample| sample.timestamp),
+                current.entry_timestamp_ms,
                 observed_at,
             );
+            let quote_identity = quote_source_event_identity(
+                quote_source_system.as_deref(),
+                quote_source_epoch.as_deref(),
+                quote_source_cursor,
+                quote_source_record_id.as_deref(),
+            );
+            let return_percent = (source_fresh == Some(true))
+                .then(|| {
+                    gross_executable_return_percent(
+                        position.quantity,
+                        position.average_entry_price,
+                        bid,
+                        ask,
+                    )
+                })
+                .flatten();
+            let event_updated = record_event_driven_gross_excursion(
+                current,
+                observed_at,
+                return_percent,
+                quote_identity,
+                source_fresh == Some(true),
+            );
             if should_sample {
-                let previous_sample_timestamp =
-                    current.price_path.last().map(|sample| sample.timestamp);
-                let gap_ms = previous_sample_timestamp.map(|last| observed_at.saturating_sub(last));
                 if current.price_path_epoch.is_none() {
                     current.price_path_epoch = current.trade_id.as_ref().map(|trade_id| {
                         format!(
@@ -613,70 +634,25 @@ async fn evaluate_position_exit(
                     quote_source_record_id: quote_source_record_id.clone(),
                 });
                 current.price_path_total_samples = sequence;
-                let quote_identity_complete = quote_source_system
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                    && quote_source_epoch
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty())
-                    && quote_source_cursor.is_some_and(|cursor| cursor > 0)
-                    && quote_source_record_id
-                        .as_deref()
-                        .is_some_and(|value| !value.trim().is_empty());
-                let return_percent = (source_fresh == Some(true))
-                    .then(|| {
-                        gross_executable_return_percent(
-                            position.quantity,
-                            position.average_entry_price,
-                            bid,
-                            ask,
-                        )
-                    })
-                    .flatten();
-                let cadence_complete = match (previous_sample_timestamp, gap_ms) {
-                    (None, _) => {
-                        position.entry_timestamp_ms > 0
-                            && observed_at >= position.entry_timestamp_ms
-                            && observed_at.saturating_sub(position.entry_timestamp_ms)
-                                <= TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
-                    }
-                    (Some(_), Some(gap)) => gap <= TRADE_PRICE_PATH_MAX_GAP_MS,
-                    _ => false,
-                };
-                record_event_driven_gross_excursion(
-                    current,
-                    return_percent,
-                    quote_identity_complete,
-                    source_fresh == Some(true),
-                    cadence_complete,
-                    previous_sample_timestamp.is_none(),
-                );
                 if current.price_path.len() > 4096 {
                     current.price_path.drain(..current.price_path.len() - 4096);
                     current.price_path_memory_window_truncated = true;
                 }
-                position.price_path = current.price_path.clone();
-                position.price_path_total_samples = current.price_path_total_samples;
-                position.price_path_truncated = current.price_path_truncated;
-                position.price_path_restart_interrupted = current.price_path_restart_interrupted;
-                position.price_path_epoch = current.price_path_epoch.clone();
-                position.price_path_gross_mfe_percent = current.price_path_gross_mfe_percent;
-                position.price_path_gross_mae_percent = current.price_path_gross_mae_percent;
-                position.price_path_event_sample_count = current.price_path_event_sample_count;
-                position.price_path_event_metrics_complete =
-                    current.price_path_event_metrics_complete;
+            }
+            position.price_path = current.price_path.clone();
+            position.price_path_total_samples = current.price_path_total_samples;
+            position.price_path_truncated = current.price_path_truncated;
+            position.price_path_restart_interrupted = current.price_path_restart_interrupted;
+            position.price_path_epoch = current.price_path_epoch.clone();
+            position.price_path_gross_mfe_percent = current.price_path_gross_mfe_percent;
+            position.price_path_gross_mae_percent = current.price_path_gross_mae_percent;
+            position.price_path_event_sample_count = current.price_path_event_sample_count;
+            position.price_path_event_metrics_complete = current.price_path_event_metrics_complete;
+            position.price_path_last_event_timestamp_ms =
+                current.price_path_last_event_timestamp_ms;
+            position.price_path_event_maximum_gap_ms = current.price_path_event_maximum_gap_ms;
+            if should_sample || event_updated {
                 request_price_path_persist_if_due(state)?;
-            } else {
-                position.price_path = current.price_path.clone();
-                position.price_path_total_samples = current.price_path_total_samples;
-                position.price_path_truncated = current.price_path_truncated;
-                position.price_path_restart_interrupted = current.price_path_restart_interrupted;
-                position.price_path_epoch = current.price_path_epoch.clone();
-                position.price_path_gross_mfe_percent = current.price_path_gross_mfe_percent;
-                position.price_path_gross_mae_percent = current.price_path_gross_mae_percent;
-                position.price_path_event_sample_count = current.price_path_event_sample_count;
-                position.price_path_event_metrics_complete =
-                    current.price_path_event_metrics_complete;
             }
         }
     }

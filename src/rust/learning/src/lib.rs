@@ -36,6 +36,8 @@ mod scout_replay_config;
 mod thresholds;
 mod walk_forward_statistics;
 
+pub use exit_policy::{DurableTradeWhatIfReplay, ProfitProtectionParameters};
+
 use context::*;
 use execution::*;
 use feedback::*;

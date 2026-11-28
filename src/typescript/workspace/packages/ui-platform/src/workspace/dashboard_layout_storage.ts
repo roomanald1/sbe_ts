@@ -5,13 +5,56 @@ import {
   type SavedDashboardLayout,
   defaultDashboardLayout,
   overlaps,
-} from './dashboard_layout.js';
+} from './dashboard_layout.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Accepts only the current widget object shape, then clamps and packs its layout. */
+/**
+ * Reads saved widgets without migrating their type, configuration, or position.
+ * Unknown widget types are retained so the host can render a non-destructive
+ * unavailable state and let the operator replace them explicitly.
+ */
+export function preserveStoredWidgets<TType extends string>(
+  items: unknown[],
+): DashboardWidget<TType>[] {
+  return items.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const { id, type, symbol, x, y, w, h, collapsed } = item;
+    if (
+      typeof id !== 'string' ||
+      typeof type !== 'string' ||
+      typeof symbol !== 'string' ||
+      typeof x !== 'number' ||
+      !Number.isFinite(x) ||
+      typeof y !== 'number' ||
+      !Number.isFinite(y) ||
+      typeof w !== 'number' ||
+      !Number.isFinite(w) ||
+      typeof h !== 'number' ||
+      !Number.isFinite(h) ||
+      typeof collapsed !== 'boolean'
+    )
+      return [];
+
+    return [
+      {
+        ...item,
+        id,
+        type: type as TType,
+        symbol,
+        x,
+        y,
+        w,
+        h,
+        collapsed,
+      },
+    ];
+  });
+}
+
+/** Validates/clamps newly supplied layouts; saved views use preserveStoredWidgets. */
 export function validateWidgets<TType extends string>(
   items: unknown[],
   config: DashboardLayoutConfig<TType>,
@@ -67,11 +110,10 @@ export function validateWidgets<TType extends string>(
 //TODO remove legacy.
 function readVersionTwoWidgets<TType extends string>(
   value: unknown,
-  config: DashboardLayoutConfig<TType>,
 ): DashboardWidget<TType>[] | null {
   if (!isRecord(value) || value.version !== 2 || !Array.isArray(value.widgets))
     return null;
-  return validateWidgets(value.widgets, config);
+  return preserveStoredWidgets(value.widgets);
 }
 
 export function loadDashboardLayout<TType extends string>(
@@ -84,7 +126,7 @@ export function loadDashboardLayout<TType extends string>(
     if (saved === null)
       return defaultDashboardLayout(config.defaultWidgetTypes);
     return (
-      readVersionTwoWidgets(JSON.parse(saved), config) ??
+      readVersionTwoWidgets<TType>(JSON.parse(saved)) ??
       defaultDashboardLayout(config.defaultWidgetTypes)
     );
   } catch {
@@ -109,11 +151,10 @@ export function loadSavedLayouts<TType extends string>(
                 typeof item.name !== 'string'
               )
                 return [];
-              const widgets = validateWidgets(
+              const widgets = preserveStoredWidgets<TType>(
                 Array.isArray(item.widgets) ? item.widgets : [],
-                config,
               );
-              return [{ id: item.id, name: item.name, widgets }];
+              return [{ ...item, id: item.id, name: item.name, widgets }];
             },
           );
           if (layouts.length > 0) return layouts;

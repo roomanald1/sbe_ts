@@ -493,6 +493,12 @@ fn apply_auto_fill(
             position.price_path_gross_mae_percent = None;
             position.price_path_event_sample_count = 0;
             position.price_path_event_metrics_complete = false;
+            position.price_path_last_event_quote_source_system = None;
+            position.price_path_last_event_quote_source_epoch = None;
+            position.price_path_last_event_quote_source_cursor = None;
+            position.price_path_last_event_quote_source_record_id = None;
+            position.price_path_last_event_timestamp_ms = None;
+            position.price_path_event_maximum_gap_ms = 0;
             position.price_path_threshold_crossings.clear();
             position.initial_entry_notional = incoming.abs() * price;
             position.total_fees_paid = fee;
@@ -598,6 +604,12 @@ fn apply_auto_fill(
         position.price_path_gross_mae_percent = None;
         position.price_path_event_sample_count = 0;
         position.price_path_event_metrics_complete = false;
+        position.price_path_last_event_quote_source_system = None;
+        position.price_path_last_event_quote_source_epoch = None;
+        position.price_path_last_event_quote_source_cursor = None;
+        position.price_path_last_event_quote_source_record_id = None;
+        position.price_path_last_event_timestamp_ms = None;
+        position.price_path_event_maximum_gap_ms = 0;
         position.price_path_threshold_crossings.clear();
         position.price_path_epoch = None;
         position.entry_timestamp_ms = current_time_ms();

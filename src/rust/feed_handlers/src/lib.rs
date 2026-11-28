@@ -1,3 +1,4 @@
+pub mod binance_dated_futures;
 pub mod encoders;
 pub mod logging;
 pub mod metrics;

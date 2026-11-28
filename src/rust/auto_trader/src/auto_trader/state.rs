@@ -613,6 +613,18 @@ struct TraderPosition {
     price_path_event_sample_count: u64,
     #[serde(default)]
     price_path_event_metrics_complete: bool,
+    #[serde(default)]
+    price_path_last_event_quote_source_system: Option<String>,
+    #[serde(default)]
+    price_path_last_event_quote_source_epoch: Option<String>,
+    #[serde(default)]
+    price_path_last_event_quote_source_cursor: Option<u64>,
+    #[serde(default)]
+    price_path_last_event_quote_source_record_id: Option<String>,
+    #[serde(default)]
+    price_path_last_event_timestamp_ms: Option<u64>,
+    #[serde(default)]
+    price_path_event_maximum_gap_ms: u64,
     /// First observed executable event crossing for each entry-captured threshold.
     /// Fee rates are recorded with their attribution status; unverified estimates
     /// never make an excursion eligible for Learning or promotion.

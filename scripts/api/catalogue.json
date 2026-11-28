@@ -10,7 +10,8 @@
     "monitoring-metrics": "/internal/monitoring-metrics",
     "open-position-counts": "/internal/strategy/open-position-counts",
     "decision-parameters": "/positions/auto-trader/parameters",
-    "activity": "/positions/auto-trader/activity"
+    "activity": "/positions/auto-trader/activity",
+    "dated-carry": "/positions/auto-trader/dated-carry"
   },
   "insights": {
     "dashboard": "/signals/dashboard",
@@ -32,6 +33,7 @@
     "portfolio-evidence-intervals": "/positions/portfolio-evidence/intervals"
   },
   "paper_exchange": {
-    "financial-evidence": "/internal/financial/evidence"
+    "financial-evidence": "/internal/financial/evidence",
+    "market-mark": "/internal/market-mark"
   }
 }

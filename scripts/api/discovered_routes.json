@@ -7,7 +7,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1245
+        "line": 1388
       }
     ],
     "financially_verified": false,
@@ -21,7 +21,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1232
+        "line": 1375
       }
     ],
     "financially_verified": false,
@@ -35,7 +35,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1215
+        "line": 1350
       }
     ],
     "financially_verified": false,
@@ -49,7 +49,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1233
+        "line": 1376
       }
     ],
     "financially_verified": false,
@@ -63,15 +63,15 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1198
+        "line": 1331
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 470
+        "line": 495
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 497
+        "line": 522
       }
     ],
     "financially_verified": false,
@@ -85,23 +85,23 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1231
+        "line": 1366
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 363
+        "line": 368
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 377
+        "line": 382
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 474
+        "line": 499
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 501
+        "line": 526
       }
     ],
     "financially_verified": false,
@@ -115,15 +115,15 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1199
+        "line": 1332
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 482
+        "line": 507
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 509
+        "line": 534
       }
     ],
     "financially_verified": false,
@@ -137,7 +137,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1237
+        "line": 1380
       }
     ],
     "financially_verified": false,
@@ -151,7 +151,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1241
+        "line": 1384
       }
     ],
     "financially_verified": false,
@@ -165,7 +165,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1223
+        "line": 1358
       }
     ],
     "financially_verified": false,
@@ -179,15 +179,15 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1203
+        "line": 1338
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 478
+        "line": 503
       },
       {
         "file": "src/rust/auto_trader/src/browser_rsocket.rs",
-        "line": 505
+        "line": 530
       }
     ],
     "financially_verified": false,
@@ -201,7 +201,7 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1211
+        "line": 1346
       }
     ],
     "financially_verified": false,
@@ -215,7 +215,21 @@
     "sources": [
       {
         "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
-        "line": 1207
+        "line": 1342
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "autotrader",
+    "port": 11005,
+    "method": "GET",
+    "route": "/positions/auto-trader/trade-price-path",
+    "sources": [
+      {
+        "file": "src/rust/auto_trader/src/auto_trader/api/http_routes.rs",
+        "line": 1367
       }
     ],
     "financially_verified": false,
@@ -442,7 +456,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 102
+        "line": 158
       }
     ],
     "financially_verified": false,
@@ -456,7 +470,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 97
+        "line": 147
       }
     ],
     "financially_verified": false,
@@ -471,7 +485,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 98
+        "line": 148
       }
     ],
     "financially_verified": false,
@@ -486,7 +500,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 101
+        "line": 157
       }
     ],
     "financially_verified": false,
@@ -501,7 +515,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 119
+        "line": 179
       }
     ],
     "financially_verified": false,
@@ -516,7 +530,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 108
+        "line": 167
       }
     ],
     "financially_verified": false,
@@ -531,7 +545,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 100
+        "line": 151
       }
     ],
     "financially_verified": false,
@@ -542,11 +556,68 @@
     "service": "positions",
     "port": 11002,
     "method": "GET",
+    "route": "/positions/financial-snapshot",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 152
+      }
+    ],
+    "financially_verified": false,
+    "status": "HTTP_ERROR",
+    "http_status": 404
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/operational",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 149
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
     "route": "/positions/orders",
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 113
+        "line": 172
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/orders/history",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 178
+      }
+    ],
+    "financially_verified": false,
+    "status": "DISCOVERED_NOT_TESTED"
+  },
+  {
+    "service": "positions",
+    "port": 11002,
+    "method": "GET",
+    "route": "/positions/portfolio-evidence/intervals",
+    "sources": [
+      {
+        "file": "src/rust/position_management/src/positions/positions_routes.rs",
+        "line": 153
       }
     ],
     "financially_verified": false,
@@ -560,7 +631,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 99
+        "line": 150
       }
     ],
     "financially_verified": false,
@@ -575,7 +646,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 109
+        "line": 168
       }
     ],
     "financially_verified": false,
@@ -589,7 +660,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 107
+        "line": 166
       }
     ],
     "financially_verified": false,
@@ -604,7 +675,7 @@
     "sources": [
       {
         "file": "src/rust/position_management/src/positions/positions_routes.rs",
-        "line": 110
+        "line": 169
       }
     ],
     "financially_verified": false,

@@ -180,8 +180,10 @@ export function FeedControls({
       />
     );
     if (!compact) return content;
+    const widgetLabel =
+      WIDGET_LABELS[widget.type] ?? `Unavailable widget · ${widget.type}`;
     const description =
-      WIDGET_LABELS[widget.type] +
+      widgetLabel +
       (widget.type === 'chart' ||
       widget.type === 'book' ||
       widget.type === 'trades' ||

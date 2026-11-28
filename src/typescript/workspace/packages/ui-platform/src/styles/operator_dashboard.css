@@ -308,7 +308,7 @@
 
 .operator-compact-table {
   width: 100%;
-  min-width: 620px;
+  min-width: min(620px, 100%);
   border-collapse: collapse;
   color: var(--operator-text);
   font-size: 11px;
@@ -339,6 +339,34 @@
   padding: 6px 7px;
   border-top: 1px solid #353535;
   vertical-align: middle;
+}
+
+.auto-trader-excursions .operator-compact-table tr[data-selected='true'] {
+  background: color-mix(
+    in srgb,
+    var(--operator-surface-raised, #243140) 78%,
+    #638fce 22%
+  );
+}
+
+.auto-trader-excursions__trade-select {
+  padding: 0;
+  color: #a9c7ef;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.auto-trader-excursions__trade-select[aria-pressed='true'] {
+  color: var(--operator-text);
+  font-weight: 650;
+}
+
+.auto-trader-excursions__trade-select:focus-visible {
+  outline: 2px solid #8db5ea;
+  outline-offset: 2px;
 }
 
 .operator-sort-button {
@@ -499,7 +527,7 @@
 
 @media (max-width: 520px) {
   .operator-compact-table {
-    min-width: 540px;
+    min-width: min(540px, 100%);
   }
   .operator-net-pnl {
     min-width: 145px;

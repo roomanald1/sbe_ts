@@ -1,9 +1,25 @@
 const TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS: u64 = 1_000;
 const TRADE_PRICE_PATH_MAX_GAP_MS: u64 = 1_000;
+const TRADE_PRICE_PATH_FINE_WINDOW_MS: u64 = 30 * 60 * 1_000;
+const TRADE_PRICE_PATH_COARSE_INTERVAL_MS: u64 = 60 * 1_000;
 
-fn trade_price_path_sample_due(last_timestamp_ms: Option<u64>, observed_at_ms: u64) -> bool {
+fn trade_price_path_interval_ms(entry_timestamp_ms: u64, last_timestamp_ms: u64) -> u64 {
+    if last_timestamp_ms.saturating_sub(entry_timestamp_ms) < TRADE_PRICE_PATH_FINE_WINDOW_MS {
+        TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
+    } else {
+        TRADE_PRICE_PATH_COARSE_INTERVAL_MS
+    }
+}
+
+fn trade_price_path_sample_due(
+    last_timestamp_ms: Option<u64>,
+    entry_timestamp_ms: u64,
+    observed_at_ms: u64,
+) -> bool {
     last_timestamp_ms.is_none_or(|last| {
-        observed_at_ms.saturating_sub(last) >= TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
+        observed_at_ms >= last
+            && observed_at_ms.saturating_sub(last)
+                >= trade_price_path_interval_ms(entry_timestamp_ms, last)
     })
 }
 
@@ -32,14 +48,30 @@ fn gross_executable_return_percent(
     value.is_finite().then_some(value)
 }
 
+fn quote_source_event_identity<'a>(
+    quote_source_system: Option<&'a str>,
+    quote_source_epoch: Option<&'a str>,
+    quote_source_cursor: Option<u64>,
+    quote_source_record_id: Option<&'a str>,
+) -> Option<(&'a str, &'a str, u64, &'a str)> {
+    let system = quote_source_system.filter(|value| !value.trim().is_empty())?;
+    let epoch = quote_source_epoch.filter(|value| !value.trim().is_empty())?;
+    let cursor = quote_source_cursor.filter(|cursor| *cursor > 0)?;
+    let record_id = quote_source_record_id.filter(|value| !value.trim().is_empty())?;
+    Some((system, epoch, cursor, record_id))
+}
+
 fn record_event_driven_gross_excursion(
     position: &mut TraderPosition,
+    observed_at_ms: u64,
     return_percent: Option<f64>,
-    quote_identity_complete: bool,
+    quote_identity: Option<(&str, &str, u64, &str)>,
     freshness_complete: bool,
-    cadence_complete: bool,
-    first_sample: bool,
-) {
+) -> bool {
+    if position.price_path_restart_interrupted {
+        position.price_path_event_metrics_complete = false;
+    }
+    let quote_identity_complete = quote_identity.is_some();
     if let Some(value) = return_percent.filter(|value| value.is_finite()) {
         position.price_path_gross_mfe_percent = Some(
             position
@@ -51,14 +83,53 @@ fn record_event_driven_gross_excursion(
                 .price_path_gross_mae_percent
                 .map_or(value, |prior| prior.min(value)),
         );
+    }
+    let Some((system, epoch, cursor, record_id)) = quote_identity else {
+        position.price_path_event_metrics_complete = false;
+        return false;
+    };
+    if position
+        .price_path_last_event_quote_source_system
+        .as_deref()
+        == Some(system)
+        && position.price_path_last_event_quote_source_epoch.as_deref() == Some(epoch)
+        && position.price_path_last_event_quote_source_cursor == Some(cursor)
+        && position
+            .price_path_last_event_quote_source_record_id
+            .as_deref()
+            == Some(record_id)
+    {
+        return false;
+    }
+    let first_event = position.price_path_event_sample_count == 0;
+    let cadence_complete =
+        if let Some(previous_timestamp) = position.price_path_last_event_timestamp_ms {
+            let gap_ms = observed_at_ms.saturating_sub(previous_timestamp);
+            position.price_path_event_maximum_gap_ms =
+                position.price_path_event_maximum_gap_ms.max(gap_ms);
+            observed_at_ms > previous_timestamp && gap_ms <= TRADE_PRICE_PATH_MAX_GAP_MS
+        } else {
+            position.entry_timestamp_ms > 0
+                && observed_at_ms >= position.entry_timestamp_ms
+                && observed_at_ms.saturating_sub(position.entry_timestamp_ms)
+                    <= TRADE_PRICE_PATH_MAX_GAP_MS
+        };
+    let event_has_return = return_percent.is_some_and(f64::is_finite);
+    if event_has_return {
         position.price_path_event_sample_count =
             position.price_path_event_sample_count.saturating_add(1);
     }
-    if !quote_identity_complete || !freshness_complete || !cadence_complete {
+    if !quote_identity_complete || !freshness_complete || !event_has_return || !cadence_complete {
         position.price_path_event_metrics_complete = false;
-    } else if first_sample {
+    } else if first_event && !position.price_path_restart_interrupted {
         position.price_path_event_metrics_complete = true;
     }
+    position.price_path_last_event_quote_source_system = Some(system.to_owned());
+    position.price_path_last_event_quote_source_epoch = Some(epoch.to_owned());
+    position.price_path_last_event_quote_source_cursor = Some(cursor);
+    position.price_path_last_event_quote_source_record_id = Some(record_id.to_owned());
+    position.price_path_last_event_timestamp_ms = Some(observed_at_ms);
+    true
 }
 
 fn price_path_threshold_crossings_for_event(
@@ -404,14 +475,16 @@ fn price_path_excursion_evidence(
         serde_json::json!(position.price_path_gross_mae_percent);
     evidence["event_driven_sample_count"] =
         serde_json::json!(position.price_path_event_sample_count);
-    evidence["event_driven_metrics_complete"] =
-        serde_json::json!(position.price_path_event_metrics_complete);
-    evidence["event_driven_metrics_attribution"] =
-        serde_json::json!(if position.price_path_event_metrics_complete {
-            "fresh_source_identity_within_one_second_cadence"
-        } else {
-            "incomplete_or_unverified_source_cadence"
-        });
+    evidence["event_driven_maximum_gap_ms"] =
+        serde_json::json!(position.price_path_event_maximum_gap_ms);
+    let event_metrics_complete =
+        position.price_path_event_metrics_complete && !position.price_path_restart_interrupted;
+    evidence["event_driven_metrics_complete"] = serde_json::json!(event_metrics_complete);
+    evidence["event_driven_metrics_attribution"] = serde_json::json!(if event_metrics_complete {
+        "fresh_source_identity_within_one_second_cadence"
+    } else {
+        "incomplete_or_unverified_source_cadence"
+    });
     let identity = position.lifecycle_identity.as_ref();
     let identity_complete = identity.is_some_and(|identity| {
         identity.schema_version == 1
@@ -1312,17 +1385,57 @@ mod tests {
 
     #[test]
     fn trade_price_path_samples_no_slower_than_one_second_when_events_arrive() {
-        assert!(trade_price_path_sample_due(None, 1_000));
-        assert!(!trade_price_path_sample_due(Some(1_000), 1_999));
-        assert!(trade_price_path_sample_due(Some(1_000), 2_000));
-        assert!(!trade_price_path_sample_due(Some(2_000), 1_000));
+        assert!(trade_price_path_sample_due(None, 0, 1_000));
+        assert!(!trade_price_path_sample_due(Some(1_000), 0, 1_999));
+        assert!(trade_price_path_sample_due(Some(1_000), 0, 2_000));
+        assert!(!trade_price_path_sample_due(Some(2_000), 0, 1_000));
+    }
+
+    #[test]
+    fn trade_price_path_switches_to_sixty_second_snapshots_after_thirty_minutes() {
+        let entry = 10_000_u64;
+        let fine_boundary = entry + TRADE_PRICE_PATH_FINE_WINDOW_MS;
+        let last_fine_sample = fine_boundary - 1_000;
+        assert_eq!(
+            trade_price_path_interval_ms(entry, last_fine_sample),
+            TRADE_PRICE_PATH_SAMPLE_INTERVAL_MS
+        );
+        assert!(trade_price_path_sample_due(
+            Some(last_fine_sample),
+            entry,
+            fine_boundary
+        ));
+        assert_eq!(
+            trade_price_path_interval_ms(entry, fine_boundary),
+            TRADE_PRICE_PATH_COARSE_INTERVAL_MS
+        );
+        assert!(!trade_price_path_sample_due(
+            Some(fine_boundary),
+            entry,
+            fine_boundary + TRADE_PRICE_PATH_COARSE_INTERVAL_MS - 1
+        ));
+        assert!(trade_price_path_sample_due(
+            Some(fine_boundary),
+            entry,
+            fine_boundary + TRADE_PRICE_PATH_COARSE_INTERVAL_MS
+        ));
+        let multi_day = entry + 3 * 86_400_000;
+        assert_eq!(
+            trade_price_path_interval_ms(entry, multi_day),
+            TRADE_PRICE_PATH_COARSE_INTERVAL_MS
+        );
+        assert!(trade_price_path_sample_due(
+            Some(multi_day),
+            entry,
+            multi_day + TRADE_PRICE_PATH_COARSE_INTERVAL_MS
+        ));
     }
 
     #[test]
     fn event_driven_gross_excursion_uses_executable_side_for_long_and_short() {
-        assert_eq!(
-            gross_executable_return_percent(1.0, 100.0, 103.0, 104.0),
-            Some(3.0)
+        assert!(
+            (gross_executable_return_percent(1.0, 100.0, 103.0, 104.0).unwrap() - 3.0).abs()
+                < 1e-12
         );
         assert!(
             (gross_executable_return_percent(-1.0, 100.0, 96.0, 97.0).unwrap()
@@ -1338,14 +1451,93 @@ mod tests {
 
     #[test]
     fn event_driven_excursion_aggregates_monotonically_and_fails_closed_on_gap_or_identity() {
-        let mut position = TraderPosition::default();
-        record_event_driven_gross_excursion(&mut position, Some(1.0), true, true, true, true);
-        record_event_driven_gross_excursion(&mut position, Some(-2.0), true, true, true, false);
-        record_event_driven_gross_excursion(&mut position, Some(0.5), false, true, true, false);
+        let mut position = TraderPosition {
+            entry_timestamp_ms: 1_000,
+            ..TraderPosition::default()
+        };
+        let identity = |cursor: u64| {
+            let record = match cursor {
+                1 => "quote-1",
+                2 => "quote-2",
+                _ => "quote-3",
+            };
+            quote_source_event_identity(
+                Some("paper_exchange"),
+                Some("epoch-1"),
+                Some(cursor),
+                Some(record),
+            )
+        };
+        assert!(record_event_driven_gross_excursion(
+            &mut position,
+            2_000,
+            Some(1.0),
+            identity(1),
+            true
+        ));
+        assert!(!record_event_driven_gross_excursion(
+            &mut position,
+            2_100,
+            Some(0.5),
+            identity(1),
+            true
+        ));
+        assert!(record_event_driven_gross_excursion(
+            &mut position,
+            3_000,
+            Some(-2.0),
+            identity(2),
+            true
+        ));
+        assert!(record_event_driven_gross_excursion(
+            &mut position,
+            5_000,
+            Some(0.5),
+            identity(3),
+            true
+        ));
+        assert!(!record_event_driven_gross_excursion(
+            &mut position,
+            6_000,
+            None,
+            None,
+            true
+        ));
         assert_eq!(position.price_path_gross_mfe_percent, Some(1.0));
         assert_eq!(position.price_path_gross_mae_percent, Some(-2.0));
         assert_eq!(position.price_path_event_sample_count, 3);
+        assert_eq!(position.price_path_event_maximum_gap_ms, 2_000);
         assert!(!position.price_path_event_metrics_complete);
+    }
+
+    #[test]
+    fn event_driven_extrema_continue_between_coarse_raw_snapshots() {
+        let entry = 1_000_u64;
+        let coarse_started = entry + TRADE_PRICE_PATH_FINE_WINDOW_MS;
+        assert!(!trade_price_path_sample_due(
+            Some(coarse_started),
+            entry,
+            coarse_started + 1_000
+        ));
+        let mut position = TraderPosition {
+            entry_timestamp_ms: entry,
+            ..TraderPosition::default()
+        };
+        let identity = quote_source_event_identity(
+            Some("paper_exchange"),
+            Some("epoch-1"),
+            Some(10),
+            Some("quote-10"),
+        );
+        assert!(record_event_driven_gross_excursion(
+            &mut position,
+            coarse_started + 1_000,
+            Some(1.25),
+            identity,
+            true
+        ));
+        assert_eq!(position.price_path_gross_mfe_percent, Some(1.25));
+        assert_eq!(position.price_path_event_sample_count, 1);
     }
 
     #[test]
@@ -1829,11 +2021,11 @@ mod tests {
             timestamp,
             bid,
             ask,
-            sequence: timestamp / 5_000,
+            sequence: timestamp / 1_000,
             epoch: Some("test-path-epoch".into()),
             source_updated_at_ms: Some(timestamp.saturating_sub(100)),
             freshness_contract_version: Some(1),
-            freshness_max_age_ms: Some(5_000),
+            freshness_max_age_ms: Some(1_000),
             source_fresh: Some(true),
             ..TradePriceSample::default()
         };
@@ -1844,13 +2036,13 @@ mod tests {
             price_path_epoch: Some("test-path-epoch".into()),
             price_path: vec![
                 fresh_sample(10_000, 101.0, 102.0),
-                fresh_sample(15_000, 98.0, 99.0),
-                fresh_sample(20_000, 103.0, 104.0),
+                fresh_sample(11_000, 98.0, 99.0),
+                fresh_sample(12_000, 103.0, 104.0),
             ],
             price_path_total_samples: 3,
             ..TraderPosition::default()
         };
-        let evidence = price_path_excursion_evidence(&long, 25_000);
+        let evidence = price_path_excursion_evidence(&long, 12_000);
         assert_eq!(evidence["continuity_complete"], true);
         assert_eq!(evidence["complete"], false);
         assert_eq!(evidence["identity_complete"], false);
@@ -1862,8 +2054,8 @@ mod tests {
         );
 
         let mut discontinuous = long.clone();
-        discontinuous.price_path[2].sequence = 5;
-        let discontinuity_evidence = price_path_excursion_evidence(&discontinuous, 25_000);
+        discontinuous.price_path[2].sequence = 13;
+        let discontinuity_evidence = price_path_excursion_evidence(&discontinuous, 12_000);
         assert_eq!(discontinuity_evidence["complete"], false);
         assert!(
             discontinuity_evidence["missing_coverage"]
@@ -1880,13 +2072,13 @@ mod tests {
             price_path_epoch: Some("test-path-epoch".into()),
             price_path: vec![
                 fresh_sample(10_000, 98.0, 99.0),
-                fresh_sample(15_000, 101.0, 102.0),
-                fresh_sample(20_000, 96.0, 97.0),
+                fresh_sample(11_000, 101.0, 102.0),
+                fresh_sample(12_000, 96.0, 97.0),
             ],
             price_path_total_samples: 3,
             ..TraderPosition::default()
         };
-        let short_evidence = price_path_excursion_evidence(&short, 25_000);
+        let short_evidence = price_path_excursion_evidence(&short, 12_000);
         assert_eq!(short_evidence["continuity_complete"], true);
         assert_eq!(short_evidence["complete"], false);
         assert!(

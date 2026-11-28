@@ -33,6 +33,7 @@ def query(service, endpoint, max_bytes=4000000, since=None, params=None):
             ("positions", "trades"),
             ("positions", "portfolio-evidence-intervals"),
             ("paper_exchange", "financial-evidence"),
+            ("paper_exchange", "market-mark"),
         }:
             raise RuntimeError("Query parameters are unsupported for this read-only route")
         request["params"] = params

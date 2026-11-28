@@ -2847,7 +2847,7 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
     let observed_at_ms = current_time_ms();
     let horizon_ms = 30 * 60 * 1_000;
     let exit_timestamp_ms = observed_at_ms.saturating_sub(horizon_ms);
-    let entry_timestamp_ms = exit_timestamp_ms.saturating_sub(20_000);
+    let entry_timestamp_ms = exit_timestamp_ms.saturating_sub(4_000);
     let path_epoch = "auto-trader-position-path:v1:fixture:trade-1";
     let entry_fill_id = "pm-fill:v1:fixture-entry:1";
     let exit_fill_id = "pm-fill:v1:fixture-exit:1";
@@ -2889,16 +2889,17 @@ async fn executable_path_restart_and_learning_gate_exclude_interrupted_trade_evi
         .into_iter()
         .enumerate()
         .map(|(index, bid)| {
-            let timestamp = entry_timestamp_ms + (index as u64 + 1) * 5_000;
+            let sequence = index as u64 + 1;
+            let timestamp = entry_timestamp_ms + sequence * 1_000;
             TradePriceSample {
                 timestamp,
                 bid,
                 ask: bid + 0.02,
-                sequence: index as u64 + 1,
+                sequence,
                 epoch: Some(path_epoch.to_owned()),
                 source_updated_at_ms: Some(timestamp.saturating_sub(10)),
                 freshness_contract_version: Some(1),
-                freshness_max_age_ms: Some(5_000),
+                freshness_max_age_ms: Some(1_000),
                 source_fresh: Some(true),
                 quote_source_system: Some("paper_exchange.market_data_cache".into()),
                 quote_source_epoch: Some("fixture-market-epoch".into()),

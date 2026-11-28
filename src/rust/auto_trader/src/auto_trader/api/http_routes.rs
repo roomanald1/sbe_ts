@@ -1368,6 +1368,10 @@ pub fn router_with_socket() -> (Router, AutoTraderSocketApi) {
             "/positions/auto-trader/trade-price-path",
             get(get_trade_price_path),
         )
+        .route(
+            "/positions/auto-trader/trade-price-path/what-if",
+            axum::routing::post(post_trade_price_path_what_if),
+        )
         .route("/internal/monitoring-metrics", get(get_monitoring_metrics))
         .route(
             "/internal/strategy/open-position-counts",

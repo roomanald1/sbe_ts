@@ -35,7 +35,7 @@ const BREAKEVEN_ACTIVATION_KEY: &str = "breakeven_activation_percent";
 const MAX_EXIT_PARAMETER_PERCENT: f64 = 10.0;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-pub(crate) struct ProfitProtectionParameters {
+pub struct ProfitProtectionParameters {
     pub stop_loss_percent: f64,
     pub take_profit_percent: f64,
     pub activation_percent: f64,
@@ -1740,6 +1740,778 @@ fn parse_observation(
     })
 }
 
+fn replay_exit_reason_name(reason: ReplayExitReason) -> &'static str {
+    match reason {
+        ReplayExitReason::StopLoss => "stop_loss",
+        ReplayExitReason::BreakevenProtection => "breakeven_protection",
+        ReplayExitReason::TrailingStop => "trailing_stop",
+        ReplayExitReason::ProfitProtection => "profit_protection",
+        ReplayExitReason::MaximumHold => "maximum_hold",
+        ReplayExitReason::TakeProfit => "take_profit",
+        ReplayExitReason::Horizon => "horizon",
+    }
+}
+
+#[derive(Clone)]
+struct DurableReplayFeeSchedule {
+    id: String,
+    version: String,
+    effective_from_ms: u64,
+    effective_to_ms: Option<u64>,
+    maker_rate: f64,
+    taker_rate: f64,
+    source_event_id: String,
+    source_epoch: String,
+    source_cursor: u64,
+    source_record_id: String,
+    source_timestamp_ms: u64,
+}
+
+impl DurableReplayFeeSchedule {
+    fn covers(&self, timestamp_ms: u64) -> bool {
+        self.effective_from_ms <= timestamp_ms
+            && self.effective_to_ms.is_none_or(|to| timestamp_ms < to)
+    }
+}
+
+#[derive(Clone)]
+struct StreamingPolicyState {
+    parameters: ProfitProtectionParameters,
+    peak_net_return_percent: f64,
+    outcome: Option<ReplayOutcome>,
+    exit_source: Option<Value>,
+}
+
+impl StreamingPolicyState {
+    fn new(parameters: ProfitProtectionParameters) -> Self {
+        Self {
+            parameters,
+            peak_net_return_percent: f64::NEG_INFINITY,
+            outcome: None,
+            exit_source: None,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        timestamp_ms: u64,
+        executable_price: f64,
+        net_return_percent: f64,
+        entry_timestamp_ms: u64,
+        maximum_hold_ms: Option<u64>,
+        sample: &Value,
+    ) {
+        if self.outcome.is_some() {
+            return;
+        }
+        self.peak_net_return_percent = self.peak_net_return_percent.max(net_return_percent);
+        let parameters = self.parameters;
+        let reason = if net_return_percent <= -parameters.stop_loss_percent {
+            Some(ReplayExitReason::StopLoss)
+        } else if parameters
+            .breakeven_activation_percent
+            .is_some_and(|activation| {
+                self.peak_net_return_percent >= activation && net_return_percent <= 0.0
+            })
+        {
+            Some(ReplayExitReason::BreakevenProtection)
+        } else if let (Some(activation), Some(distance)) = (
+            parameters.trailing_activation_percent,
+            parameters.trailing_distance_percent,
+        ) && self.peak_net_return_percent >= activation
+            && net_return_percent <= self.peak_net_return_percent - distance
+        {
+            Some(ReplayExitReason::TrailingStop)
+        } else if self.peak_net_return_percent >= parameters.activation_percent
+            && net_return_percent
+                <= (self.peak_net_return_percent - parameters.giveback_percent)
+                    .max(parameters.minimum_lock_percent)
+        {
+            Some(ReplayExitReason::ProfitProtection)
+        } else if maximum_hold_ms
+            .is_some_and(|maximum| timestamp_ms.saturating_sub(entry_timestamp_ms) >= maximum)
+        {
+            Some(ReplayExitReason::MaximumHold)
+        } else if net_return_percent >= parameters.take_profit_percent {
+            Some(ReplayExitReason::TakeProfit)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.outcome = Some(ReplayOutcome {
+                net_return_percent,
+                exit_price: executable_price,
+                exit_timestamp_ms: timestamp_ms,
+                exit_reason: reason,
+            });
+            self.exit_source = Some(sample.clone());
+        }
+    }
+
+    fn finish(
+        &mut self,
+        last_timestamp_ms: u64,
+        last_executable_price: f64,
+        last_net_return_percent: f64,
+        last_sample: &Value,
+    ) -> Option<()> {
+        if self.outcome.is_none() {
+            self.outcome = Some(ReplayOutcome {
+                net_return_percent: last_net_return_percent,
+                exit_price: last_executable_price,
+                exit_timestamp_ms: last_timestamp_ms,
+                exit_reason: ReplayExitReason::Horizon,
+            });
+            self.exit_source = Some(last_sample.clone());
+        }
+        Some(())
+    }
+}
+
+/// Bounded-memory replay state. Callers stream chronological SQLite pages via
+/// `push_sample`; no full path vector or per-quote fee map is retained.
+pub struct DurableTradeWhatIfReplay {
+    context: Value,
+    trade_id: String,
+    symbol: String,
+    strategy_name: String,
+    quote_currency: String,
+    path_epoch: String,
+    total_sample_count: u64,
+    entry_price: f64,
+    quantity: f64,
+    direction: f64,
+    entry_fees: f64,
+    entry_notional: f64,
+    entry_timestamp_ms: u64,
+    exit_timestamp_ms: u64,
+    horizon_ms: u64,
+    baseline_maximum_hold_ms: Option<u64>,
+    baseline_maximum_hold_days: Option<f64>,
+    candidate_maximum_hold_ms: Option<u64>,
+    candidate_maximum_hold_days: Option<f64>,
+    schedules: Vec<DurableReplayFeeSchedule>,
+    baseline: StreamingPolicyState,
+    candidate: StreamingPolicyState,
+    candidate_policy_id: String,
+    candidate_policy_version: String,
+    threshold_crossings: Vec<Value>,
+    matched_threshold_crossings: usize,
+    sample_count: u64,
+    post_exit_sample_count: u64,
+    previous_timestamp_ms: Option<u64>,
+    previous_sequence: Option<u64>,
+    first_timestamp_ms: Option<u64>,
+    last_timestamp_ms: Option<u64>,
+    first_post_exit_ms: Option<u64>,
+    last_post_exit_ms: Option<u64>,
+    previous_post_exit_ms: Option<u64>,
+    maximum_post_exit_gap_ms: u64,
+    last_sample: Option<Value>,
+    last_net_return_percent: Option<f64>,
+}
+
+impl DurableTradeWhatIfReplay {
+    pub fn new(
+        context: &Value,
+        path_metadata: &Value,
+        candidate_policy_id: &str,
+        candidate_policy_version: &str,
+        candidate: ProfitProtectionParameters,
+    ) -> Option<Self> {
+        Self::new_with_maximum_holding_duration(
+            context,
+            path_metadata,
+            candidate_policy_id,
+            candidate_policy_version,
+            candidate,
+            None,
+        )
+    }
+
+    pub fn new_with_maximum_holding_duration(
+        context: &Value,
+        path_metadata: &Value,
+        candidate_policy_id: &str,
+        candidate_policy_version: &str,
+        candidate: ProfitProtectionParameters,
+        candidate_maximum_holding_duration_days: Option<f64>,
+    ) -> Option<Self> {
+        let trade_id = context["trade_id"].as_str()?.trim();
+        let symbol = context["symbol"].as_str()?;
+        let strategy_name = context["strategy"].as_str()?;
+        let quote_currency = symbol.rsplit_once('-')?.1;
+        let path_epoch = path_metadata["path_epoch"].as_str()?;
+        let total_sample_count = path_metadata["sample_count"].as_u64()?;
+        if trade_id.is_empty()
+            || context["durable_context_schema_version"].as_u64() != Some(1)
+            || path_metadata["trade_id"].as_str()? != trade_id
+            || path_metadata["history_complete"].as_bool() != Some(true)
+            || path_metadata["complete"].as_bool() != Some(true)
+            || path_metadata["segment_count"].as_u64() != Some(1)
+            || total_sample_count == 0
+            || !valid_evidence_identifier(Some(candidate_policy_id))
+            || !valid_evidence_identifier(Some(candidate_policy_version))
+            || !valid_policy_parameters(candidate)
+        {
+            return None;
+        }
+        let entry = &context["entry_context"];
+        let entry_price = entry["average_price"].as_f64()?;
+        let quantity = entry["quantity"].as_f64()?;
+        let entry_timestamp_ms = entry["timestamp_ms"].as_u64()?;
+        let entry_fees = entry_fee_quote(entry, Some(quote_currency))?;
+        let entry_notional = entry_price * quantity;
+        let direction = match context["side"].as_str()? {
+            "sell" => 1.0,
+            "buy" => -1.0,
+            _ => return None,
+        };
+        if !entry_price.is_finite()
+            || entry_price <= 0.0
+            || !quantity.is_finite()
+            || quantity <= 0.0
+            || !entry_notional.is_finite()
+            || entry_notional <= 0.0
+        {
+            return None;
+        }
+        let exit_timestamp_ms = context["exit_timestamp_ms"].as_u64()?;
+        let horizon_ms = context["horizon_ms"].as_u64()?;
+        if exit_timestamp_ms == 0
+            || horizon_ms == 0
+            || context["observed_at_ms"].as_u64()? < exit_timestamp_ms
+            || context["exit_fill_evidence"]["fees_complete"].as_bool() != Some(true)
+            || context["exit_fill_evidence"]["fills"]
+                .as_array()?
+                .is_empty()
+            || context["independent_reconciliation"]["status"].as_str() != Some("reconciled")
+            || context["independent_reconciliation"]["source"].as_str()
+                != Some("paper_exchange_execution_ledger")
+            || !valid_evidence_identifier(
+                context["independent_reconciliation"]["evidence_epoch_id"].as_str(),
+            )
+        {
+            return None;
+        }
+        let provenance = &context["exit_parameter_provenance"];
+        let entry_decision = &entry["strategy_decision"];
+        if provenance["schema_version"].as_u64() != Some(1)
+            || provenance["profile_id"].as_str().is_none_or(str::is_empty)
+            || provenance["profile_version"].as_u64().is_none()
+            || provenance["profile_id"] != entry_decision["learning_profile_id"]
+            || provenance["profile_version"] != entry_decision["learning_profile_version"]
+            || (provenance["exit_policy_profile_id"].is_string()
+                != provenance["exit_policy_profile_version"].is_u64())
+        {
+            return None;
+        }
+        let initial_risk = &entry["initial_risk_reference"];
+        if initial_risk["schema_version"].as_u64() != Some(1)
+            || initial_risk["status"].as_str() != Some("complete")
+            || initial_risk["quote_currency"].as_str() != Some(quote_currency)
+            || initial_risk["quote_amount"]
+                .as_f64()
+                .is_none_or(|risk| !risk.is_finite() || risk <= 0.0)
+        {
+            return None;
+        }
+        let stop_loss = context["effective_stop_loss_percent"].as_f64()?;
+        let take_profit = context["effective_take_profit_percent"].as_f64()?;
+        let parameters = &entry_decision["strategy_parameters"];
+        let baseline = ProfitProtectionParameters {
+            stop_loss_percent: stop_loss,
+            take_profit_percent: take_profit,
+            activation_percent: parameters[ACTIVATION_KEY].as_f64()?,
+            giveback_percent: parameters[GIVEBACK_KEY].as_f64()?,
+            minimum_lock_percent: parameters[MINIMUM_LOCK_KEY].as_f64()?,
+            trailing_activation_percent: parameters[TRAILING_ACTIVATION_KEY].as_f64(),
+            trailing_distance_percent: parameters[TRAILING_DISTANCE_KEY].as_f64(),
+            breakeven_activation_percent: parameters[BREAKEVEN_ACTIVATION_KEY].as_f64(),
+        };
+        if !valid_exit_policy_inputs(stop_loss, take_profit, baseline) {
+            return None;
+        }
+        let captured_maximum_hold_spec = captured_maximum_hold_days_spec(context);
+        let captured_baseline_maximum_hold_ms =
+            context["exit_parameter_provenance"]["maximum_holding_duration"]["effective_ms"]
+                .as_u64()
+                .or_else(|| {
+                    context["exit_parameter_provenance"]["maximum_holding_duration"]["selected_ms"]
+                        .as_u64()
+                });
+        let baseline_maximum_hold_ms = if let Some(duration_ms) = captured_baseline_maximum_hold_ms
+        {
+            if duration_ms == 0 {
+                return None;
+            }
+            Some(duration_ms)
+        } else if let Some(days) = parameters["maximum_hold_days"].as_f64() {
+            if !days.is_finite() || days <= 0.0 {
+                return None;
+            }
+            Some(hold_duration_days_to_ms(days)?)
+        } else {
+            None
+        };
+        let baseline_maximum_hold_days =
+            baseline_maximum_hold_ms.map(|duration_ms| duration_ms as f64 / MS_PER_DAY);
+        let candidate_maximum_hold_ms = if let Some(days) = candidate_maximum_holding_duration_days
+        {
+            let (_, min, max, step) = captured_maximum_hold_spec?;
+            if !valid_hold_days_in_captured_spec(days, min, max, step) {
+                return None;
+            }
+            Some(hold_duration_days_to_ms(days)?)
+        } else {
+            baseline_maximum_hold_ms
+        };
+        let candidate_maximum_hold_days =
+            candidate_maximum_holding_duration_days.or(baseline_maximum_hold_days);
+        let schedules = durable_replay_fee_schedules(
+            &context["counterfactual_exit_fee_attribution"],
+            symbol,
+            quote_currency,
+        )?;
+        validate_durable_replay_fills(context, quote_currency, &schedules)?;
+        let threshold_crossings = context["pre_exit_price_path_evidence"]["threshold_crossings"]
+            .as_array()?
+            .clone();
+        let mut prior_crossing = None;
+        for crossing in &threshold_crossings {
+            let timestamp = crossing["timestamp_ms"].as_u64()?;
+            if prior_crossing.is_some_and(|prior| timestamp < prior)
+                || crossing["position_path_epoch"].as_str() != Some(path_epoch)
+                || !valid_evidence_identifier(crossing["quote_source_system"].as_str())
+                || !valid_evidence_identifier(crossing["quote_source_epoch"].as_str())
+                || crossing["quote_source_cursor"]
+                    .as_u64()
+                    .is_none_or(|cursor| cursor == 0)
+                || !valid_evidence_identifier(crossing["quote_source_record_id"].as_str())
+            {
+                return None;
+            }
+            prior_crossing = Some(timestamp);
+        }
+        Some(Self {
+            context: context.clone(),
+            trade_id: trade_id.to_owned(),
+            symbol: symbol.to_owned(),
+            strategy_name: strategy_name.to_owned(),
+            quote_currency: quote_currency.to_owned(),
+            path_epoch: path_epoch.to_owned(),
+            total_sample_count,
+            entry_price,
+            quantity,
+            direction,
+            entry_fees,
+            entry_notional,
+            entry_timestamp_ms,
+            exit_timestamp_ms,
+            horizon_ms,
+            baseline_maximum_hold_ms,
+            baseline_maximum_hold_days,
+            candidate_maximum_hold_ms,
+            candidate_maximum_hold_days,
+            schedules,
+            baseline: StreamingPolicyState::new(baseline),
+            candidate: StreamingPolicyState::new(candidate),
+            candidate_policy_id: candidate_policy_id.to_owned(),
+            candidate_policy_version: candidate_policy_version.to_owned(),
+            threshold_crossings,
+            matched_threshold_crossings: 0,
+            sample_count: 0,
+            post_exit_sample_count: 0,
+            previous_timestamp_ms: None,
+            previous_sequence: None,
+            first_timestamp_ms: None,
+            last_timestamp_ms: None,
+            first_post_exit_ms: None,
+            last_post_exit_ms: None,
+            previous_post_exit_ms: None,
+            maximum_post_exit_gap_ms: 0,
+            last_sample: None,
+            last_net_return_percent: None,
+        })
+    }
+
+    pub fn push_sample(&mut self, sample: &Value) -> bool {
+        let Some(timestamp) = sample["timestamp"].as_u64() else {
+            return false;
+        };
+        let Some(sequence) = sample["sequence"].as_u64() else {
+            return false;
+        };
+        let Some(epoch) = sample["epoch"].as_str() else {
+            return false;
+        };
+        let Some(bid) = sample["bid"].as_f64() else {
+            return false;
+        };
+        let Some(ask) = sample["ask"].as_f64() else {
+            return false;
+        };
+        let Some(source_updated_at) = sample["source_updated_at_ms"].as_u64() else {
+            return false;
+        };
+        let Some(max_age) = sample["freshness_max_age_ms"].as_u64() else {
+            return false;
+        };
+        if timestamp == 0
+            || timestamp > self.context["observed_at_ms"].as_u64().unwrap_or_default()
+            || sequence == 0
+            || epoch != self.path_epoch
+            || !bid.is_finite()
+            || bid <= 0.0
+            || !ask.is_finite()
+            || ask < bid
+            || sample["source_fresh"].as_bool() != Some(true)
+            || sample["freshness_contract_version"].as_u64() != Some(1)
+            || max_age == 0
+            || source_updated_at > timestamp
+            || timestamp.saturating_sub(source_updated_at) > max_age
+            || !valid_evidence_identifier(sample["quote_source_system"].as_str())
+            || !valid_evidence_identifier(sample["quote_source_epoch"].as_str())
+            || sample["quote_source_cursor"]
+                .as_u64()
+                .is_none_or(|cursor| cursor == 0)
+            || !valid_evidence_identifier(sample["quote_source_record_id"].as_str())
+            || self.previous_timestamp_ms.is_some_and(|previous| {
+                timestamp <= previous || timestamp.saturating_sub(previous) > 1_000
+            })
+            || self
+                .previous_sequence
+                .is_some_and(|previous| sequence != previous.saturating_add(1))
+            || (self.sample_count == 0 && sequence != 1)
+            || (self.sample_count == 0 && timestamp.saturating_sub(self.entry_timestamp_ms) > 1_000)
+        {
+            return false;
+        }
+        let covering = self
+            .schedules
+            .iter()
+            .filter(|schedule| {
+                schedule.covers(timestamp) && schedule.source_timestamp_ms <= timestamp
+            })
+            .collect::<Vec<_>>();
+        if covering.len() != 1 {
+            return false;
+        }
+        let fee_rate = covering[0].taker_rate;
+        let executable = if self.direction > 0.0 { bid } else { ask };
+        let exit_fee_quote = executable * self.quantity * fee_rate;
+        let net_return_percent = ((executable - self.entry_price) * self.quantity * self.direction
+            - self.entry_fees
+            - exit_fee_quote)
+            / self.entry_notional
+            * 100.0;
+        if !net_return_percent.is_finite() {
+            return false;
+        }
+        while let Some(crossing) = self
+            .threshold_crossings
+            .get(self.matched_threshold_crossings)
+        {
+            let crossing_timestamp = crossing["timestamp_ms"].as_u64().unwrap_or_default();
+            if crossing_timestamp < timestamp {
+                return false;
+            }
+            if crossing_timestamp > timestamp {
+                break;
+            }
+            if crossing["quote_source_epoch"] != sample["quote_source_epoch"]
+                || crossing["quote_source_cursor"] != sample["quote_source_cursor"]
+                || crossing["quote_source_record_id"] != sample["quote_source_record_id"]
+            {
+                return false;
+            }
+            self.matched_threshold_crossings += 1;
+        }
+        self.baseline.observe(
+            timestamp,
+            executable,
+            net_return_percent,
+            self.entry_timestamp_ms,
+            self.baseline_maximum_hold_ms,
+            sample,
+        );
+        self.candidate.observe(
+            timestamp,
+            executable,
+            net_return_percent,
+            self.entry_timestamp_ms,
+            self.candidate_maximum_hold_ms,
+            sample,
+        );
+        if timestamp >= self.exit_timestamp_ms {
+            self.post_exit_sample_count = self.post_exit_sample_count.saturating_add(1);
+            if let Some(previous) = self.previous_post_exit_ms {
+                self.maximum_post_exit_gap_ms = self
+                    .maximum_post_exit_gap_ms
+                    .max(timestamp.saturating_sub(previous));
+            } else {
+                self.first_post_exit_ms = Some(timestamp);
+            }
+            self.last_post_exit_ms = Some(timestamp);
+            self.previous_post_exit_ms = Some(timestamp);
+        }
+        self.first_timestamp_ms.get_or_insert(timestamp);
+        self.last_timestamp_ms = Some(timestamp);
+        self.previous_timestamp_ms = Some(timestamp);
+        self.previous_sequence = Some(sequence);
+        self.sample_count = self.sample_count.saturating_add(1);
+        self.last_sample = Some(sample.clone());
+        self.last_net_return_percent = Some(net_return_percent);
+        true
+    }
+
+    pub fn processed_sample_count(&self) -> u64 {
+        self.sample_count
+    }
+
+    pub fn finish(mut self) -> Option<Value> {
+        if self.sample_count != self.total_sample_count
+            || self.matched_threshold_crossings != self.threshold_crossings.len()
+            || self
+                .first_timestamp_ms
+                .is_none_or(|first| first.saturating_sub(self.entry_timestamp_ms) > 1_000)
+        {
+            return None;
+        }
+        let first_post = self.first_post_exit_ms?;
+        let last_post = self.last_post_exit_ms?;
+        let edge_gap_limit = self
+            .horizon_ms
+            .saturating_mul(MAX_POST_EXIT_PATH_GAP_PERCENT)
+            / 100;
+        let coverage_required = self.horizon_ms.saturating_mul(MIN_HORIZON_COVERAGE_PERCENT) / 100;
+        if self.post_exit_sample_count < MIN_POST_EXIT_PATH_SAMPLES as u64
+            || first_post.saturating_sub(self.exit_timestamp_ms) > edge_gap_limit
+            || last_post.saturating_sub(self.exit_timestamp_ms) < coverage_required
+            || self.maximum_post_exit_gap_ms > edge_gap_limit
+        {
+            return None;
+        }
+        let last_sample = self.last_sample.as_ref()?;
+        let last_timestamp = self.last_timestamp_ms?;
+        let last_executable = if self.direction > 0.0 {
+            last_sample["bid"].as_f64()?
+        } else {
+            last_sample["ask"].as_f64()?
+        };
+        let last_net = self.last_net_return_percent?;
+        self.baseline
+            .finish(last_timestamp, last_executable, last_net, last_sample)?;
+        self.candidate
+            .finish(last_timestamp, last_executable, last_net, last_sample)?;
+        let baseline = self.baseline.outcome?;
+        let candidate = self.candidate.outcome?;
+        let exit_sample = self.candidate.exit_source.as_ref()?;
+        let fee_schedule_versions = self
+            .schedules
+            .iter()
+            .map(|schedule| {
+                serde_json::json!({
+                    "fee_schedule_id": schedule.id,
+                    "fee_schedule_version": schedule.version,
+                    "source_event_id": schedule.source_event_id,
+                    "source_epoch": schedule.source_epoch,
+                    "source_cursor": schedule.source_cursor,
+                    "source_record_id": schedule.source_record_id,
+                    "source_timestamp_utc_ms": schedule.source_timestamp_ms
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(serde_json::json!({
+            "schema_version":1,"status":"complete","scope":"research_only_historical_what_if",
+            "learning_eligible":false,"trade_id":self.trade_id,
+            "source_event_id":self.context["event_id"],"symbol":self.symbol,"strategy":self.strategy_name,
+            "durable_path_sample_count":self.sample_count,"path_epoch":self.path_epoch,
+            "source_threshold_crossings":self.threshold_crossings,
+            "baseline_policy":{
+                "profile_id":self.context["exit_parameter_provenance"]["profile_id"],
+                "profile_version":self.context["exit_parameter_provenance"]["profile_version"],
+                "policy_profile_id":self.context["exit_parameter_provenance"]["exit_policy_profile_id"],
+                "policy_profile_version":self.context["exit_parameter_provenance"]["exit_policy_profile_version"],
+                "policy_as_of_ms":self.context["exit_parameter_provenance"]["exit_policy_as_of_ms"],
+                "parameters":self.baseline.parameters,
+                "maximum_holding_duration_days":self.baseline_maximum_hold_days,
+                "maximum_holding_duration_ms":self.baseline_maximum_hold_ms,
+                "maximum_holding_duration_specification":self.context["exit_parameter_provenance"]["strategy_parameter_specification"]["maximum_hold_days"],
+                "duration_unit":"days"
+            },
+            "candidate_policy":{"policy_id":self.candidate_policy_id,"policy_version":self.candidate_policy_version,
+                "parameters":self.candidate.parameters,
+                "maximum_holding_duration_days":self.candidate_maximum_hold_days,
+                "maximum_holding_duration_ms":self.candidate_maximum_hold_ms,
+                "duration_unit":"days"},
+            "baseline_replay_net_return_percent":baseline.net_return_percent,
+            "candidate_replay_net_return_percent":candidate.net_return_percent,
+            "candidate_minus_baseline_net_return_percent":candidate.net_return_percent-baseline.net_return_percent,
+            "candidate_exit":{"timestamp_ms":candidate.exit_timestamp_ms,"price":candidate.exit_price,
+                "reason":replay_exit_reason_name(candidate.exit_reason),
+                "quote_source_system":exit_sample["quote_source_system"],
+                "quote_source_epoch":exit_sample["quote_source_epoch"],
+                "quote_source_cursor":exit_sample["quote_source_cursor"],
+                "quote_source_record_id":exit_sample["quote_source_record_id"]},
+            "fee_schedule_versions":fee_schedule_versions,"fx_conversion_count":0,
+            "actual_exit_net_return_percent":self.context["exit_return_percent"],
+            "actual_exit_reason":self.context["reason"],"quote_currency":self.quote_currency
+        }))
+    }
+}
+
+fn durable_replay_fee_schedules(
+    attribution: &Value,
+    symbol: &str,
+    quote_currency: &str,
+) -> Option<Vec<DurableReplayFeeSchedule>> {
+    if attribution["schema_version"].as_u64() != Some(1) {
+        return None;
+    }
+    let mut schedules = Vec::new();
+    let mut identities = BTreeSet::new();
+    for schedule in attribution["fee_schedules"].as_array()? {
+        let id = schedule["fee_schedule_id"].as_str()?;
+        let version = schedule["fee_schedule_version"].as_str()?;
+        let effective_from_ms = schedule["effective_from_utc_ms"].as_u64()?;
+        let source_timestamp = schedule["source_timestamp_utc_ms"].as_u64()?;
+        let source_event_id = schedule["source_event_id"].as_str()?;
+        let maker_rate = schedule["maker_rate"].as_f64()?;
+        let taker_rate = schedule["taker_rate"].as_f64()?;
+        let source_epoch = schedule["source_epoch"].as_str()?;
+        let source_cursor = schedule["source_cursor"].as_u64()?;
+        let source_record_id = schedule["source_record_id"].as_str()?;
+        if schedule["source_system"].as_str() != Some("paper_exchange_simulator")
+            || schedule["source_schema_version"].as_str()
+                != Some("paper_exchange_financial_evidence:v1")
+            || schedule["symbol"].as_str() != Some(symbol)
+            || !valid_evidence_identifier(Some(id))
+            || !valid_evidence_identifier(Some(version))
+            || !valid_evidence_identifier(schedule["source_event_id"].as_str())
+            || !valid_evidence_identifier(Some(source_epoch))
+            || !valid_evidence_identifier(Some(source_record_id))
+            || source_cursor == 0
+            || effective_from_ms == 0
+            || source_timestamp == 0
+            || !valid_counterfactual_exit_fee_rate(taker_rate)
+            || !valid_counterfactual_exit_fee_rate(maker_rate)
+            || (!schedule["effective_to_utc_ms"].is_null()
+                && schedule["effective_to_utc_ms"].as_u64().is_none())
+        {
+            return None;
+        }
+        let effective_to_ms = schedule["effective_to_utc_ms"].as_u64();
+        if effective_to_ms.is_some_and(|to| to <= effective_from_ms)
+            || !identities.insert((id.to_owned(), version.to_owned()))
+        {
+            return None;
+        }
+        schedules.push(DurableReplayFeeSchedule {
+            id: id.to_owned(),
+            version: version.to_owned(),
+            effective_from_ms,
+            effective_to_ms,
+            maker_rate,
+            taker_rate,
+            source_event_id: source_event_id.to_owned(),
+            source_epoch: source_epoch.to_owned(),
+            source_cursor,
+            source_record_id: source_record_id.to_owned(),
+            source_timestamp_ms: source_timestamp,
+        });
+    }
+    if schedules.is_empty()
+        || schedules
+            .iter()
+            .any(|schedule| schedule.source_epoch.is_empty())
+    {
+        return None;
+    }
+    let exit_ref = &attribution["exit_fee_schedule_ref"];
+    let exit_timestamp = exit_ref["timestamp_ms"].as_u64()?;
+    let covering_exit = schedules
+        .iter()
+        .filter(|schedule| schedule.covers(exit_timestamp))
+        .collect::<Vec<_>>();
+    let exit_id = exit_ref["fee_schedule_id"].as_str()?;
+    let exit_version = exit_ref["fee_schedule_version"].as_str()?;
+    if covering_exit.len() != 1
+        || covering_exit[0].id != exit_id
+        || covering_exit[0].version != exit_version
+        || exit_ref["exit_order_class"].as_str() != Some("taker")
+        || exit_ref["applied_rate"].as_f64() != Some(covering_exit[0].taker_rate)
+        || exit_ref["fee_currency"].as_str() != Some(quote_currency)
+        || !exit_ref["fee_currency_conversion"].is_null()
+    {
+        return None;
+    }
+    Some(schedules)
+}
+
+fn validate_durable_replay_fills(
+    context: &Value,
+    quote_currency: &str,
+    schedules: &[DurableReplayFeeSchedule],
+) -> Option<()> {
+    let exit_timestamp = context["exit_timestamp_ms"].as_u64()?;
+    let entry_fills = context["entry_context"]["entry_fill_links"].as_array()?;
+    let exit_fills = context["exit_fill_evidence"]["fills"].as_array()?;
+    if entry_fills.is_empty() || exit_fills.is_empty() {
+        return None;
+    }
+    for (fills, exit) in [(entry_fills, false), (exit_fills, true)] {
+        for fill in fills {
+            let id = fill["paper_exchange_fee_schedule_id"].as_str()?;
+            let version = fill["paper_exchange_fee_schedule_version"].as_str()?;
+            let schedule = schedules
+                .iter()
+                .find(|schedule| schedule.id == id && schedule.version == version)?;
+            let event = &fill["paper_exchange_fee_schedule_evidence"];
+            let fee = fill["fee_amount"].as_f64()?;
+            let paper_fee = fill["paper_exchange_fee_amount"].as_f64()?;
+            let currency = fill["fee_currency"].as_str()?;
+            let class = fill["paper_exchange_fee_order_class"].as_str()?;
+            let rate = match class {
+                "maker" => fill["paper_exchange_fee_schedule_evidence"]["maker_rate"].as_f64()?,
+                "taker" => fill["paper_exchange_fee_schedule_evidence"]["taker_rate"].as_f64()?,
+                _ => return None,
+            };
+            let expected_rate = match class {
+                "maker" => schedule.maker_rate,
+                "taker" => schedule.taker_rate,
+                _ => return None,
+            };
+            let timestamp = if exit {
+                fill["timestamp_ms"].as_u64().unwrap_or(exit_timestamp)
+            } else {
+                fill["timestamp_ms"].as_u64()?
+            };
+            if fill["fee_known"].as_bool() != Some(true)
+                || event["fee_schedule_id"].as_str() != Some(id)
+                || event["fee_schedule_version"].as_str() != Some(version)
+                || event["source_epoch"].as_str() != Some(schedule.source_epoch.as_str())
+                || event["source_cursor"].as_u64() != Some(schedule.source_cursor)
+                || event["source_record_id"].as_str() != Some(schedule.source_record_id.as_str())
+                || fill["paper_exchange_fee_currency"].as_str() != Some(quote_currency)
+                || currency != quote_currency
+                || !fee.is_finite() || fee < 0.0
+                || !paper_fee.is_finite() || paper_fee < 0.0
+                || (fee.abs()-paper_fee).abs() > 1e-9 * fee.abs().max(paper_fee).max(1.0)
+                || !valid_counterfactual_exit_fee_rate(rate)
+                || rate != expected_rate
+                || schedule.source_timestamp_ms > timestamp
+                || (!exit && !schedule.covers(timestamp))
+                || (exit && (id != context["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"]["fee_schedule_id"].as_str()?
+                    || version != context["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"]["fee_schedule_version"].as_str()?))
+            {
+                return None;
+            }
+        }
+    }
+    Some(())
+}
+
 fn maximum_hold_days_spec(strategy_name: &str) -> Option<(f64, f64, f64, f64)> {
     let strategy = strategy::Strategy::from_name(strategy_name)?;
     let spec = strategy
@@ -1758,6 +2530,47 @@ fn valid_maximum_hold_days(strategy_name: &str, days: f64) -> bool {
     }
     let step_index = (days - min) / step;
     (step_index - step_index.round()).abs() <= 1e-7
+}
+
+fn captured_maximum_hold_days_spec(context: &Value) -> Option<(f64, f64, f64, f64)> {
+    let specification = &context["exit_parameter_provenance"]["strategy_parameter_specification"];
+    let specification = &specification["maximum_hold_days"];
+    if context["exit_parameter_provenance"]["strategy_parameter_specification"]["schema_version"]
+        .as_u64()
+        != Some(1)
+        || specification["key"].as_str() != Some("maximum_hold_days")
+        || specification["unit"].as_str() != Some("days")
+    {
+        return None;
+    }
+    let default = specification["default"].as_f64()?;
+    let minimum = specification["min"].as_f64()?;
+    let maximum = specification["max"].as_f64()?;
+    let step = specification["step"].as_f64()?;
+    let step_count = (maximum - minimum) / step;
+    let default_step = (default - minimum) / step;
+    (default.is_finite()
+        && minimum.is_finite()
+        && maximum.is_finite()
+        && step.is_finite()
+        && minimum >= 0.0
+        && minimum <= default
+        && default <= maximum
+        && minimum < maximum
+        && step > 0.0
+        && step_count.is_finite()
+        && (step_count - step_count.round()).abs() <= 1e-7
+        && default_step.is_finite()
+        && (default_step - default_step.round()).abs() <= 1e-7)
+        .then_some((default, minimum, maximum, step))
+}
+
+fn valid_hold_days_in_captured_spec(days: f64, minimum: f64, maximum: f64, step: f64) -> bool {
+    if !days.is_finite() || days < minimum || days > maximum || !step.is_finite() || step <= 0.0 {
+        return false;
+    }
+    let step_index = (days - minimum) / step;
+    step_index.is_finite() && (step_index - step_index.round()).abs() <= 1e-7
 }
 
 fn hold_duration_days_to_ms(days: f64) -> Option<u64> {
@@ -3531,14 +4344,19 @@ mod tests {
             serde_json::json!(schedule_version);
         observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_order_class"] =
             serde_json::json!("taker");
+        observation["entry_context"]["entry_fill_links"][0]["paper_exchange_fee_schedule_evidence"] =
+            fee_schedule_event.clone();
         observation["exit_fill_evidence"]["fills"] = serde_json::json!([{
             "fee_amount":0.01,
+            "fee_known":true,
+            "timestamp_ms":exit_timestamp,
             "fee_currency":"USDT",
             "paper_exchange_fee_amount":0.01,
             "paper_exchange_fee_currency":"USDT",
             "paper_exchange_fee_schedule_id":schedule_id,
             "paper_exchange_fee_schedule_version":schedule_version,
-            "paper_exchange_fee_order_class":"taker"
+            "paper_exchange_fee_order_class":"taker",
+            "paper_exchange_fee_schedule_evidence":fee_schedule_event
         }]);
         observation["counterfactual_exit_fee_attribution"] = serde_json::json!({
             "schema_version":1,
@@ -3569,6 +4387,316 @@ mod tests {
             },
             "quote_observations":quote_observations
         });
+    }
+
+    fn durable_what_if_fixture() -> (Value, Value, Vec<Value>, ProfitProtectionParameters) {
+        let mut observation = synthetic_observations(PathCase::TrainingAndHoldoutImprove).remove(0);
+        let exit_timestamp = observation["exit_timestamp_ms"].as_u64().unwrap();
+        let entry_timestamp = exit_timestamp - 2;
+        observation["trade_id"] = serde_json::json!("fixture-trade-v1");
+        observation["entry_context"]["timestamp_ms"] = serde_json::json!(entry_timestamp);
+        observation["entry_context"]["entry_fill_links"][0]["timestamp_ms"] =
+            serde_json::json!(entry_timestamp);
+        observation["entry_context"]["strategy_decision"]["strategy_parameters"] =
+            observation["strategy_decision"]["strategy_parameters"].clone();
+        observation["strategy"] = serde_json::json!("rsi2-oversold-rebound");
+        observation["entry_context"]["strategy_decision"]["strategy_parameters"]["maximum_hold_days"] =
+            serde_json::json!(5.0);
+        observation["horizon_ms"] = serde_json::json!(30_000);
+        observation["observed_at_ms"] = serde_json::json!(exit_timestamp + 30_000);
+        for (index, quote) in observation["price_path"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            quote["timestamp"] = serde_json::json!(exit_timestamp + index as u64 * 1_000);
+        }
+        observation["exit_parameter_provenance"] = serde_json::json!({
+            "schema_version":1,
+            "profile_id":"synthetic-profile-v1",
+            "profile_version":1,
+            "exit_policy_profile_id":"synthetic-exit-policy-v1",
+            "exit_policy_profile_version":1,
+            "exit_policy_as_of_ms":exit_timestamp-10,
+            "maximum_holding_duration":{
+                "source":"strategy_profile","selected_days":5.0,
+                "selected_ms":432000000,"effective_ms":432000000
+            },
+            "strategy_parameter_specification":{
+                "schema_version":1,
+                "maximum_hold_days":{
+                    "key":"maximum_hold_days","default":5.0,"min":1.0,
+                    "max":15.0,"step":1.0,"unit":"days"
+                }
+            }
+        });
+        observation["pre_exit_price_path_evidence"]["threshold_crossings"] =
+            serde_json::Value::Array(Vec::new());
+        add_synthetic_fee_schedule_attribution(&mut observation);
+        let pre = observation["pre_exit_price_path"].as_array().unwrap()[0].clone();
+        observation["pre_exit_price_path_evidence"]["threshold_crossings"] = serde_json::json!([{
+            "threshold_type":"stop_loss","timestamp_ms":pre["timestamp"],
+            "position_path_epoch":pre["epoch"],
+            "quote_source_system":pre["quote_source_system"],
+            "quote_source_epoch":pre["quote_source_epoch"],
+            "quote_source_cursor":pre["quote_source_cursor"],
+            "quote_source_record_id":pre["quote_source_record_id"],
+            "crossing_evidence_status":"observed_but_fee_schedule_unverified"
+        }]);
+        let sample_rows = observation["pre_exit_price_path"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(observation["price_path"].as_array().unwrap())
+            .cloned()
+            .collect::<Vec<_>>();
+        let path_epoch = sample_rows[0]["epoch"].as_str().unwrap();
+        let metadata = serde_json::json!({
+            "trade_id":"fixture-trade-v1","history_complete":true,"complete":true,
+            "segment_count":1,"path_epoch":path_epoch,"sample_count":sample_rows.len()
+        });
+        let candidate = ProfitProtectionParameters {
+            stop_loss_percent: 0.6,
+            take_profit_percent: 0.9,
+            activation_percent: 0.15,
+            giveback_percent: 0.10,
+            minimum_lock_percent: 0.05,
+            trailing_activation_percent: None,
+            trailing_distance_percent: None,
+            breakeven_activation_percent: None,
+        };
+        let mut context = observation;
+        context["durable_context_schema_version"] = serde_json::Value::from(1);
+        context
+            .as_object_mut()
+            .unwrap()
+            .remove("pre_exit_price_path");
+        context.as_object_mut().unwrap().remove("price_path");
+        context["counterfactual_exit_fee_attribution"]
+            .as_object_mut()
+            .unwrap()
+            .remove("quote_observations");
+        (context, metadata, sample_rows, candidate)
+    }
+
+    fn run_durable_what_if(
+        context: &Value,
+        metadata: &Value,
+        samples: &[Value],
+        candidate: ProfitProtectionParameters,
+    ) -> Option<Value> {
+        let mut replay =
+            DurableTradeWhatIfReplay::new(context, metadata, "fixture-candidate", "v1", candidate)?;
+        for sample in samples {
+            if !replay.push_sample(sample) {
+                return None;
+            }
+        }
+        replay.finish()
+    }
+
+    #[test]
+    fn durable_what_if_replay_is_deterministic_and_fails_closed_on_missing_lineage() {
+        let (context, metadata, samples, candidate) = durable_what_if_fixture();
+        let first = run_durable_what_if(&context, &metadata, &samples, candidate).unwrap();
+        let second = run_durable_what_if(&context, &metadata, &samples, candidate).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first["status"], "complete");
+        assert_eq!(first["learning_eligible"], false);
+        assert_eq!(first["durable_path_sample_count"], samples.len());
+        assert_eq!(
+            first["source_threshold_crossings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(first["candidate_exit"]["quote_source_record_id"].is_string());
+
+        let mut incomplete = metadata.clone();
+        incomplete["history_complete"] = Value::Bool(false);
+        assert!(
+            DurableTradeWhatIfReplay::new(
+                &context,
+                &incomplete,
+                "fixture-candidate",
+                "v1",
+                candidate,
+            )
+            .is_none()
+        );
+        let mut missing_fee = context.clone();
+        missing_fee["counterfactual_exit_fee_attribution"]["fee_schedules"] =
+            Value::Array(Vec::new());
+        assert!(run_durable_what_if(&missing_fee, &metadata, &samples, candidate).is_none());
+        let mut missing_fx = context.clone();
+        missing_fx["counterfactual_exit_fee_attribution"]["exit_fee_schedule_ref"]["fee_currency"] =
+            serde_json::json!("BTC");
+        assert!(run_durable_what_if(&missing_fx, &metadata, &samples, candidate).is_none());
+        let mut missing_profile = context.clone();
+        missing_profile["exit_parameter_provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("profile_version");
+        assert!(run_durable_what_if(&missing_profile, &metadata, &samples, candidate).is_none());
+        let mut bad_threshold = context.clone();
+        bad_threshold["pre_exit_price_path_evidence"]["threshold_crossings"][0]["quote_source_record_id"] =
+            serde_json::json!("wrong-source-row");
+        assert!(run_durable_what_if(&bad_threshold, &metadata, &samples, candidate).is_none());
+    }
+
+    #[test]
+    fn durable_what_if_maximum_hold_uses_captured_bounds_and_preserves_baseline() {
+        let (context, metadata, samples, candidate) = durable_what_if_fixture();
+        let baseline_duration_ms = 5 * 86_400_000_u64;
+        for side in ["buy", "sell"] {
+            let mut side_context = context.clone();
+            side_context["side"] = serde_json::json!(side);
+            let mut replay = DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+                &side_context,
+                &metadata,
+                "fixture-candidate",
+                "v1",
+                candidate,
+                Some(7.0),
+            )
+            .unwrap();
+            for sample in &samples {
+                assert!(replay.push_sample(sample));
+            }
+            let result = replay.finish().unwrap();
+            assert_eq!(result["learning_eligible"], false);
+            assert_eq!(
+                result["baseline_policy"]["maximum_holding_duration_days"],
+                5.0
+            );
+            assert_eq!(
+                result["baseline_policy"]["maximum_holding_duration_ms"],
+                baseline_duration_ms
+            );
+            assert_eq!(
+                result["candidate_policy"]["maximum_holding_duration_days"],
+                7.0
+            );
+            assert_eq!(
+                result["candidate_policy"]["maximum_holding_duration_ms"],
+                7 * 86_400_000_u64
+            );
+            assert_eq!(result["candidate_policy"]["duration_unit"], "days");
+        }
+
+        let mut unchanged_baseline = context.clone();
+        unchanged_baseline["exit_parameter_provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("strategy_parameter_specification");
+        let result =
+            run_durable_what_if(&unchanged_baseline, &metadata, &samples, candidate).unwrap();
+        assert_eq!(
+            result["baseline_policy"]["maximum_holding_duration_ms"],
+            baseline_duration_ms
+        );
+        assert_eq!(
+            result["candidate_policy"]["maximum_holding_duration_ms"],
+            baseline_duration_ms
+        );
+
+        let mut effective_policy = context.clone();
+        effective_policy["exit_parameter_provenance"]["maximum_holding_duration"]["effective_ms"] =
+            serde_json::json!(3 * 86_400_000_u64);
+        let result =
+            run_durable_what_if(&effective_policy, &metadata, &samples, candidate).unwrap();
+        assert_eq!(
+            result["baseline_policy"]["maximum_holding_duration_ms"],
+            3 * 86_400_000_u64
+        );
+        assert_eq!(
+            result["baseline_policy"]["maximum_holding_duration_days"],
+            3.0
+        );
+
+        for invalid_days in [Some(16.0), Some(1.5)] {
+            assert!(
+                DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+                    &context,
+                    &metadata,
+                    "fixture-candidate",
+                    "v1",
+                    candidate,
+                    invalid_days,
+                )
+                .is_none()
+            );
+        }
+        let mut missing_spec = context.clone();
+        missing_spec["exit_parameter_provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("strategy_parameter_specification");
+        assert!(
+            DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+                &missing_spec,
+                &metadata,
+                "fixture-candidate",
+                "v1",
+                candidate,
+                Some(7.0),
+            )
+            .is_none()
+        );
+        let mut invalid_spec = context.clone();
+        invalid_spec["exit_parameter_provenance"]["strategy_parameter_specification"]["maximum_hold_days"]
+            ["step"] = serde_json::json!(0.0);
+        assert!(
+            DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+                &invalid_spec,
+                &metadata,
+                "fixture-candidate",
+                "v1",
+                candidate,
+                Some(7.0),
+            )
+            .is_none()
+        );
+        let mut invalid_range = context.clone();
+        invalid_range["exit_parameter_provenance"]["strategy_parameter_specification"]["maximum_hold_days"]
+            ["max"] = serde_json::json!(14.5);
+        assert!(
+            DurableTradeWhatIfReplay::new_with_maximum_holding_duration(
+                &invalid_range,
+                &metadata,
+                "fixture-candidate",
+                "v1",
+                candidate,
+                Some(7.0),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn durable_what_if_streams_paths_longer_than_the_memory_window() {
+        let (context, mut metadata, mut samples, candidate) = durable_what_if_fixture();
+        let exit_timestamp = context["exit_timestamp_ms"].as_u64().unwrap();
+        let observed_at = exit_timestamp + 4_998_000;
+        let mut quote = samples.last().unwrap().clone();
+        for sequence in (samples.len() as u64 + 1)..=5_000 {
+            let timestamp = exit_timestamp + (sequence - 2) * 1_000;
+            quote["timestamp"] = serde_json::json!(timestamp);
+            quote["sequence"] = serde_json::json!(sequence);
+            quote["source_updated_at_ms"] = serde_json::json!(timestamp - 1);
+            quote["quote_source_cursor"] = serde_json::json!(sequence);
+            quote["quote_source_record_id"] = serde_json::json!(format!("fixture-long-{sequence}"));
+            samples.push(quote.clone());
+        }
+        let mut long_context = context.clone();
+        long_context["horizon_ms"] = serde_json::json!(4_998_000);
+        long_context["observed_at_ms"] = serde_json::json!(observed_at);
+        metadata["sample_count"] = serde_json::json!(samples.len());
+        let result = run_durable_what_if(&long_context, &metadata, &samples, candidate).unwrap();
+        assert_eq!(result["durable_path_sample_count"], 5_000);
+        assert_eq!(result["learning_eligible"], false);
     }
 
     #[test]

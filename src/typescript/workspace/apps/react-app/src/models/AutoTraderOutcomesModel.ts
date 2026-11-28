@@ -69,6 +69,8 @@ type RawPricePathEvidence = {
   total_sample_count?: number | null;
   source_fresh_sample_count?: number | null;
   missing_coverage?: string[];
+  threshold_crossings?: unknown[];
+  threshold_crossing_evidence_status?: string | null;
 };
 
 export type ExitParameterProvenance = {
@@ -154,6 +156,27 @@ export type ExecutablePricePathEvidence = {
   totalSampleCount?: number;
   freshSampleCount?: number;
   missingCoverage?: string[];
+  thresholdCrossingEvidenceStatus?: string;
+  thresholdCrossings?: ExecutableThresholdCrossing[];
+};
+
+export type ExecutableThresholdCrossing = {
+  thresholdType: string;
+  thresholdSource?: string;
+  thresholdPercent?: number;
+  observedNetReturnPercent?: number;
+  thresholdComparator?: string;
+  timestampMs: number;
+  positionPathEpoch?: string;
+  quoteSide?: string;
+  closeMark?: number;
+  quoteSourceSystem?: string;
+  quoteSourceEpoch?: string;
+  quoteSourceCursor?: number;
+  quoteSourceRecordId?: string;
+  feeRate?: number;
+  feeRateAttribution?: string;
+  crossingEvidenceStatus?: string;
 };
 
 export function projectInitialRiskEvidence(
@@ -613,7 +636,80 @@ function executablePathFromAudit(
     missingCoverage: evidence.missing_coverage?.filter(
       (reason): reason is string => typeof reason === 'string',
     ),
+    thresholdCrossingEvidenceStatus:
+      typeof evidence.threshold_crossing_evidence_status === 'string'
+        ? evidence.threshold_crossing_evidence_status
+        : undefined,
+    thresholdCrossings: projectExecutableThresholdCrossings(
+      evidence.threshold_crossings,
+    ),
   };
+}
+
+export function projectExecutableThresholdCrossings(
+  value: unknown,
+): ExecutableThresholdCrossing[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ExecutableThresholdCrossing[] => {
+    if (item === null || typeof item !== 'object' || Array.isArray(item))
+      return [];
+    const crossing = item as Record<string, unknown>;
+    const thresholdType =
+      typeof crossing.threshold_type === 'string'
+        ? crossing.threshold_type
+        : undefined;
+    const timestampMs = finiteAuditNumber(crossing.timestamp_ms);
+    if (!thresholdType || timestampMs === undefined) return [];
+    return [
+      {
+        thresholdType,
+        thresholdSource:
+          typeof crossing.threshold_source === 'string'
+            ? crossing.threshold_source
+            : undefined,
+        thresholdPercent: finiteAuditNumber(crossing.threshold_percent),
+        observedNetReturnPercent: finiteAuditNumber(
+          crossing.observed_net_return_percent,
+        ),
+        thresholdComparator:
+          typeof crossing.threshold_comparator === 'string'
+            ? crossing.threshold_comparator
+            : undefined,
+        timestampMs,
+        positionPathEpoch:
+          typeof crossing.position_path_epoch === 'string'
+            ? crossing.position_path_epoch
+            : undefined,
+        quoteSide:
+          typeof crossing.quote_side === 'string'
+            ? crossing.quote_side
+            : undefined,
+        closeMark: finiteAuditNumber(crossing.close_mark),
+        quoteSourceSystem:
+          typeof crossing.quote_source_system === 'string'
+            ? crossing.quote_source_system
+            : undefined,
+        quoteSourceEpoch:
+          typeof crossing.quote_source_epoch === 'string'
+            ? crossing.quote_source_epoch
+            : undefined,
+        quoteSourceCursor: finiteAuditNumber(crossing.quote_source_cursor),
+        quoteSourceRecordId:
+          typeof crossing.quote_source_record_id === 'string'
+            ? crossing.quote_source_record_id
+            : undefined,
+        feeRate: finiteAuditNumber(crossing.fee_rate),
+        feeRateAttribution:
+          typeof crossing.fee_rate_attribution === 'string'
+            ? crossing.fee_rate_attribution
+            : undefined,
+        crossingEvidenceStatus:
+          typeof crossing.crossing_evidence_status === 'string'
+            ? crossing.crossing_evidence_status
+            : undefined,
+      },
+    ];
+  });
 }
 
 function finiteAuditNumber(value: unknown): number | undefined {

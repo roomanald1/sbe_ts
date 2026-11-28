@@ -1,5 +1,6 @@
 export type DashboardWidgetType = string;
 export type DashboardWidget<TType extends string = string> = {
+  [key: string]: unknown;
   id: string;
   type: TType;
   symbol: string;
@@ -10,6 +11,7 @@ export type DashboardWidget<TType extends string = string> = {
   collapsed: boolean;
 };
 export type SavedDashboardLayout<TType extends string = string> = {
+  [key: string]: unknown;
   id: string;
   name: string;
   widgets: DashboardWidget<TType>[];

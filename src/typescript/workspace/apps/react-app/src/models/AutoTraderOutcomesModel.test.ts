@@ -5,6 +5,7 @@ import {
   AutoTraderOutcomesModel,
   mergeLatestStrategyDecisions,
   operationalPositionForTrade,
+  projectExecutableThresholdCrossings,
   parseLearningSummary,
   projectInitialRiskEvidence,
   projectOpenPositionLifecycleIdentity,
@@ -19,6 +20,33 @@ import { buildLegacyLedgerOutcomes } from './legacy_ledger_outcomes';
 import type { PositionTrade } from './PositionTypes';
 
 describe('AutoTraderOutcomesModel', () => {
+  it('projects source-backed threshold crossing provenance without fee validation claims', () => {
+    const crossings = projectExecutableThresholdCrossings([
+      {
+        threshold_type: 'take_profit',
+        timestamp_ms: 2_000,
+        observed_net_return_percent: 1.2,
+        quote_source_record_id: 'quote-2',
+        fee_rate_attribution:
+          'local_estimate_unverified_against_effective_paper_exchange_schedule',
+      },
+      {
+        threshold_type: 'stop_loss',
+        timestamp_ms: 1_000,
+        quote_side: 'bid',
+        close_mark: 99.5,
+      },
+      { threshold_type: 'invalid_without_timestamp' },
+    ]);
+    assert.equal(crossings.length, 2);
+    assert.equal(crossings[0].timestampMs, 2_000);
+    assert.equal(
+      crossings[0].feeRateAttribution,
+      'local_estimate_unverified_against_effective_paper_exchange_schedule',
+    );
+    assert.equal(crossings[1].closeMark, 99.5);
+  });
+
   it('joins operational valuation only by one exact canonical trade identity', () => {
     const exact = {
       symbol: 'BTC-USDT',

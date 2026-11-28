@@ -1306,7 +1306,6 @@ export function AutoTraderStrategyPerformanceWidget({
       aria-label="Strategy performance"
     >
       <div className="v35-strategy-performance__heading">
-        <strong>Strategy Performance</strong>
         <OperatorStatus tone={state.loading ? 'warning' : 'neutral'}>
           {state.loading
             ? 'Refreshing outcomes'

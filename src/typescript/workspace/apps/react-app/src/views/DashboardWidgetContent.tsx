@@ -1,7 +1,10 @@
 import { memo, useCallback, type ReactNode } from 'react';
 import type { Connection, ConnectionState, FeedSource } from '../connection';
 import type { PriceChanges } from '../price_change_data';
-import type { DashboardWidget } from '@workspace/ui-platform';
+import {
+  UnavailableDashboardWidget,
+  type DashboardWidget,
+} from '@workspace/ui-platform';
 import { SymbolPriceGrid } from './SymbolPriceGrid';
 import { SymbolPriceTable } from './SymbolPriceTable';
 import { PriceChangeChart } from './PriceChangeChart';
@@ -244,6 +247,8 @@ function DashboardWidgetContentComponent(props: Props): ReactNode {
           message="Order book depth is available with the OKX feed."
         />
       );
+    default:
+      return <UnavailableDashboardWidget type={widget.type} />;
   }
 }
 
